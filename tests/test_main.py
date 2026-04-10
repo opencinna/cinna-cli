@@ -92,11 +92,12 @@ def test_credentials_command(mock_load, mock_find, mock_client_cls, mock_creds, 
     mock_creds.assert_called_once()
 
 
+@patch("cinna.main.start_container")
 @patch("cinna.main.build_container")
 @patch("cinna.main.destroy_container")
 @patch("cinna.main.find_workspace_root")
 @patch("cinna.main.load_config")
-def test_rebuild_command(mock_load, mock_find, mock_destroy, mock_build, runner, workspace_root, sample_config):
+def test_rebuild_command(mock_load, mock_find, mock_destroy, mock_build, mock_start, runner, workspace_root, sample_config):
     mock_find.return_value = workspace_root
     mock_load.return_value = sample_config
 
@@ -104,6 +105,7 @@ def test_rebuild_command(mock_load, mock_find, mock_destroy, mock_build, runner,
     assert result.exit_code == 0
     mock_destroy.assert_called_once()
     mock_build.assert_called_once()
+    mock_start.assert_called_once()
 
 
 @patch("cinna.main.start_container")

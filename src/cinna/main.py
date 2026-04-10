@@ -157,13 +157,16 @@ def rebuild(no_cache: bool):
     root = find_workspace_root()
     load_config(root)  # validate config exists
 
-    console.step(1, 2, "Removing container...")
+    console.step(1, 3, "Removing container...")
     destroy_container(root)
 
-    console.step(2, 2, "Building image...")
+    console.step(2, 3, "Building image...")
     build_container(root, no_cache=no_cache)
 
-    console.status("Image rebuilt. Start with 'cinna dev' or 'cinna env-up'.")
+    console.step(3, 3, "Starting container and installing workspace packages...")
+    start_container(root)
+
+    console.status("Rebuild complete. Container is running.")
 
 
 @cli.command(name="env-up")

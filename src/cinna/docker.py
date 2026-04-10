@@ -136,7 +136,7 @@ def build_container(workspace_root: Path, no_cache: bool = False) -> None:
         raise click.Abort()
 
 
-def start_container(workspace_root: Path) -> None:
+def start_container(workspace_root: Path, install_packages: bool = True) -> None:
     """Create and start the container via docker compose up -d."""
     ensure_dev_compose_override(workspace_root)
     build = build_dir(workspace_root)
@@ -146,6 +146,8 @@ def start_container(workspace_root: Path) -> None:
         capture_output=True,
         check=True,
     )
+    if install_packages:
+        install_workspace_packages(workspace_root)
 
 
 def destroy_container(workspace_root: Path) -> None:
@@ -217,6 +219,88 @@ def is_container_running(workspace_root: Path) -> bool:
         text=True,
     )
     return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def install_workspace_packages(workspace_root: Path) -> None:
+    """Install system and Python packages declared in the workspace.
+
+    Reads workspace_system_packages.txt and workspace_requirements.txt from the
+    mounted workspace and installs them inside the running container.
+    """
+    from cinna.config import workspace_dir
+
+    ws = workspace_dir(workspace_root)
+    build = build_dir(workspace_root)
+
+    # System packages (apt)
+    sys_pkg_file = ws / "workspace_system_packages.txt"
+    if sys_pkg_file.exists():
+        packages = _parse_package_list(sys_pkg_file)
+        if packages:
+            logger.info("Installing system packages: %s", packages)
+            with console.spinner("Installing system packages..."):
+                result = subprocess.run(
+                    [
+                        "docker", "compose", "exec", "-T", "--",
+                        *_first_service(build),
+                        "sh", "-c",
+                        "apt-get update -qq && apt-get install -y -qq " + " ".join(packages),
+                    ],
+                    cwd=str(build),
+                    capture_output=True,
+                    text=True,
+                )
+            if result.returncode != 0:
+                console.warn("System package installation failed:")
+                console.console.print(result.stderr)
+            else:
+                console.status(f"Installed system packages: {', '.join(packages)}")
+
+    # Python packages (pip)
+    req_file = ws / "workspace_requirements.txt"
+    if req_file.exists():
+        packages = _parse_package_list(req_file)
+        if packages:
+            logger.info("Installing Python packages from workspace_requirements.txt")
+            with console.spinner("Installing Python packages..."):
+                result = subprocess.run(
+                    [
+                        "docker", "compose", "exec", "-T", "--",
+                        *_first_service(build),
+                        "uv", "pip", "install", "-q", "-r", "/app/workspace/workspace_requirements.txt",
+                    ],
+                    cwd=str(build),
+                    capture_output=True,
+                    text=True,
+                )
+            if result.returncode != 0:
+                console.warn("Python package installation failed:")
+                console.console.print(result.stderr)
+            else:
+                console.status("Installed Python packages from workspace_requirements.txt")
+
+
+def _parse_package_list(path: Path) -> list[str]:
+    """Parse a package list file, ignoring blank lines and comments."""
+    lines = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            lines.append(line)
+    return lines
+
+
+def _first_service(build_path: Path) -> list[str]:
+    """Return the first docker compose service name as a list."""
+    result = subprocess.run(
+        ["docker", "compose", "config", "--services"],
+        cwd=str(build_path),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return [result.stdout.strip().splitlines()[0]]
+    return []
 
 
 def exec_in_container(
