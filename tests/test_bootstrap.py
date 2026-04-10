@@ -41,6 +41,20 @@ def test_parse_url_with_port():
     assert token == "my-token-123"
 
 
+def test_parse_url_with_api_prefix():
+    raw = "https://app.example.com/api/cli-setup/tok_abc123"
+    url, token = parse_setup_input(raw)
+    assert url == "https://app.example.com/api"
+    assert token == "tok_abc123"
+
+
+def test_parse_curl_with_api_prefix():
+    raw = "curl -sL https://app.example.com/api/cli-setup/tok_abc123 | python3 -"
+    url, token = parse_setup_input(raw)
+    assert url == "https://app.example.com/api"
+    assert token == "tok_abc123"
+
+
 def test_parse_raw_token_with_env(monkeypatch):
     monkeypatch.setenv("CINNA_PLATFORM_URL", "https://app.example.com")
     url, token = parse_setup_input("tok_abc123")

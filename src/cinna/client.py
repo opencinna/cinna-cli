@@ -67,9 +67,9 @@ class PlatformClient:
     def exchange_setup_token(
         self, token: str, machine_name: str, machine_info: str
     ) -> dict:
-        """POST /cli-setup/{token} — exchange setup token for bootstrap payload."""
+        """POST /api/cli-setup/{token} — exchange setup token for bootstrap payload."""
         response = httpx.post(
-            f"{self.base_url}/cli-setup/{token}",
+            f"{self.base_url}/api/cli-setup/{token}",
             json={"machine_name": machine_name, "machine_info": machine_info},
             timeout=DEFAULT_TIMEOUT,
         )

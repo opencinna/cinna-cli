@@ -57,7 +57,9 @@ def parse_setup_input(raw_input: str) -> tuple[str, str]:
         path_parts = parsed.path.rstrip("/").split("/cli-setup/")
         if len(path_parts) == 2 and path_parts[1]:
             token = path_parts[1]
-            platform_url = f"{parsed.scheme}://{parsed.netloc}"
+            # Preserve any path prefix before /cli-setup/ (e.g. /api)
+            prefix = path_parts[0]  # e.g. "/api" or ""
+            platform_url = f"{parsed.scheme}://{parsed.netloc}{prefix}"
             return platform_url, token
 
     # If input looks like a URL but we couldn't parse it, fail clearly

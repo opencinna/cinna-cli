@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import signal
 import time
 from collections import deque
 from datetime import datetime
@@ -115,6 +116,8 @@ def run_dev_loop(
     except KeyboardInterrupt:
         pass
     finally:
+        # Ignore SIGINT during cleanup so docker compose down can finish
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         client.close()
         cons.console.print()
         cons.console.print("Removing container...")
