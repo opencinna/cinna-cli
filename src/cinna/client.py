@@ -111,15 +111,6 @@ class PlatformClient:
         )
         return self._handle_response(response).json()
 
-    # --- Credentials ---
-
-    def get_credentials(self, agent_id: str) -> dict:
-        """GET /api/v1/cli/agents/{id}/credentials — pull credentials."""
-        response = self._client.get(
-            f"/api/v1/cli/agents/{agent_id}/credentials",
-        )
-        return self._handle_response(response).json()
-
     # --- Building Context ---
 
     def get_building_context(self, agent_id: str) -> dict:

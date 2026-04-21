@@ -76,14 +76,14 @@ The agent directory name is normalized to lowercase with dashes (e.g., "HR Manag
 
 ### `cinna dev [--interval N]`
 
-Start dev mode: starts the Docker container, runs a live TUI that bidirectionally syncs local and remote, and **removes the container when you press Ctrl+C**. Polls every N seconds (default: 5), pushes local changes and pulls remote changes using 3-way manifest diffing. Credentials are also monitored each cycle and pulled when changed. Conflicts are detected and skipped.
+Start dev mode: starts the Docker container, runs a live TUI that bidirectionally syncs local and remote, and **removes the container when you press Ctrl+C**. Polls every N seconds (default: 5), pushes local changes and pulls remote changes (including credentials) using 3-way manifest diffing. Credentials are never pushed (backend-managed) but are pulled when changed on remote. Conflicts are detected and skipped.
 
 ```bash
 cinna dev                # start container, watch and sync every 5s
 cinna dev --interval 10  # sync every 10s
 ```
 
-The TUI shows agent info, Docker container details (name, ID, status), sync stats (total pushed/pulled/conflicts), uptime, and a rolling activity log of the last 5 sync events (including credential updates).
+The TUI shows agent info, Docker container details (name, ID, status), sync stats (total pushed/pulled/conflicts), uptime, and a rolling activity log of the last 5 sync events.
 
 Containers are stateless — they hold no data that isn't in `workspace/` — so removing them on exit prevents orphaned background processes.
 
@@ -221,7 +221,7 @@ This prevents orphaned background containers. If you need a long-running contain
 - If the same file changed on both sides, it is flagged as a **conflict**
 - Conflicted files are skipped by default — use `--force` to overwrite
 
-The sync excludes `__pycache__`, `.pyc` files, `.DS_Store`, and the `credentials/` directory from file-level diffing. Credentials are managed separately — `cinna pull` and `cinna credentials` fetch them from the platform API, and `cinna dev` monitors them each sync cycle alongside regular files.
+Push excludes `__pycache__`, `.pyc` files, `.DS_Store`, and the `credentials/` directory (credentials are backend-managed and never pushed). Pull includes all files including `credentials/`, so credential changes on the remote are detected and pulled through the normal sync mechanism — no separate API endpoint is needed. Files that exist only locally (not on remote) are treated as local-only and do not trigger repeated pulls.
 
 ## Development
 

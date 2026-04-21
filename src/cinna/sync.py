@@ -15,12 +15,19 @@ from cinna import console
 
 logger = logging.getLogger("cinna.sync")
 
-# Files/dirs excluded from sync
-DEFAULT_EXCLUDES = {
+# Files/dirs excluded from push (credentials are backend-managed)
+PUSH_EXCLUDES = {
     "__pycache__",
     "*.pyc",
     ".DS_Store",
     "credentials/",
+}
+
+# Files/dirs excluded from pull (credentials sync from container)
+PULL_EXCLUDES = {
+    "__pycache__",
+    "*.pyc",
+    ".DS_Store",
 }
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
@@ -51,7 +58,7 @@ def compute_local_manifest(workspace: Path, excludes: set[str] | None = None) ->
     - Symlinks (security)
     """
     if excludes is None:
-        excludes = DEFAULT_EXCLUDES
+        excludes = PUSH_EXCLUDES
 
     manifest = {}
     if not workspace.is_dir():
@@ -235,7 +242,7 @@ def push_workspace(
 ) -> None:
     """Push local workspace changes to remote environment."""
     workspace = workspace_dir(workspace_root)
-    local_manifest = compute_local_manifest(workspace)
+    local_manifest = compute_local_manifest(workspace, excludes=PUSH_EXCLUDES)
     remote_manifest = client.get_workspace_manifest(config.agent_id).get("files", {})
     last_manifest = load_manifest(workspace_root)
 
@@ -274,10 +281,10 @@ def pull_workspace(
     workspace_root: Path,
     force: bool = False,
 ) -> None:
-    """Pull remote workspace changes to local."""
+    """Pull remote workspace changes to local, including credentials folder."""
     workspace = workspace_dir(workspace_root)
     remote_manifest = client.get_workspace_manifest(config.agent_id).get("files", {})
-    local_manifest = compute_local_manifest(workspace)
+    local_manifest = compute_local_manifest(workspace, excludes=PULL_EXCLUDES)
     last_manifest = load_manifest(workspace_root)
 
     local_changed, remote_changed, conflicts = diff_manifests(
@@ -306,8 +313,7 @@ def pull_workspace(
     # Ensure required dirs exist (files/ may be empty and absent from tarball)
     ensure_workspace_dirs(workspace)
 
-    # Always refresh credentials and building context on pull
-    pull_credentials(client, config, workspace_root)
+    # Always refresh building context on pull
     refresh_building_context(client, config, workspace_root)
 
     # Update manifest
@@ -321,23 +327,18 @@ def pull_credentials(
     workspace_root: Path,
     quiet: bool = False,
 ) -> None:
-    """Pull credentials from platform and write to workspace/credentials/."""
-    creds_data = client.get_credentials(config.agent_id)
-    creds_dir = workspace_dir(workspace_root) / "credentials"
-    creds_dir.mkdir(parents=True, exist_ok=True)
+    """Pull the credentials folder from the remote workspace."""
+    workspace = workspace_dir(workspace_root)
 
-    # Write credentials.json
-    creds_file = creds_dir / "credentials.json"
-    creds_json = creds_data.get("credentials", creds_data.get("credentials_json", {}))
-    creds_file.write_text(json.dumps(creds_json, indent=2))
+    remote_manifest = client.get_workspace_manifest(config.agent_id).get("files", {})
+    cred_files = [f for f in remote_manifest if f.startswith("credentials/")]
 
-    # Write README.md (redacted documentation)
-    readme = creds_data.get("credentials_readme", "")
-    if readme:
-        (creds_dir / "README.md").write_text(readme)
+    if cred_files:
+        tarball = client.download_workspace(config.agent_id)
+        extract_workspace_tarball(tarball, workspace, only_files=set(cred_files))
 
     if not quiet:
-        console.status("Credentials updated.")
+        console.status(f"Credentials updated ({len(cred_files)} files).")
 
 
 def refresh_building_context(

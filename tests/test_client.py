@@ -56,15 +56,6 @@ def test_get_workspace_manifest(client):
 
 
 @respx.mock
-def test_get_credentials(client):
-    respx.get("https://platform.example.com/api/v1/cli/agents/agent-123/credentials").respond(
-        200, json={"credentials_json": {"key": "val"}}
-    )
-    result = client.get_credentials("agent-123")
-    assert result["credentials_json"]["key"] == "val"
-
-
-@respx.mock
 def test_get_building_context(client):
     respx.get("https://platform.example.com/api/v1/cli/agents/agent-123/building-context").respond(
         200, json={"building_prompt": "You are an agent."}
@@ -84,11 +75,11 @@ def test_search_knowledge(client):
 
 @respx.mock
 def test_401_raises_auth_error(client):
-    respx.get("https://platform.example.com/api/v1/cli/agents/agent-123/credentials").respond(
+    respx.get("https://platform.example.com/api/v1/cli/agents/agent-123/building-context").respond(
         401, json={"detail": "Token revoked"}
     )
     with pytest.raises(AuthenticationError):
-        client.get_credentials("agent-123")
+        client.get_building_context("agent-123")
 
 
 @respx.mock
@@ -102,8 +93,8 @@ def test_404_raises_platform_error(client):
 
 @respx.mock
 def test_500_raises_platform_error(client):
-    respx.get("https://platform.example.com/api/v1/cli/agents/agent-123/credentials").respond(
+    respx.get("https://platform.example.com/api/v1/cli/agents/agent-123/building-context").respond(
         500, json={"detail": "Internal error"}
     )
     with pytest.raises(PlatformError, match="500"):
-        client.get_credentials("agent-123")
+        client.get_building_context("agent-123")

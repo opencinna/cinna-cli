@@ -12,7 +12,7 @@ from cinna.sync import (
     create_workspace_tarball,
     extract_workspace_tarball,
     _is_excluded,
-    DEFAULT_EXCLUDES,
+    PUSH_EXCLUDES,
     MAX_FILE_SIZE,
 )
 
@@ -232,8 +232,8 @@ def test_diff_force_push_conflicts():
 
 
 def test_is_excluded():
-    assert _is_excluded("__pycache__/mod.pyc", DEFAULT_EXCLUDES) is True
-    assert _is_excluded("main.pyc", DEFAULT_EXCLUDES) is True
-    assert _is_excluded(".DS_Store", DEFAULT_EXCLUDES) is True
-    assert _is_excluded("credentials/creds.json", DEFAULT_EXCLUDES) is True
-    assert _is_excluded("scripts/main.py", DEFAULT_EXCLUDES) is False
+    assert _is_excluded("__pycache__/mod.pyc", PUSH_EXCLUDES) is True
+    assert _is_excluded("main.pyc", PUSH_EXCLUDES) is True
+    assert _is_excluded(".DS_Store", PUSH_EXCLUDES) is True
+    assert _is_excluded("credentials/creds.json", PUSH_EXCLUDES) is True
+    assert _is_excluded("scripts/main.py", PUSH_EXCLUDES) is False
