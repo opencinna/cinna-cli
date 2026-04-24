@@ -1,6 +1,5 @@
 """Tests for bootstrap module — setup input parsing and name normalization."""
 
-import os
 import pytest
 
 from cinna.bootstrap import parse_setup_input, normalize_agent_dir_name

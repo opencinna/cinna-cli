@@ -2,226 +2,162 @@
 
 Local development CLI for [Cinna Core](https://github.com/opencinna/cinna-core) agents.
 
-Work on agent scripts, prompts, and webapps locally with your own editor and AI tools. The CLI handles workspace sync, Docker container management, credential injection, and MCP integration — so the local environment mirrors what the agent sees in production.
+Work on agent scripts, prompts, and webapps locally with your own editor and AI tools. The CLI keeps your workspace continuously synced with the remote agent environment, streams commands to it, and wires up MCP integration — so the platform is the single source of truth for runtime and credentials.
 
 ## How It Works
 
-Cinna Core agents run in cloud environments managed by the platform. `cinna-cli` creates a local replica of that environment:
+Cinna Core agents run in managed cloud environments. `cinna-cli` does **not** run a local Docker container. Instead:
 
-1. A **Docker container** replicates the agent's runtime (Python packages, system deps, credentials)
-2. A **workspace directory** mirrors the remote agent's files (scripts, prompts, webapp, data)
-3. **Push/pull** syncs changes between local and remote with conflict detection
-4. **MCP integration** gives Claude Code access to the agent's knowledge base
+1. **Continuous sync** — [Mutagen](https://mutagen.io) keeps `./workspace` bidirectionally synced with the remote agent env over a WebSocket tunnel to the platform.
+2. **Remote exec** — `cinna exec <cmd>` streams your command through the platform to the remote env, with live stdout/stderr and the remote process's exit code.
+3. **MCP integration** — the local MCP proxy gives Claude Code / opencode access to the agent's knowledge base.
 
 ```
 Your Editor / Claude Code
-        |
-        v
-  workspace/           <-- your local files (scripts, prompts, webapp)
-        |
-  cinna push / pull    <-- sync with remote environment
-        |
-  Docker container     <-- runs scripts with correct deps & credentials
+        │
+        ▼
+  workspace/              ← edit locally
+        │
+  cinna sync (Mutagen) ◄──► Remote Agent Environment   (no local container)
+        │
+  cinna exec <cmd>       ── streaming output
 ```
 
 ## Prerequisites
 
 - **Python 3.10+**
-- **Docker** with Docker Compose
+- **[Mutagen](https://mutagen.io)** (version pinned by the platform — `cinna setup` checks and prompts to install)
 
 ## Getting Started
 
 Setup is initiated from the Cinna Core platform UI. Click **"Local Development"** on your agent's page to get a bootstrap command:
 
 ```bash
-curl -s https://your-platform.com/cli-setup/TOKEN | python3 -
+curl -s https://your-platform.com/api/cli-setup/TOKEN | python3 -
 ```
 
 This will:
+
 1. Install `cinna-cli` (via `uv`, `pipx`, or `pip`)
 2. Exchange the setup token for CLI credentials
-3. Download the agent's Docker build context and build the container
-4. Clone the workspace and pull credentials
-5. Generate `CLAUDE.md`, `BUILDING_AGENT.md`, and `.mcp.json` for Claude Code
+3. Verify / prompt-install the required Mutagen version
+4. Clone the workspace (one-shot tarball; Mutagen takes over afterwards)
+5. Generate `CLAUDE.md`, `BUILDING_AGENT.md`, `.mcp.json`, `opencode.json`, `.gitignore`, `mutagen.yml`
+6. Start the continuous sync session
 
-After setup completes, you'll be prompted to start dev mode immediately. Otherwise, `cd` into the agent directory and start working:
+After setup:
 
 ```bash
 cd hr-manager-agent/
+cinna dev                           # start a foreground dev session (live sync + TUI)
 claude                              # open Claude Code (MCP tools auto-configured)
-cinna dev                           # start container + live sync with remote
-cinna env-up                        # or: start container in background
-cinna exec python scripts/main.py   # run a script (needs running container)
-```
-
-Enable shell completion for tab-completion of commands:
-
-```bash
-cinna completion --install
+cinna sync status                   # see sync state from another terminal
+cinna exec python scripts/main.py   # run a command in the remote env
+cinna list                          # see every agent registered on this machine
 ```
 
 ## Commands
 
 ### `cinna setup <token_or_url>`
 
-Initialize a local development environment for an agent. Accepts the setup token, the full URL, or the entire curl command copied from the platform UI:
+Initialize a local workspace. Accepts the setup token, the URL, or the full curl command from the platform UI.
+
+The agent directory name is normalized to lowercase with dashes ("HR Manager Agent" → `hr-manager-agent/`).
+
+### `cinna set-token <token_or_url>`
+
+Refresh the CLI token on the current workspace without re-cloning. Run this from inside an existing agent directory when the stored token has expired — `cinna set-token` re-exchanges the setup token via `POST /api/cli-setup/{token}` and swaps the result into `.cinna/config.json` and `~/.cinna/agents.json` in place. Workspace files, `mutagen.yml`, and generated context files are left untouched.
+
+Accepts the same input forms as `cinna setup` (curl command, URL, or bare token). When only a bare token is given, the platform URL is reused from the workspace's existing `.cinna/config.json` — so you can refresh each agent from inside its own directory even if different agents live on different platforms. The exchanged token must belong to the same agent as the workspace; mismatched agent IDs abort the refresh.
 
 ```bash
-cinna setup curl -sL http://host/cli-setup/TOKEN | python3 -
-cinna setup http://host/cli-setup/TOKEN
-cinna setup TOKEN
+cd hr-manager-agent/
+cinna set-token yWo36tbkdAOzrALxOEKq31_OA2iMelEg
 ```
 
-The agent directory name is normalized to lowercase with dashes (e.g., "HR Manager Agent" becomes `hr-manager-agent/`).
+### `cinna dev`
 
-### `cinna dev [--interval N]`
+Start a foreground dev session — creates / resumes the Mutagen sync session for this workspace and attaches the terminal to a two-tab TUI (status + raw Mutagen details). Ctrl-C terminates the session; sync does not outlive the TUI. To observe sync from another terminal without affecting it, use `cinna sync status`.
 
-Start dev mode: starts the Docker container, runs a live TUI that bidirectionally syncs local and remote, and **removes the container when you press Ctrl+C**. Polls every N seconds (default: 5), pushes local changes and pulls remote changes (including credentials) using 3-way manifest diffing. Credentials are never pushed (backend-managed) but are pulled when changed on remote. Conflicts are detected and skipped.
+### `cinna sync status | conflicts`
 
-```bash
-cinna dev                # start container, watch and sync every 5s
-cinna dev --interval 10  # sync every 10s
-```
+Read-only views onto the live sync session (started by `cinna dev`).
 
-The TUI shows agent info, Docker container details (name, ID, status), sync stats (total pushed/pulled/conflicts), uptime, and a rolling activity log of the last 5 sync events.
+- `status` — state, pending changes, conflict count.
+- `conflicts` — list any conflict copies Mutagen has written. Resolve by picking a winner in your editor and deleting the `.conflict.*` copy.
 
-Containers are stateless — they hold no data that isn't in `workspace/` — so removing them on exit prevents orphaned background processes.
+### `cinna exec <command…>`
 
-### `cinna exec <command>`
-
-Run a command inside the agent's Docker container. The container has the correct Python packages, system dependencies, and credentials — always use this instead of running scripts on the host.
-
-**Requires a running container** — start one with `cinna dev` or `cinna env-up` first.
+Stream a command through the platform to the remote agent environment. Output streams back live; Ctrl+C aborts. Exit code matches the remote process.
 
 ```bash
 cinna exec python scripts/main.py
-cinna exec pip list
-cinna exec bash
+cinna exec pip install pandas
+cinna exec 'bash -c "ls -la"'
 ```
-
-### `cinna env-up`
-
-Start the agent container in the background. Use this when you need the container running without dev mode (e.g., for repeated `cinna exec` calls).
-
-### `cinna env-down`
-
-Stop and remove the agent container. Containers are stateless — workspace files are mounted, not copied — so removing is always safe.
-
-### `cinna push [--force]`
-
-Push local workspace changes to the remote environment. Detects conflicts when both local and remote have changed the same file since the last sync. Use `--force` to overwrite remote on conflict.
-
-### `cinna pull [--force]`
-
-Pull remote workspace changes to local. Also refreshes credentials and regenerates `BUILDING_AGENT.md` and `CLAUDE.md` from the platform's latest building context. Use `--force` to overwrite local on conflict.
 
 ### `cinna status`
 
-Show the current agent info and Docker container status.
+One-shot summary of the agent + current sync state. Includes a backend probe (`GET /sync-runtime`) that reports whether the stored CLI token is still accepted — `valid token`, `expired token`, or `no connection`. Use `cinna set-token` to refresh an expired token.
 
-### `cinna rebuild [--no-cache]`
+### `cinna list`
 
-Rebuild the Docker image. Run this after modifying `workspace_requirements.txt` or `workspace_system_packages.txt`. Removes any running container first. Does not start a new container — use `cinna dev` or `cinna env-up` after rebuilding.
+List every agent registered on this machine (from `~/.cinna/agents.json`). Three columns:
 
-### `cinna credentials`
+1. **Agent** — display name on top, full agent ID below.
+2. **Location** — workspace path on top, platform UI link below. Missing directories are flagged in red.
+3. **Sync** — Mutagen session state on top (`active` / `paused` / `connecting` / `error`), plus a per-agent backend probe (`valid token` / `expired token` / `no connection`) on the bottom. The probes run in parallel with a short timeout so the view stays snappy even with many registered agents.
 
-Re-pull credentials from the platform without doing a full pull. Useful after updating credentials in the web UI.
+### `cinna disconnect`
 
-### `cinna disconnect [--keep-image]`
-
-Remove the container, Docker image, and `.cinna/` config directory. Workspace files are preserved. Use `--keep-image` to only remove the container but keep the built image.
+Stop sync, remove `.cinna/` config and generated files (`CLAUDE.md`, `BUILDING_AGENT.md`, `.mcp.json`, `opencode.json`, `mutagen.yml`). Workspace files are preserved.
 
 ### `cinna disconnect-all`
 
-Scan the current directory for all agent workspaces, stop their containers, remove Docker images, and delete the directories entirely. Requires confirmation. Useful for cleaning up when done with local development.
-
-Displays a table of discovered workspaces with container status, a progress bar during cleanup, and a results summary showing what succeeded or failed.
+Scan the current directory for every cinna workspace (directories containing `.cinna/config.json`), stop each sync session, and delete the directories entirely. Prompts for confirmation and prints a summary of what was removed.
 
 ### `cinna completion [SHELL] [--install]`
 
-Output or install shell completion for bash, zsh, or fish:
-
-```bash
-cinna completion --install        # auto-detect shell and install
-cinna completion zsh              # print zsh completion script
-eval "$(cinna completion zsh)"    # activate in current session
-```
+Output or install shell completion for bash, zsh, or fish.
 
 ## Workspace Structure
 
-After setup, the agent directory looks like this:
+After setup, the agent directory looks like:
 
 ```
 my-agent/
-  .cinna/                 # CLI config and build context (do not edit)
-  workspace/
-    scripts/              # Agent Python scripts
-    docs/                 # Prompt files (WORKFLOW_PROMPT.md, etc.)
-    webapp/               # HTML/CSS/JS dashboard + Python data endpoints
-    files/                # Reports, CSVs, data files
-    credentials/          # Integration credentials (pulled from platform)
-    workspace_requirements.txt      # Python packages (pip install)
-    workspace_system_packages.txt   # System packages (apt-get install)
-  CLAUDE.md               # Auto-generated context for Claude Code
-  BUILDING_AGENT.md       # Building mode system prompt from the platform
-  .mcp.json               # MCP server config for Claude Code
-  opencode.json           # MCP server config for opencode
-  .gitignore              # Excludes generated files and credentials
+  .cinna/                 # CLI config (do not edit)
+    config.json
+  workspace/              # Continuously synced with the remote env
+    scripts/
+    docs/
+    webapp/
+    files/
+    credentials/          # Backend-managed; visible read-only on your side
+    workspace_requirements.txt
+    workspace_system_packages.txt
+  mutagen.yml             # Sync rules (customizable)
+  CLAUDE.md               # Local dev instructions for AI tools
+  BUILDING_AGENT.md       # Building mode prompt pulled from the platform
+  .mcp.json               # MCP config for Claude Code
+  opencode.json           # MCP config for opencode
+  .gitignore
 ```
 
 ## Working with AI Coding Tools
 
-The setup generates MCP server configs for both **Claude Code** and **opencode**, giving your AI tool access to a `knowledge_query` tool that searches the agent's knowledge base (documentation, articles, and other sources configured in the platform).
-
-### Claude Code
-
-Claude Code automatically picks up the `.mcp.json` config:
+Setup generates MCP server configs for **Claude Code** (`.mcp.json`) and **opencode** (`opencode.json`), giving your AI tool a `knowledge_query` tool that searches the agent's knowledge base.
 
 ```bash
 cd my-agent/
-claude
+claude        # or: opencode
 ```
-
-### opencode
-
-opencode automatically picks up the `opencode.json` config:
-
-```bash
-cd my-agent/
-opencode
-```
-
-### Context Files
-
-The auto-generated `CLAUDE.md` provides the AI tool with context about the local development workflow, available commands, and workspace structure. `BUILDING_AGENT.md` contains the same building mode prompt the cloud agent receives.
-
-## Container Lifecycle
-
-Containers are **stateless** — workspace files are mounted from the host, not copied into the container. This means containers can be created and destroyed freely without data loss.
-
-The CLI never starts containers silently. You control when containers run:
-
-| Command | Creates container | Removes container |
-|---------|------------------|-------------------|
-| `cinna dev` | On start | On Ctrl+C exit |
-| `cinna env-up` | Immediately | — |
-| `cinna env-down` | — | Immediately |
-| `cinna exec` | Never (requires running) | Never |
-| `cinna rebuild` | Never | Before rebuilding image |
-| `cinna setup` | Never (builds image only) | — |
-
-This prevents orphaned background containers. If you need a long-running container (e.g., for repeated `cinna exec`), use `cinna env-up` / `cinna env-down` explicitly.
 
 ## Sync & Conflict Resolution
 
-`cinna push` and `cinna pull` use manifest-based diffing to track changes:
+`cinna sync` drives Mutagen in `two-way-safe` mode with VCS-aware ignores. When the same file changes on both sides, Mutagen writes `<file>.conflict.<side>.<timestamp>` instead of picking a winner — inspect them with `cinna sync conflicts`, resolve, and delete the conflict copy.
 
-- A SHA-256 manifest is computed for all workspace files
-- Changes are compared against the last-known state from the previous sync
-- If the same file changed on both sides, it is flagged as a **conflict**
-- Conflicted files are skipped by default — use `--force` to overwrite
-
-Push excludes `__pycache__`, `.pyc` files, `.DS_Store`, and the `credentials/` directory (credentials are backend-managed and never pushed). Pull includes all files including `credentials/`, so credential changes on the remote are detected and pulled through the normal sync mechanism — no separate API endpoint is needed. Files that exist only locally (not on remote) are treated as local-only and do not trigger repeated pulls.
+Large binary files and build artifacts are ignored by default (see `mutagen.yml`). Add your own ignores there if needed.
 
 ## Development
 

@@ -27,19 +27,6 @@ class AuthenticationError(CinnaError):
         super().__init__(msg)
 
 
-class DockerNotFoundError(CinnaError):
-    """Docker is not installed."""
-
-    def __init__(self):
-        super().__init__(
-            "Docker is required but not found. Install: https://docs.docker.com/get-docker/"
-        )
-
-
-class ContainerNotRunningError(CinnaError):
-    """Container exists but is not running."""
-
-
 class PlatformError(CinnaError):
     """Backend returned an unexpected error."""
 
@@ -47,5 +34,23 @@ class PlatformError(CinnaError):
         super().__init__(f"Platform error ({status_code}): {detail}")
 
 
-class SyncConflictError(CinnaError):
-    """Push/pull conflict detected."""
+class MutagenNotFoundError(CinnaError):
+    """Mutagen is not installed or not on PATH."""
+
+    def __init__(self, required_version: str | None = None):
+        msg = "Mutagen is required but was not found on PATH."
+        if required_version:
+            msg += f" (required version: {required_version})"
+        msg += "\nInstall with:  brew install mutagen-io/mutagen/mutagen"
+        msg += "\nOther platforms: https://mutagen.io/documentation/introduction/installation"
+        super().__init__(msg)
+
+
+class MutagenVersionMismatchError(CinnaError):
+    """Installed Mutagen version does not match what the platform requires."""
+
+    def __init__(self, installed: str, required: str):
+        super().__init__(
+            f"Mutagen version mismatch: installed {installed}, platform requires {required}.\n"
+            "Upgrade with:  brew upgrade mutagen-io/mutagen/mutagen"
+        )

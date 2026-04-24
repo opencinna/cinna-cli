@@ -1,10 +1,26 @@
 """Shared test fixtures."""
 
-import json
 import pytest
 from pathlib import Path
 
+from cinna import config as config_module
+from cinna import sync_session as sync_session_module
 from cinna.config import CinnaConfig, KnowledgeSource, save_config
+
+
+@pytest.fixture(autouse=True)
+def isolate_global_state(tmp_path: Path, monkeypatch):
+    """Redirect the per-user registry + shim dir into a tmp path.
+
+    Without this every test would read/write the real ~/.cinna/ state.
+    """
+    fake_home = tmp_path / "_cinna_home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config_module, "GLOBAL_STATE_DIR", fake_home)
+    monkeypatch.setattr(
+        sync_session_module, "MUTAGEN_SSH_DIR", fake_home / "mutagen-ssh"
+    )
+    yield
 
 
 @pytest.fixture
@@ -16,7 +32,6 @@ def sample_config() -> CinnaConfig:
         agent_name="test-agent",
         environment_id="env-456",
         template="python-basic",
-        container_name="agent-dev-test-agent",
         knowledge_sources=[
             KnowledgeSource(id="ks-1", name="docs", topics=["api", "faq"]),
         ],
@@ -27,7 +42,6 @@ def sample_config() -> CinnaConfig:
 def workspace_root(tmp_path: Path, sample_config: CinnaConfig) -> Path:
     """Create a workspace root with .cinna/config.json."""
     save_config(sample_config, tmp_path)
-    # Create workspace directory
     ws = tmp_path / "workspace"
     ws.mkdir()
     return tmp_path

@@ -1,9 +1,10 @@
-"""Setup flow: exchange token, download build context, clone workspace, configure environment."""
+"""Setup flow: exchange token, install Mutagen, clone workspace, start sync."""
 
 import logging
 import os
 import platform
 import re
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -13,18 +14,16 @@ import httpx
 from cinna.config import (
     CinnaConfig,
     KnowledgeSource,
+    find_workspace_root,
+    load_config,
     save_config,
-    build_dir,
+    upsert_agent_registry,
     workspace_dir,
 )
 from cinna.client import PlatformClient
-from cinna.docker import (
-    check_docker_available,
-    ensure_dev_compose_override,
-    extract_build_context,
-    build_container,
-)
-from cinna.sync import pull_credentials, extract_workspace_tarball, ensure_workspace_dirs
+from cinna.sync import extract_workspace_tarball, ensure_workspace_dirs
+from cinna.mutagen_runtime import ensure_mutagen_ready
+from cinna import sync_session
 from cinna.context import (
     generate_context_files,
     generate_mcp_json,
@@ -36,40 +35,38 @@ from cinna import console
 logger = logging.getLogger("cinna.bootstrap")
 
 
-def parse_setup_input(raw_input: str) -> tuple[str, str]:
+def parse_setup_input(
+    raw_input: str, fallback_platform_url: str | None = None
+) -> tuple[str, str]:
     """Parse setup input into (platform_url, token).
 
     Accepts any of:
       - Full curl command: 'curl -sL http://host:8000/cli-setup/TOKEN | python3 -'
       - URL:               'http://host:8000/cli-setup/TOKEN'
-      - Raw token:         'TOKEN' (requires CINNA_PLATFORM_URL env var)
+      - Raw token:         'TOKEN' (falls back to ``fallback_platform_url`` or
+                            the ``CINNA_PLATFORM_URL`` env var — in that order)
 
     Returns (platform_url, token).
     """
     text = raw_input.strip().strip("'\"")
 
-    # Try to extract a URL containing /cli-setup/ from the input
     url_match = re.search(r"(https?://[^\s]+/cli-setup/[^\s|\"']+)", text)
     if url_match:
         url = url_match.group(1)
         parsed = urlparse(url)
-        # Token is the last path segment after /cli-setup/
         path_parts = parsed.path.rstrip("/").split("/cli-setup/")
         if len(path_parts) == 2 and path_parts[1]:
             token = path_parts[1]
-            # Preserve any path prefix before /cli-setup/ (e.g. /api)
-            prefix = path_parts[0]  # e.g. "/api" or ""
+            prefix = path_parts[0]
             platform_url = f"{parsed.scheme}://{parsed.netloc}{prefix}"
             return platform_url, token
 
-    # If input looks like a URL but we couldn't parse it, fail clearly
     if text.startswith("http://") or text.startswith("https://") or "curl" in text:
         raise click.ClickException(
             "Could not parse setup URL from input. Expected a URL containing /cli-setup/TOKEN."
         )
 
-    # Treat as raw token — need CINNA_PLATFORM_URL
-    platform_url = os.environ.get("CINNA_PLATFORM_URL", "")
+    platform_url = fallback_platform_url or os.environ.get("CINNA_PLATFORM_URL", "")
     if not platform_url:
         raise click.ClickException(
             "Cannot determine platform URL from the provided token.\n"
@@ -80,32 +77,21 @@ def parse_setup_input(raw_input: str) -> tuple[str, str]:
 
 
 def normalize_agent_dir_name(name: str) -> str:
-    """Normalize agent name to a lowercase, dash-separated directory name.
-
-    "HR Manager Agent" -> "hr-manager-agent"
-    "My  Cool--Agent!" -> "my-cool-agent"
-    """
-    # Lowercase, replace non-alphanumeric with dashes, collapse runs, strip edges
+    """Normalize agent name to a lowercase, dash-separated directory name."""
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return slug or "agent"
 
 
-def run_setup(setup_input: str, machine_name: str) -> None:
-    """Full setup flow — called by `cinna setup <token_or_url>`."""
-    total = 6
+def _exchange_setup_token(
+    platform_url: str, token: str, machine_name: str
+) -> dict:
+    """POST /cli-setup/{token} and return the decoded payload.
 
-    # Step 1: Prerequisites
-    console.step(1, total, "Checking prerequisites...")
-    check_docker_available()
-    console.status("Docker available")
-
-    # Step 2: Authenticate
-    console.step(2, total, "Authenticating...")
-    machine_info = f"{platform.system()}/{platform.machine()}"
-
-    platform_url, token = parse_setup_input(setup_input)
-
+    Wraps the HTTP call in a uniform ClickException on failure so both
+    `setup` and `set-token` report errors the same way.
+    """
     setup_url = f"{platform_url.rstrip('/')}/cli-setup/{token}"
+    machine_info = f"{platform.system()}/{platform.machine()}"
     logger.info("Exchanging setup token at %s", setup_url)
 
     response = httpx.post(
@@ -120,14 +106,66 @@ def run_setup(setup_input: str, machine_name: str) -> None:
         except Exception:
             detail = response.text
         raise click.ClickException(f"Setup failed: {detail}")
+    return response.json()
 
-    payload = response.json()
+
+def run_set_token(setup_input: str, machine_name: str) -> None:
+    """Replace the CLI token on an existing workspace without rebuilding.
+
+    Called by `cinna set-token <token_or_url>`. Accepts the same input forms
+    as `cinna setup`. Verifies the exchanged token belongs to the agent this
+    workspace is already bound to before writing it.
+    """
+    root = find_workspace_root()
+    config = load_config(root)
+
+    # ``config.platform_url`` is stored as the bare host (PlatformClient adds
+    # ``/api/...`` itself). The cli-setup endpoint lives under ``/api``, so
+    # append it here before handing to parse_setup_input as a fallback.
+    stored_base = config.platform_url.rstrip("/")
+    fallback = stored_base if stored_base.endswith("/api") else f"{stored_base}/api"
+    platform_url, token = parse_setup_input(
+        setup_input, fallback_platform_url=fallback
+    )
+    payload = _exchange_setup_token(platform_url, token, machine_name)
+
+    new_agent_id = payload["agent"]["id"]
+    if new_agent_id != config.agent_id:
+        raise click.ClickException(
+            f"Token belongs to a different agent ({new_agent_id}) than this "
+            f"workspace ({config.agent_id}). Run 'cinna setup' in a new "
+            f"directory to register it."
+        )
+
+    config.cli_token = payload["cli_token"]
+    config.platform_url = payload["platform_url"]
+    if payload.get("frontend_url"):
+        config.frontend_url = payload["frontend_url"]
+    save_config(config, root)
+    upsert_agent_registry(
+        config.agent_id,
+        config.platform_url,
+        config.cli_token,
+        root,
+        frontend_url=config.frontend_url,
+    )
+    console.status(f"Token refreshed for agent: {config.agent_name}")
+
+
+def run_setup(setup_input: str, machine_name: str) -> None:
+    """Full setup flow — called by `cinna setup <token_or_url>`."""
+    total = 5
+
+    # Step 1: Authenticate
+    console.step(1, total, "Authenticating...")
+
+    platform_url, token = parse_setup_input(setup_input)
+    payload = _exchange_setup_token(platform_url, token, machine_name)
     agent_info = payload["agent"]
     agent_name = agent_info["name"]
     dir_name = normalize_agent_dir_name(agent_name)
     logger.info("Agent: %s (dir: %s)", agent_name, dir_name)
 
-    # Create workspace directory (fail if it already exists with a .cinna config)
     workspace_root = Path.cwd() / dir_name
     if (workspace_root / ".cinna" / "config.json").exists():
         raise click.ClickException(
@@ -136,7 +174,6 @@ def run_setup(setup_input: str, machine_name: str) -> None:
         )
     workspace_root.mkdir(exist_ok=True)
 
-    # Build config
     config = CinnaConfig(
         platform_url=payload["platform_url"],
         cli_token=payload["cli_token"],
@@ -144,36 +181,32 @@ def run_setup(setup_input: str, machine_name: str) -> None:
         agent_name=agent_name,
         environment_id=agent_info["environment_id"],
         template=agent_info["template"],
-        container_name=f"agent-dev-{dir_name}-{agent_info['id'][:8]}",
+        frontend_url=payload.get("frontend_url"),
         knowledge_sources=[
             KnowledgeSource(**ks) for ks in payload.get("knowledge_sources", [])
         ],
     )
     save_config(config, workspace_root)
+    upsert_agent_registry(
+        config.agent_id,
+        config.platform_url,
+        config.cli_token,
+        workspace_root,
+        frontend_url=config.frontend_url,
+    )
     console.status(f"Authenticated as agent: {agent_name}")
 
-    # Step 3: Build context + container
-    console.step(3, total, "Building agent container...")
     client = PlatformClient(config)
-
     try:
-        logger.info("Downloading build context for agent %s", config.agent_id)
-        tarball = client.download_build_context(config.agent_id)
-        logger.info("Build context downloaded (%d bytes)", len(tarball))
-        extract_build_context(tarball, workspace_root)
+        # Step 2: Mutagen
+        console.step(2, total, "Checking Mutagen install...")
+        ensure_mutagen_ready(
+            client, config, workspace_root, interactive=sys.stdin.isatty()
+        )
+        console.status(f"Mutagen ready (version {config.mutagen_version})")
 
-        # Write .env for docker-compose
-        env_file = build_dir(workspace_root) / ".env"
-        env_file.write_text(f"AGENT_NAME={dir_name}\n")
-
-        # Override production entrypoint with idle command for local dev
-        ensure_dev_compose_override(workspace_root)
-
-        build_container(workspace_root)
-        console.status("Container built")
-
-        # Step 4: Clone workspace
-        console.step(4, total, "Cloning workspace...")
+        # Step 3: Initial clone
+        console.step(3, total, "Cloning workspace...")
         ws_dir = workspace_dir(workspace_root)
         ws_dir.mkdir(exist_ok=True)
         try:
@@ -185,75 +218,61 @@ def run_setup(setup_input: str, machine_name: str) -> None:
         except Exception as e:
             logger.warning("Workspace download failed: %s", e)
             console.warn(f"Workspace download failed: {e}")
-            console.warn("Run 'cinna pull' after setup to retry.")
+            console.warn("Mutagen will reconcile on first sync start.")
         ensure_workspace_dirs(ws_dir)
 
-        # Step 5: Pull credentials
-        console.step(5, total, "Pulling credentials...")
-        try:
-            pull_credentials(client, config, workspace_root)
-        except Exception as e:
-            logger.warning("Credentials pull failed: %s", e)
-            console.warn(f"Credentials pull failed: {e}")
-            console.warn("Run 'cinna credentials' after setup to retry.")
-
-        # Step 6: Configure environment
-        console.step(6, total, "Configuring development environment...")
-
+        # Step 4: Context files + MCP config
+        console.step(4, total, "Configuring development environment...")
         try:
             building_ctx = client.get_building_context(config.agent_id)
             generate_context_files(building_ctx, config, workspace_root)
         except Exception as e:
             logger.warning("Building context fetch failed: %s", e)
             console.warn(f"Building context fetch failed: {e}")
-            console.warn("Run 'cinna pull' after setup to retry.")
 
         generate_mcp_json(config, workspace_root)
         generate_opencode_json(config, workspace_root)
         generate_gitignore(workspace_root)
 
+        # Step 5: Start continuous sync (foreground — blocks until Ctrl-C)
+        console.step(5, total, "Starting continuous sync...")
+        sync_session.write_mutagen_yml(workspace_root)
+        sync_started = False
+        try:
+            sync_session.start(config, workspace_root)
+            sync_started = True
+            console.status("Sync session started")
+        except click.ClickException as e:
+            logger.warning("Sync start failed: %s", e.format_message())
+            console.warn(f"Sync start failed: {e.format_message()}")
+            console.warn("Run 'cinna dev' from the agent directory to retry.")
+
         console.status("Setup complete!")
         console.console.print()
         console.console.print(f"  cd {dir_name}/")
         console.console.print(
-            "  claude                              # open Claude Code with MCP tools"
+            "  cinna dev                         # start a foreground dev session"
         )
         console.console.print(
-            "  cinna dev                           # start container + live sync"
+            "  claude                            # open Claude Code with MCP tools"
         )
         console.console.print(
-            "  cinna env-up                        # start container in background"
+            "  cinna list                        # see all registered agents"
         )
         console.console.print(
-            "  cinna exec python scripts/main.py   # run a script (needs running container)"
+            "  cinna sync status                 # view sync state (from another terminal)"
+        )
+        console.console.print(
+            "  cinna exec python scripts/main.py # run a command in the remote env"
         )
         console.console.print()
 
-        # Offer to start dev mode right away.
-        # stdin may be a pipe (curl ... | python3 -), so open /dev/tty
-        # to read the interactive prompt from the real terminal.
-        import sys
-
-        tty = None
-        try:
-            if not sys.stdin.isatty():
-                tty = open("/dev/tty")
-                sys.stdin = tty
-
-            if click.confirm(
-                f"Start dev mode now for {agent_name}?", default=True
-            ):
-                from cinna.dev import run_dev_loop
-
-                os.chdir(workspace_root)
-                console.console.print()
-                run_dev_loop(config, workspace_root)
-        except OSError:
-            pass  # no TTY available (e.g. headless CI) — skip the prompt
-        finally:
-            if tty:
-                sys.stdin = sys.__stdin__
-                tty.close()
-
+        # Attach the foreground sync TUI. Sync lives exactly as long as this
+        # process — Ctrl-C terminates the session so nothing is left dangling
+        # in the shared Mutagen daemon.
+        if sync_started:
+            console.status("Live sync attached — press Ctrl-C to stop.")
+            sync_session.run_foreground(config)
+            console.status("Sync session terminated.")
     finally:
         client.close()

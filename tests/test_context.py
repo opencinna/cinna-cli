@@ -1,13 +1,14 @@
 """Tests for context module."""
 
-from pathlib import Path
 
 from cinna.context import (
     generate_context_files,
     generate_mcp_json,
     generate_opencode_json,
     generate_gitignore,
+    list_synced_prompt_refs,
     _format_mcp_tools,
+    _sync_prompt_references,
 )
 
 
@@ -35,6 +36,7 @@ def test_generate_mcp_json(workspace_root, sample_config):
     assert mcp_json.exists()
 
     import json
+
     data = json.loads(mcp_json.read_text())
     assert "mcpServers" in data
     assert "agent-knowledge" in data["mcpServers"]
@@ -50,6 +52,7 @@ def test_generate_opencode_json(workspace_root, sample_config):
     assert opencode_json.exists()
 
     import json
+
     data = json.loads(opencode_json.read_text())
     assert "mcp" in data
     assert "agent-knowledge" in data["mcp"]
@@ -67,6 +70,8 @@ def test_generate_gitignore(workspace_root):
     content = gitignore.read_text()
     assert ".cinna/" in content
     assert "CLAUDE.md" in content
+    assert "WEBAPP_BUILDING.md" in content
+    assert "COMPLEX_AGENT_DESIGN.md" in content
 
 
 def test_generate_gitignore_no_overwrite(workspace_root):
@@ -84,8 +89,176 @@ def test_format_mcp_tools(sample_config):
     assert "faq" in result
 
 
+def test_sync_prompt_references_copies_and_rewrites(workspace_root):
+    # Simulate the build context layout the platform ships.
+    prompts_dir = workspace_root / ".cinna" / "build" / "app" / "core" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    (prompts_dir / "WEBAPP_BUILDING.md").write_text("web app guide body")
+    (prompts_dir / "COMPLEX_AGENT_DESIGN.md").write_text("complex agent body")
+
+    prompt = (
+        "Read /app/core/prompts/WEBAPP_BUILDING.md for web app conventions.\n"
+        "Read /app/core/prompts/COMPLEX_AGENT_DESIGN.md for bigger agents."
+    )
+    rewritten, synced = _sync_prompt_references(prompt, workspace_root)
+
+    assert "./WEBAPP_BUILDING.md" in rewritten
+    assert "./COMPLEX_AGENT_DESIGN.md" in rewritten
+    assert "/app/core/prompts/" not in rewritten
+    assert synced == ["COMPLEX_AGENT_DESIGN.md", "WEBAPP_BUILDING.md"]
+    assert (workspace_root / "WEBAPP_BUILDING.md").read_text() == "web app guide body"
+    assert (
+        workspace_root / "COMPLEX_AGENT_DESIGN.md"
+    ).read_text() == "complex agent body"
+
+
+def test_sync_prompt_references_skips_missing_files(workspace_root):
+    prompts_dir = workspace_root / ".cinna" / "build" / "app" / "core" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    (prompts_dir / "WEBAPP_BUILDING.md").write_text("web app guide body")
+
+    prompt = (
+        "See /app/core/prompts/WEBAPP_BUILDING.md and "
+        "/app/core/prompts/NOT_SHIPPED.md for more."
+    )
+    rewritten, synced = _sync_prompt_references(prompt, workspace_root)
+
+    # Path rewriting is unconditional; copying happens only for files we have.
+    assert "./WEBAPP_BUILDING.md" in rewritten
+    assert "./NOT_SHIPPED.md" in rewritten
+    assert synced == ["WEBAPP_BUILDING.md"]
+    assert not (workspace_root / "NOT_SHIPPED.md").exists()
+
+
+def test_generate_context_files_mirrors_referenced_docs(workspace_root, sample_config):
+    prompts_dir = workspace_root / ".cinna" / "build" / "app" / "core" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    (prompts_dir / "WEBAPP_BUILDING.md").write_text("web app guide body")
+
+    building_ctx = {
+        "building_prompt": "Read /app/core/prompts/WEBAPP_BUILDING.md for conventions.",
+    }
+    generate_context_files(building_ctx, sample_config, workspace_root)
+
+    building_md = (workspace_root / "BUILDING_AGENT.md").read_text()
+    assert "./WEBAPP_BUILDING.md" in building_md
+    assert "/app/core/prompts/" not in building_md
+    assert (workspace_root / "WEBAPP_BUILDING.md").read_text() == "web app guide body"
+
+
+def test_list_synced_prompt_refs(workspace_root):
+    prompts_dir = workspace_root / ".cinna" / "build" / "app" / "core" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    (prompts_dir / "WEBAPP_BUILDING.md").write_text("x")
+    (prompts_dir / "COMPLEX_AGENT_DESIGN.md").write_text("x")
+    (prompts_dir / "BUILDING_AGENT.md").write_text("x")  # must be skipped
+
+    # Only WEBAPP_BUILDING has been mirrored to the workspace root.
+    (workspace_root / "WEBAPP_BUILDING.md").write_text("x")
+
+    assert list_synced_prompt_refs(workspace_root) == ["WEBAPP_BUILDING.md"]
+
+
+def test_sync_prompt_references_uses_inline_dict(workspace_root):
+    """Live-sync path: companion guides ship inline in the building-context
+    response; no `.cinna/build/` directory is populated."""
+    prompt = (
+        "Read /app/core/prompts/WEBAPP_BUILDING.md for web app conventions.\n"
+        "Read /app/core/prompts/COMPLEX_AGENT_DESIGN.md for bigger agents."
+    )
+    prompt_files = {
+        "WEBAPP_BUILDING.md": "inline web app body",
+        "COMPLEX_AGENT_DESIGN.md": "inline complex body",
+    }
+
+    rewritten, synced = _sync_prompt_references(
+        prompt, workspace_root, prompt_files=prompt_files
+    )
+
+    assert "./WEBAPP_BUILDING.md" in rewritten
+    assert "./COMPLEX_AGENT_DESIGN.md" in rewritten
+    assert "/app/core/prompts/" not in rewritten
+    assert synced == ["COMPLEX_AGENT_DESIGN.md", "WEBAPP_BUILDING.md"]
+    assert (workspace_root / "WEBAPP_BUILDING.md").read_text() == "inline web app body"
+    assert (
+        workspace_root / "COMPLEX_AGENT_DESIGN.md"
+    ).read_text() == "inline complex body"
+
+
+def test_sync_prompt_references_inline_dict_wins_over_build_dir(workspace_root):
+    """When both inline contents and legacy build-dir files exist, the inline
+    dict wins — it's the authoritative source in live-sync mode."""
+    prompts_dir = workspace_root / ".cinna" / "build" / "app" / "core" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    (prompts_dir / "WEBAPP_BUILDING.md").write_text("STALE legacy body")
+
+    prompt = "Read /app/core/prompts/WEBAPP_BUILDING.md for conventions."
+    rewritten, synced = _sync_prompt_references(
+        prompt,
+        workspace_root,
+        prompt_files={"WEBAPP_BUILDING.md": "FRESH inline body"},
+    )
+
+    assert synced == ["WEBAPP_BUILDING.md"]
+    assert (workspace_root / "WEBAPP_BUILDING.md").read_text() == "FRESH inline body"
+
+
+def test_generate_context_files_with_inline_prompt_files(
+    workspace_root, sample_config
+):
+    """End-to-end live-sync flow: backend returns `prompt_files` inline,
+    CLI mirrors them and rewrites the building prompt."""
+    building_ctx = {
+        "building_prompt": (
+            "Read /app/core/prompts/WEBAPP_BUILDING.md for webapp conventions.\n"
+            "Read /app/core/prompts/COMPLEX_AGENT_DESIGN.md for complex agents."
+        ),
+        "prompt_files": {
+            "WEBAPP_BUILDING.md": "webapp guide",
+            "COMPLEX_AGENT_DESIGN.md": "complex guide",
+        },
+    }
+    generate_context_files(building_ctx, sample_config, workspace_root)
+
+    building_md = (workspace_root / "BUILDING_AGENT.md").read_text()
+    assert "./WEBAPP_BUILDING.md" in building_md
+    assert "./COMPLEX_AGENT_DESIGN.md" in building_md
+    assert "/app/core/prompts/" not in building_md
+    assert (workspace_root / "WEBAPP_BUILDING.md").read_text() == "webapp guide"
+    assert (
+        workspace_root / "COMPLEX_AGENT_DESIGN.md"
+    ).read_text() == "complex guide"
+
+
+def test_list_synced_prompt_refs_from_building_md(workspace_root):
+    """Live-sync path: no `.cinna/build/` dir; filenames are recovered by
+    parsing `./<NAME>.md` references in the rewritten BUILDING_AGENT.md."""
+    (workspace_root / "BUILDING_AGENT.md").write_text(
+        "See ./WEBAPP_BUILDING.md and ./COMPLEX_AGENT_DESIGN.md for details.\n"
+    )
+    (workspace_root / "WEBAPP_BUILDING.md").write_text("x")
+    (workspace_root / "COMPLEX_AGENT_DESIGN.md").write_text("x")
+
+    assert list_synced_prompt_refs(workspace_root) == [
+        "COMPLEX_AGENT_DESIGN.md",
+        "WEBAPP_BUILDING.md",
+    ]
+
+
+def test_list_synced_prompt_refs_skips_missing_files(workspace_root):
+    """Only files that actually exist at the workspace root are returned,
+    even when BUILDING_AGENT.md references additional names."""
+    (workspace_root / "BUILDING_AGENT.md").write_text(
+        "See ./WEBAPP_BUILDING.md and ./NOT_WRITTEN.md.\n"
+    )
+    (workspace_root / "WEBAPP_BUILDING.md").write_text("x")
+
+    assert list_synced_prompt_refs(workspace_root) == ["WEBAPP_BUILDING.md"]
+
+
 def test_format_mcp_tools_no_knowledge():
     from cinna.config import CinnaConfig
+
     config = CinnaConfig(
         platform_url="https://example.com",
         cli_token="tok",
@@ -93,7 +266,6 @@ def test_format_mcp_tools_no_knowledge():
         agent_name="test",
         environment_id="e1",
         template="basic",
-        container_name="c1",
     )
     result = _format_mcp_tools(config)
     assert "knowledge_query" in result

@@ -1,6 +1,8 @@
 """HTTP client for platform API. All backend communication goes through here."""
 
+import json
 import logging
+from typing import Iterator
 
 import httpx
 
@@ -12,6 +14,8 @@ logger = logging.getLogger("cinna.client")
 
 DEFAULT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 DOWNLOAD_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
+# Exec streams can be long-running — disable read timeout so idle output doesn't abort.
+EXEC_STREAM_TIMEOUT = httpx.Timeout(None, connect=10.0)
 
 
 class PlatformClient:
@@ -75,41 +79,15 @@ class PlatformClient:
         )
         return self._handle_response(response).json()
 
-    # --- Build Context ---
-
-    def download_build_context(self, agent_id: str) -> bytes:
-        """GET /api/v1/cli/agents/{id}/build-context — download Docker build tarball."""
-        response = self._client.get(
-            f"/api/v1/cli/agents/{agent_id}/build-context",
-            timeout=DOWNLOAD_TIMEOUT,
-        )
-        return self._handle_response(response).content
-
-    # --- Workspace ---
+    # --- Workspace (initial clone only; Mutagen owns it afterwards) ---
 
     def download_workspace(self, agent_id: str) -> bytes:
-        """GET /api/v1/cli/agents/{id}/workspace — download workspace tarball."""
+        """GET /api/v1/cli/agents/{id}/workspace — one-shot tarball for initial clone."""
         response = self._client.get(
             f"/api/v1/cli/agents/{agent_id}/workspace",
             timeout=DOWNLOAD_TIMEOUT,
         )
         return self._handle_response(response).content
-
-    def upload_workspace(self, agent_id: str, tarball: bytes) -> None:
-        """POST /api/v1/cli/agents/{id}/workspace — upload workspace tarball."""
-        response = self._client.post(
-            f"/api/v1/cli/agents/{agent_id}/workspace",
-            files={"file": ("workspace.tar.gz", tarball, "application/gzip")},
-            timeout=DOWNLOAD_TIMEOUT,
-        )
-        self._handle_response(response)
-
-    def get_workspace_manifest(self, agent_id: str) -> dict:
-        """GET /api/v1/cli/agents/{id}/workspace/manifest — remote file manifest."""
-        response = self._client.get(
-            f"/api/v1/cli/agents/{agent_id}/workspace/manifest",
-        )
-        return self._handle_response(response).json()
 
     # --- Building Context ---
 
@@ -135,6 +113,51 @@ class PlatformClient:
             json=payload,
         )
         return self._handle_response(response).json()
+
+    # --- Live Sync Runtime ---
+
+    def get_sync_runtime(self, agent_id: str) -> dict:
+        """GET /api/v1/cli/agents/{id}/sync-runtime — required Mutagen version + hash."""
+        response = self._client.get(
+            f"/api/v1/cli/agents/{agent_id}/sync-runtime",
+        )
+        return self._handle_response(response).json()
+
+    # --- Remote exec (SSE stream) ---
+
+    def stream_exec(self, agent_id: str, command: str) -> Iterator[dict]:
+        """POST /api/v1/cli/agents/{id}/exec — stream command output events.
+
+        Yields parsed event dicts. Known shapes:
+          {"type": "exec_id", "exec_id": "<uuid>"}
+          {"type": "tool_result_delta", "content": "...", "metadata": {...}}
+          {"type": "done", "exit_code": N, "duration_seconds": F}
+          {"type": "interrupted", "exit_code": -1}
+          {"type": "error", "content": "..."}
+
+        The caller is responsible for interpreting `done`/`interrupted` and
+        mapping to a process exit code.
+        """
+        url = f"/api/v1/cli/agents/{agent_id}/exec"
+        payload = {"command": command}
+        with self._client.stream(
+            "POST", url, json=payload, timeout=EXEC_STREAM_TIMEOUT
+        ) as response:
+            if response.status_code >= 400:
+                # Read the body so _handle_response can surface the error.
+                response.read()
+                self._handle_response(response)
+                return
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    data_str = line[6:]
+                    try:
+                        yield json.loads(data_str)
+                    except json.JSONDecodeError:
+                        logger.warning("Could not parse SSE event: %s", data_str[:200])
 
     def close(self):
         self._client.close()
