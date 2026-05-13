@@ -105,10 +105,11 @@ def generate_context_files(
 
     # --- CLAUDE.md ---
     mcp_tools = _format_mcp_tools(config)
-    claude_md = _load_template("CLAUDE.md.template").format(
-        agent_name=config.agent_name,
-        timestamp=timestamp,
-        mcp_tools_section=mcp_tools,
+    claude_md = (
+        _load_template("CLAUDE.md.template")
+        .replace("{agent_name}", config.agent_name)
+        .replace("{timestamp}", timestamp)
+        .replace("{mcp_tools_section}", mcp_tools)
     )
     (workspace_root / "CLAUDE.md").write_text(claude_md)
 
@@ -194,6 +195,7 @@ COMPLEX_AGENT_DESIGN.md
 opencode.json
 cinna.log
 workspace/credentials/
+workspace/app-data/
 workspace/__pycache__/
 workspace/*.pyc
 """

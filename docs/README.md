@@ -70,12 +70,43 @@ The collection of files that make up an agent's working directory. Lives at `wor
 
 Structure (managed by the remote env; the CLI just mirrors it):
 
+Bundle-owned (replaced when the publisher pushes a new bundle revision):
+
 - `scripts/` — Python scripts the agent executes
 - `docs/` — Prompt files (`WORKFLOW_PROMPT.md`, etc.)
 - `webapp/` — HTML/CSS/JS dashboard + Python data endpoints
-- `files/` — Reports and output data
-- `credentials/` — Integration credentials (managed by the backend)
+- `knowledge/` — Static integration docs shipped with the bundle
+- `files/` — Static publisher-shipped assets (lookup tables, fixtures)
 - `workspace_requirements.txt`, `workspace_system_packages.txt`
+
+Per-user persistent — **not part of the published bundle**. Backed by a platform
+`AppDataVolume` keyed by `(user_id, bundle_id)`, stored on the platform host under
+`${APP_DATA_STORAGE_DIR}/<user_id>/<bundle_id>/`, and bind-mounted into the agent
+container at `/app/workspace/app-data`. The volume survives `apply-update` (bundle
+folders get overwritten, `app-data/` is never touched) and uninstall/reinstall
+(the row is marked orphaned, not deleted, and reattaches on next install of the
+same `bundle_id`):
+
+- `app-data/storage/` — Long-lived runtime output scripts should write here
+  (databases, JSON, CSVs, reports, derived data). This is the canonical place
+  for anything the agent needs to keep across sessions and bundle updates.
+- `app-data/uploads/` — Destination for every user-supplied file at runtime:
+  chat attachments, task attachments, MCP `get_file_upload_url` uploads.
+- `app-data/cache/` — Disposable caches the scripts may rebuild on demand.
+
+**What the CLI developer sees:** the `workspace/app-data/` directory synced to
+your machine is the publisher working install's *own* app-data volume — the
+developer's personal runtime state. It is **not** content that gets shipped
+when you publish a new bundle revision: bundle revisions snapshot only the
+bundle-owned folders above. Every other user who installs the bundle gets a
+fresh, empty `(user_id, bundle_id)` volume on the platform.
+
+`workspace/app-data/` is gitignored by default for the same reason — it is
+runtime state, not source.
+
+Synced from the platform:
+
+- `credentials/` — Integration credentials (managed by the backend)
 
 ### Sync session
 
@@ -182,11 +213,18 @@ hr-manager-agent/               (workspace root)
   .cinna/
     config.json                 (agent config, CLI token, mutagen_version pin)
   workspace/                    (continuously synced with remote /app/workspace)
-    scripts/
-    docs/
-    webapp/
-    files/
-    credentials/
+    scripts/                    (bundle-owned — shipped in published revisions)
+    docs/                       (bundle-owned)
+    webapp/                     (bundle-owned)
+    knowledge/                  (bundle-owned)
+    files/                      (bundle-owned — static publisher assets)
+    app-data/                   (per-user persistent — NOT part of bundle revisions;
+                                 backed by AppDataVolume keyed by (user_id, bundle_id);
+                                 platform mount: /app/workspace/app-data)
+      storage/                    long-lived runtime output (DBs, reports, derived data)
+      uploads/                    all user-supplied file uploads at runtime
+      cache/                      disposable caches
+    credentials/                (backend-managed)
     workspace_requirements.txt
     workspace_system_packages.txt
   mutagen.yml                   (sync rules — ignores, scan mode)

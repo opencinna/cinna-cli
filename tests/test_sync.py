@@ -78,3 +78,7 @@ def test_extract_tar_only_files(tmp_path):
 def test_ensure_workspace_dirs(tmp_path):
     ensure_workspace_dirs(tmp_path)
     assert (tmp_path / "files").is_dir()
+    assert (tmp_path / "knowledge").is_dir()
+    assert (tmp_path / "app-data" / "storage").is_dir()
+    assert (tmp_path / "app-data" / "uploads").is_dir()
+    assert (tmp_path / "app-data" / "cache").is_dir()

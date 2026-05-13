@@ -129,10 +129,19 @@ my-agent/
   .cinna/                 # CLI config (do not edit)
     config.json
   workspace/              # Continuously synced with the remote env
-    scripts/
-    docs/
-    webapp/
-    files/
+    scripts/              # Bundle-owned: agent Python scripts
+    docs/                 # Bundle-owned: WORKFLOW/ENTRYPOINT/REFINER prompts
+    webapp/               # Bundle-owned: dashboard + data endpoints
+    knowledge/            # Bundle-owned: static integration docs
+    files/                # Bundle-owned: static publisher-shipped assets
+    app-data/             # Per-user persistent — NOT shipped in bundle revisions.
+                          # Backed by a platform AppDataVolume keyed by (user_id, bundle_id);
+                          # mounted on the platform at /app/workspace/app-data.
+                          # Survives apply-update and uninstall/reinstall.
+      storage/            #   long-lived runtime output (DBs, reports, derived data)
+      uploads/            #   all user-supplied file uploads at runtime
+                          #   (chat attachments, task attachments, MCP uploads)
+      cache/              #   disposable caches
     credentials/          # Backend-managed; visible read-only on your side
     workspace_requirements.txt
     workspace_system_packages.txt
@@ -141,8 +150,19 @@ my-agent/
   BUILDING_AGENT.md       # Building mode prompt pulled from the platform
   .mcp.json               # MCP config for Claude Code
   opencode.json           # MCP config for opencode
-  .gitignore
+  .gitignore              # ignores workspace/credentials/ and workspace/app-data/
 ```
+
+**Persistence tiers** mirror the platform's bundle/install model:
+
+- **Bundle-owned** folders (`scripts/`, `docs/`, `webapp/`, `knowledge/`, `files/`, `workspace_requirements.txt`, `workspace_system_packages.txt`) are part of what gets snapshotted when a new bundle revision is published. As the developer/publisher, your edits here become the next shipped revision.
+- **`app-data/`** is the per-user persistent runtime volume. On the platform it lives in an `AppDataVolume` keyed by `(user_id, bundle_id)` — one volume per user per bundle, bind-mounted into the agent container at `/app/workspace/app-data`. It is **not** part of bundle revisions: when you publish, only the bundle-owned folders are snapshotted, and every user who installs your bundle gets their own fresh app-data volume. On the platform side the volume survives `apply-update` (bundle folders are overwritten, app-data is never touched) and uninstall/reinstall (orphaned, not deleted; reattaches by `bundle_id`). What you see synced to your local `workspace/app-data/` is your *own* developer install's app-data — useful for inspecting runtime output your scripts produce. It's gitignored by default since it's per-user runtime state, not bundle content.
+
+  Where scripts should put what:
+  - **`storage/`** — long-lived runtime state (databases, JSON, CSVs, generated reports). Anything the agent must keep across sessions and bundle updates.
+  - **`uploads/`** — every user-supplied file at runtime lands here automatically: chat attachments, task attachments, MCP `get_file_upload_url` uploads. Read from this folder, don't write to it from scripts.
+  - **`cache/`** — disposable caches the scripts may rebuild on demand.
+- **`credentials/`** is managed by the backend and only readable on your side.
 
 ## Working with AI Coding Tools
 

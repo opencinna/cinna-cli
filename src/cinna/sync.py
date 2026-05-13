@@ -21,11 +21,24 @@ MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 def ensure_workspace_dirs(workspace: Path) -> None:
     """Ensure required workspace subdirectories exist.
 
-    The remote agent environment always has /app/workspace/files/ but it may be
-    empty, so the downloaded tarball won't contain it.  Create it locally so the
-    workspace layout matches production.
+    Mirrors the layout the remote agent environment guarantees so the local
+    workspace matches production even when the downloaded tarball is sparse:
+
+    - ``files/``, ``knowledge/`` — bundle-owned folders that always exist on the
+      env but may be empty.
+    - ``app-data/storage/``, ``app-data/uploads/``, ``app-data/cache/`` — the
+      per-user persistent volume mounted at ``/app/workspace/app-data`` in the
+      env. Created locally so script paths resolve immediately and Mutagen has
+      a target to sync into.
     """
-    (workspace / "files").mkdir(parents=True, exist_ok=True)
+    for rel in (
+        "files",
+        "knowledge",
+        "app-data/storage",
+        "app-data/uploads",
+        "app-data/cache",
+    ):
+        (workspace / rel).mkdir(parents=True, exist_ok=True)
 
 
 def extract_workspace_tarball(

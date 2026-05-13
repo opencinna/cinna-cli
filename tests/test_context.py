@@ -72,6 +72,8 @@ def test_generate_gitignore(workspace_root):
     assert "CLAUDE.md" in content
     assert "WEBAPP_BUILDING.md" in content
     assert "COMPLEX_AGENT_DESIGN.md" in content
+    assert "workspace/credentials/" in content
+    assert "workspace/app-data/" in content
 
 
 def test_generate_gitignore_no_overwrite(workspace_root):
