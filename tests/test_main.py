@@ -238,7 +238,7 @@ def test_dev_starts_session_and_attaches_foreground(
     result = runner.invoke(cli, ["dev"])
     assert result.exit_code == 0
     mock_start.assert_called_once()
-    mock_run_fg.assert_called_once_with(sample_config)
+    mock_run_fg.assert_called_once_with(sample_config, workspace_root)
 
 
 def test_list_empty_registry(runner, monkeypatch, tmp_path):

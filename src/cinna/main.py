@@ -408,7 +408,7 @@ def dev():
 
     st = sync_session.start(config, root)
     console.status(f"Sync session created ({st.state}) — attaching live view. Press Ctrl-C to stop.")
-    sync_session.run_foreground(config)
+    sync_session.run_foreground(config, root)
     console.status("Sync session terminated.")
 
 

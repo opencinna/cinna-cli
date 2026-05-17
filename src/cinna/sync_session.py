@@ -46,7 +46,7 @@ sync:
         - .pytest_cache/
         - .DS_Store
     scan:
-      mode: accelerated
+      mode: full
 """
 
 
@@ -297,12 +297,12 @@ def stop(config: CinnaConfig) -> None:
     _run_mutagen(["sync", "terminate", session_name(config.agent_id)], config)
 
 
-def run_foreground(config: CinnaConfig) -> int:
-    """Attach the terminal to the Mutagen sync session via a two-tab TUI.
+def run_foreground(config: CinnaConfig, workspace_root: Path) -> int:
+    """Attach the terminal to the Mutagen sync session via a live TUI.
 
-    The TUI polls ``mutagen sync list`` once per second. Tab 1 renders a
-    friendly status block and a derived activity log; Tab 2 shows the raw
-    ``mutagen sync list --long`` output for power users.
+    Three tabs: Sync (status + per-file activity log), Details (raw
+    ``mutagen sync list --long``), and Conflicts (interactive resolution
+    for files Mutagen couldn't auto-merge).
 
     Blocks until the user presses ``q`` / Ctrl-C. On return the Mutagen
     session is terminated so sync does not outlive the TUI.
@@ -315,7 +315,7 @@ def run_foreground(config: CinnaConfig) -> int:
     env = _mutagen_env(config)
     rc = 0
     try:
-        rc = run_tui(config, session, env)
+        rc = run_tui(config, session, env, workspace_root)
     except KeyboardInterrupt:
         rc = 0
     finally:
@@ -343,9 +343,10 @@ def _to_status(config: CinnaConfig, session: dict) -> SyncStatus:
     """
     raw_state = (session.get("status") or session.get("state") or "").lower()
     paused = bool(session.get("paused"))
+    base = base_status(raw_state)
     if paused:
         state = "paused"
-    elif raw_state in {"watching", "scanning", "staging", "transitioning", "saving", "reconciling", "connected", "watching-changes"}:
+    elif base in {"watching", "scanning", "staging", "transitioning", "saving", "reconciling", "connected"}:
         state = "connected"
     elif raw_state in {"disconnected", "connecting"}:
         state = "disconnected"
@@ -380,6 +381,16 @@ def _safe_int(v) -> int:
         return 0
 
 
+def base_status(raw: str) -> str:
+    """Strip Mutagen's side suffix (e.g. ``staging-beta`` → ``staging``).
+
+    Mutagen distinguishes the receiving side in its status string while a
+    transfer is in flight, but most consumers care about the phase, not the
+    direction.
+    """
+    return raw.split("-", 1)[0] if "-" in raw else raw
+
+
 @dataclass
 class Conflict:
     path: Path
@@ -411,6 +422,64 @@ def list_conflicts(config: CinnaConfig, workspace_root: Path) -> list[Conflict]:
                 kind = "beta"
         results.append(Conflict(path=path, kind=kind))
     return results
+
+
+@dataclass
+class ConflictGroup:
+    """Two-sided view of one conflicted path.
+
+    Mutagen may write one or both ``.conflict.<side>.<ts>`` copies depending
+    on which side it considered the winner. ``canonical`` is the real
+    workspace path the two copies are versions of.
+    """
+    canonical: Path
+    alpha_copy: Path | None = None
+    beta_copy: Path | None = None
+
+
+def _canonical_from_conflict(p: Path) -> Path:
+    """``foo/bar.txt.conflict.alpha.20260101`` → ``foo/bar.txt``."""
+    name = p.name
+    idx = name.find(".conflict.")
+    if idx <= 0:
+        return p
+    return p.parent / name[:idx]
+
+
+def group_conflicts(conflicts: list[Conflict]) -> list[ConflictGroup]:
+    """Bucket flat conflict-copy paths by their canonical workspace path."""
+    groups: dict[Path, ConflictGroup] = {}
+    for c in conflicts:
+        canonical = _canonical_from_conflict(c.path)
+        g = groups.setdefault(canonical, ConflictGroup(canonical=canonical))
+        if c.kind == "alpha":
+            g.alpha_copy = c.path
+        elif c.kind == "beta":
+            g.beta_copy = c.path
+    return sorted(groups.values(), key=lambda g: str(g.canonical))
+
+
+def resolve_conflict(group: ConflictGroup, side: str) -> None:
+    """Apply the user's choice: keep ``side``'s version at ``canonical``.
+
+    side: ``"alpha"`` (local) or ``"beta"`` (remote).
+
+    When the named side's conflict copy exists, it replaces the canonical
+    file. When it doesn't, the canonical file is already that side's content,
+    so we only delete the loser's copy. Mutagen picks up the change on its
+    next scan and propagates the resolution to the other endpoint.
+    """
+    if side not in ("alpha", "beta"):
+        raise ValueError(f"side must be 'alpha' or 'beta', got {side!r}")
+    target = group.alpha_copy if side == "alpha" else group.beta_copy
+    other = group.beta_copy if side == "alpha" else group.alpha_copy
+
+    if target is not None and target.exists():
+        if group.canonical.exists() and group.canonical.is_file():
+            group.canonical.unlink()
+        target.rename(group.canonical)
+    if other is not None and other.exists():
+        other.unlink()
 
 
 def session_log_dir(workspace_root: Path) -> Path:

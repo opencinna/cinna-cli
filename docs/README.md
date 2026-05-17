@@ -195,6 +195,7 @@ main.py  (CLI commands — Click)
   ├── client.py          — PlatformClient: HTTP + SSE stream_exec
   ├── mutagen_runtime.py — detect/install Mutagen; gate on version match
   ├── sync_session.py    — wrap the `mutagen` CLI (start/stop/status/conflicts)
+  ├── sync_tui.py        — live Textual TUI shown by `cinna dev` (Sync/Details/Conflicts tabs)
   ├── sync_ssh_shim.py   — `cinna-sync-ssh` entry point (WebSocket transport)
   ├── sync.py            — tarball/zip extraction helpers (initial clone only)
   ├── context.py         — CLAUDE.md, BUILDING_AGENT.md, .mcp.json, opencode.json
@@ -304,7 +305,12 @@ Opening the sync WebSocket keeps the remote env warm. The platform heartbeats `l
 
 ### Conflicts
 
-Mutagen's `two-way-safe` mode writes `<name>.conflict.<side>.<timestamp>` when it can't auto-merge. `cinna sync conflicts` walks the workspace and surfaces them. Users resolve by opening in their editor, picking a winner, and deleting the conflict copy. There is deliberately no magic UI — editors already have good 3-way merge tooling.
+Mutagen 0.18.1 in `two-way-safe` records conflicts in its session state (the `conflicts[]` array of `mutagen sync list --template '{{json .}}'`) but, contrary to older mutagen behavior, does **not** write `<name>.conflict.<side>.<timestamp>` files to disk — both sides simply retain their divergent content. See [`mutagen_capabilities.md` §7](./mutagen_capabilities.md#7--two-way-safe-does-not-write-conflictsidets-files) for the empirical proof and re-verification steps.
+
+Two surfaces expose conflicts:
+
+- **`cinna sync conflicts`** — a read-only Click subcommand that walks the workspace for any `*.conflict.*` files mutagen *does* end up writing (other sync modes, or future mutagen versions, may still produce them). Implementation lives in `sync_session.list_conflicts`.
+- **The Conflicts tab in `cinna dev`** — sourced from mutagen's JSON `conflicts[]`, always populated when a conflict exists. The user navigates the list with `↑`/`↓` and resolves with `1` (take REMOTE) or `5` (take LOCAL). Resolution mechanism: delete the file on the losing side (locally with `unlink()`, remotely via `cinna exec rm`) then `mutagen sync reset <session>`; mutagen sees one side empty, no common ancestor, and propagates the survivor. Verified against 0.18.1; see [`interface.md`](./interface.md) for the full element-to-mutagen-capability mapping.
 
 ---
 
@@ -428,6 +434,7 @@ uv run ruff format --check src/
 | WebSocket client | websockets | Minimal dep for the sync shim |
 | Sync engine | Mutagen | Battle-tested bidirectional sync; OSS; cross-platform |
 | Terminal | Rich | Spinners, panels, tables |
+| Live TUI | Textual | Three-tab interactive view (`cinna dev`); built on Rich |
 | MCP | mcp SDK | Official protocol SDK |
 | Tests | pytest + respx | Standard; respx is purpose-built for httpx |
 | Build | Hatchling | Minimal, standards-compliant |
@@ -440,7 +447,7 @@ uv run ruff format --check src/
 - **Interactive stdin for `cinna exec`** — REPLs, debuggers.
 - **Port forwarding** — `cinna forward local:remote` (Mutagen supports it).
 - **Post-sync hooks** — e.g. `uv sync` on `pyproject.toml` change.
-- **Web UI conflict resolution** — TUI and editor-based only for now.
+- **Web UI conflict resolution** — the in-TUI Conflicts tab covers the common case; editor-based 3-way merge stays the fallback for ones the TUI can't handle (e.g. asymmetric directory/file conflicts).
 - **Multi-device presence UI**.
 - **Bundled Mutagen daemon** — stay with a user-installed daemon.
 - **Telemetry pipe** to the backend.
