@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -179,6 +180,29 @@ def _looks_like_stale_daemon_error(stderr: str) -> bool:
     return any(marker in text for marker in _STALE_DAEMON_MARKERS)
 
 
+# The backend closes the sync-stream WebSocket with code 1013 ("try again later")
+# while it auto-activates a suspended agent environment. The shim surfaces this
+# as a "received 1013 (try again later)" line and Mutagen reports it as a
+# handshake EOF. Detect it so we can retry transparently instead of dumping the
+# raw stack on the user.
+_AGENT_ENV_WAKING_MARKERS = (
+    "received 1013",
+    "(try again later)",
+)
+
+
+def _looks_like_agent_env_waking(stderr: str, stdout: str = "") -> bool:
+    text = (stderr or "") + "\n" + (stdout or "")
+    return any(marker in text for marker in _AGENT_ENV_WAKING_MARKERS)
+
+
+# Two retries spaced 5s apart give the backend ~10s to finish auto-activation
+# before we give up. Auto-activation polls for "running" status with a 120s
+# deadline server-side, but the WS handshake fails fast — each client retry
+# re-triggers ensure_environment_running and re-polls.
+_WAKING_RETRY_DELAYS_SECONDS = (5, 5)
+
+
 def _restart_daemon(config: CinnaConfig) -> None:
     """Bounce the Mutagen daemon so it picks up our env on next spawn.
 
@@ -278,15 +302,56 @@ def start(config: CinnaConfig, workspace_root: Path) -> SyncStatus:
         str(local_path),
         remote_url,
     ]
-    result = _run_mutagen(args, config, cwd=workspace_root)
-    if result.returncode != 0 and _looks_like_stale_daemon_error(result.stderr):
-        # Daemon was started before our current MUTAGEN_SSH_PATH wiring. Bounce
-        # it and retry once; the second pass runs against a fresh env.
-        _restart_daemon(config)
+
+    stale_daemon_restarted = False
+    waking_attempt = 0  # how many "agent env waking" retries we've already burned
+    while True:
         result = _run_mutagen(args, config, cwd=workspace_root)
-    if result.returncode != 0:
+        if result.returncode == 0:
+            break
+
+        if (
+            not stale_daemon_restarted
+            and _looks_like_stale_daemon_error(result.stderr)
+        ):
+            # Daemon was started before our current MUTAGEN_SSH_PATH wiring.
+            # Bounce it and retry; the second pass runs against a fresh env.
+            _restart_daemon(config)
+            stale_daemon_restarted = True
+            continue
+
+        if _looks_like_agent_env_waking(result.stderr, result.stdout):
+            if waking_attempt < len(_WAKING_RETRY_DELAYS_SECONDS):
+                delay = _WAKING_RETRY_DELAYS_SECONDS[waking_attempt]
+                total = len(_WAKING_RETRY_DELAYS_SECONDS)
+                waking_attempt += 1
+                console.warn(
+                    "Agent environment is not ready yet (waking up?). "
+                    f"Retrying in {delay}s ({waking_attempt}/{total})…"
+                )
+                logger.info(
+                    "Agent env not ready (1013); retry %d/%d after %ds",
+                    waking_attempt, total, delay,
+                )
+                time.sleep(delay)
+                # A failed `sync create` may leave a half-registered session in
+                # the daemon. Terminate it so the retry starts from a clean
+                # slate; ignore the result since "not found" is fine.
+                _run_mutagen(
+                    ["sync", "terminate", session_name(config.agent_id)], config
+                )
+                continue
+            raise click.ClickException(
+                "Cannot reach the agent environment.\n"
+                "The platform reported the environment is still waking up or "
+                "unavailable after several retries.\n"
+                "Open the agent in the platform UI and confirm its environment "
+                "is running, then re-run 'cinna dev'."
+            )
+
         raise click.ClickException(
-            f"Failed to create Mutagen session:\n{result.stderr.strip() or result.stdout.strip()}"
+            "Failed to create Mutagen session:\n"
+            f"{result.stderr.strip() or result.stdout.strip()}"
         )
 
     return status(config)

@@ -17,6 +17,7 @@ the sync after the TUI closes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -289,14 +290,29 @@ class SyncApp(App):
 
     async def on_unmount(self) -> None:
         self._shutting_down = True
-        for task in (self._monitor_task, self._details_task):
-            if task is not None:
-                task.cancel()
         if self._monitor_proc is not None and self._monitor_proc.returncode is None:
             try:
                 self._monitor_proc.terminate()
             except ProcessLookupError:
                 pass
+
+        # Cancel the data loops AND await them. If we return before they finish,
+        # textual closes the asyncio loop while a `mutagen` subprocess is still
+        # running in the background; when that process eventually exits, its
+        # SIGCHLD is dispatched to a closed loop and we get "Loop <...> that
+        # handles pid N is closed" on stderr. Awaiting the tasks here gives
+        # their finally-blocks a chance to fully reap.
+        pending = [t for t in (self._monitor_task, self._details_task) if t is not None]
+        for task in pending:
+            task.cancel()
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                logger.debug("data-loop tasks did not finish cleanly within 2s")
 
     def _disable_mouse_tracking(self) -> None:
         """Turn off the mouse-tracking modes textual enabled on startup.
@@ -472,9 +488,22 @@ class SyncApp(App):
                 env=self._env,
                 start_new_session=True,
             )
-            stdout, _ = await proc.communicate()
         except (FileNotFoundError, OSError) as exc:
             return f"(mutagen unavailable: {exc})"
+
+        try:
+            stdout, _ = await proc.communicate()
+        except asyncio.CancelledError:
+            # The TUI is shutting down; reap the child before it outlives the
+            # event loop and triggers a "Loop ... is closed" SIGCHLD warning.
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+            raise
         if proc.returncode != 0:
             return ""
         return stdout.decode("utf-8", errors="replace").strip()

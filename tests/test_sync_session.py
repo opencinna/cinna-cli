@@ -185,3 +185,106 @@ def test_start_retries_after_stale_daemon(mock_run, sample_config, tmp_path):
     assert any(args[:2] == ["daemon", "stop"] for args in mutagen_invocations)
     # Must have invoked sync create at least twice (retry after bounce).
     assert sum(1 for args in mutagen_invocations if args[:2] == ["sync", "create"]) == 2
+
+
+def test_looks_like_agent_env_waking():
+    from cinna.sync_session import _looks_like_agent_env_waking
+
+    real_world_stderr = (
+        "Error: unable to connect to beta: unable to connect to endpoint: "
+        "unable to dial agent endpoint: unable to handshake with agent process: "
+        "unable to receive server magic number: EOF (error output: "
+        "cinna-sync-ssh: ws pump ended: received 1013 (try again later); "
+        "then sent 1013 (try again later))"
+    )
+    assert _looks_like_agent_env_waking(real_world_stderr)
+    assert _looks_like_agent_env_waking("", real_world_stderr)
+    assert not _looks_like_agent_env_waking("auth failed: 401")
+    assert not _looks_like_agent_env_waking("")
+
+
+@patch("cinna.sync_session.time.sleep", lambda _s: None)
+@patch("cinna.sync_session._run_mutagen")
+def test_start_retries_when_agent_env_waking_then_succeeds(
+    mock_run, sample_config, tmp_path
+):
+    """When the backend closes the WS with 1013 ('try again later') because the
+    agent env is auto-activating, the CLI must retry a couple of times before
+    surfacing an error."""
+    from cinna.sync_session import start
+
+    (tmp_path / "workspace").mkdir()
+    waking_err = (
+        "Error: unable to handshake with agent process: "
+        "unable to receive server magic number: EOF (error output: "
+        "cinna-sync-ssh: ws pump ended: received 1013 (try again later))"
+    )
+
+    create_calls = {"n": 0}
+
+    def fake_run(args, *_a, **_kw):
+        first = args[0]
+        second = args[1] if len(args) > 1 else ""
+        if first == "daemon":
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if first == "sync" and second == "list":
+            return MagicMock(returncode=0, stdout="[]", stderr="")
+        if first == "sync" and second == "terminate":
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if first == "sync" and second == "create":
+            create_calls["n"] += 1
+            # First create fails with 1013; second one succeeds.
+            if create_calls["n"] == 1:
+                return MagicMock(returncode=1, stdout="", stderr=waking_err)
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    mock_run.side_effect = fake_run
+    start(sample_config, tmp_path)
+
+    assert create_calls["n"] == 2
+    # Between attempts we terminate the half-registered session.
+    invocations = [c.args[0] for c in mock_run.call_args_list]
+    assert any(args[:2] == ["sync", "terminate"] for args in invocations)
+
+
+@patch("cinna.sync_session.time.sleep", lambda _s: None)
+@patch("cinna.sync_session._run_mutagen")
+def test_start_gives_up_with_friendly_error_after_max_waking_retries(
+    mock_run, sample_config, tmp_path
+):
+    """After exhausting the waking-env retries, the user sees a friendly
+    message instead of the raw Mutagen handshake-EOF stack."""
+    import click
+    import pytest
+
+    from cinna.sync_session import start
+
+    (tmp_path / "workspace").mkdir()
+    waking_err = (
+        "unable to handshake with agent process: received 1013 (try again later)"
+    )
+
+    def fake_run(args, *_a, **_kw):
+        first = args[0]
+        second = args[1] if len(args) > 1 else ""
+        if first == "daemon":
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if first == "sync" and second == "list":
+            return MagicMock(returncode=0, stdout="[]", stderr="")
+        if first == "sync" and second == "terminate":
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if first == "sync" and second == "create":
+            return MagicMock(returncode=1, stdout="", stderr=waking_err)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    mock_run.side_effect = fake_run
+    with pytest.raises(click.ClickException) as exc_info:
+        start(sample_config, tmp_path)
+
+    msg = exc_info.value.format_message()
+    assert "Cannot reach the agent environment" in msg
+    # The raw Mutagen "magic number" / 1013 detail must not be in the surfaced
+    # error — that's the noise we're hiding from the user.
+    assert "1013" not in msg
+    assert "magic number" not in msg
