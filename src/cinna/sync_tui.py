@@ -199,8 +199,8 @@ class SyncApp(App):
         # 1/5 only do anything on the Conflicts tab with a row highlighted;
         # the actions no-op otherwise so the user can mash them harmlessly.
         # 1 and 5 are spaced apart on the keyboard to make a misfire unlikely.
-        Binding("1", "take_remote", "1 take REMOTE", show=True, priority=True),
-        Binding("5", "take_local", "5 take LOCAL", show=True, priority=True),
+        Binding("1", "take_remote", "take REMOTE", show=True, priority=True),
+        Binding("5", "take_local", "take LOCAL", show=True, priority=True),
     ]
 
     # JSON state comes from a long-running `mutagen sync monitor` subprocess
@@ -361,6 +361,22 @@ class SyncApp(App):
                 self.query_one("#conflicts-list", OptionList).focus()
             except Exception:
                 pass
+        # Footer reflects bindings as of the last refresh; tab changes flip
+        # whether take_remote/take_local are applicable (see check_action).
+        self.refresh_bindings()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # 1/5 only resolve conflicts, which only makes sense on that tab.
+        # Returning False hides them from the footer entirely (None would
+        # leave them grayed out, which is still noisy on the other tabs).
+        if action in ("take_remote", "take_local"):
+            try:
+                active = self.query_one(TabbedContent).active
+            except Exception:
+                return True
+            if active != "conflicts-tab":
+                return False
+        return True
 
     # ── Data loops ────────────────────────────────────────────────────────
 
