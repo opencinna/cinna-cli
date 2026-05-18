@@ -218,6 +218,40 @@ def test_exec_command(mock_load, mock_find, mock_exec, runner, workspace_root, s
     mock_exec.assert_called_once_with(sample_config, "python scripts/main.py")
 
 
+@patch("cinna.main.PlatformClient")
+def test_run_remote_exec_logs_start_and_stop(mock_client_cls, sample_config, caplog):
+    """`cinna exec` must emit start/stop log records — without them this whole
+    code path is invisible in cinna.log, which has previously made remote
+    failures very hard to debug.
+    """
+    import logging
+    from cinna.main import _run_remote_exec
+
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.stream_exec.return_value = iter([
+        {"type": "exec_id", "exec_id": "ex-1"},
+        {"type": "tool_result_delta", "content": "hi\n", "metadata": {"stream": "stdout"}},
+        {"type": "tool_result_delta", "content": "warn\n", "metadata": {"stream": "stderr"}},
+        {"type": "done", "exit_code": 0},
+    ])
+
+    with caplog.at_level(logging.DEBUG, logger="cinna.exec"):
+        exit_code = _run_remote_exec(sample_config, "echo hi")
+
+    assert exit_code == 0
+    messages = [r.getMessage() for r in caplog.records if r.name == "cinna.exec"]
+    assert any(m.startswith("exec start:") and "echo hi" in m for m in messages)
+    assert any("exec_id assigned: ex-1" in m for m in messages)
+    assert any(
+        m.startswith("exec stop:")
+        and "exit_code=0" in m
+        and "stdout=3B" in m
+        and "stderr=5B" in m
+        and "terminal=done" in m
+        for m in messages
+    )
+
+
 @patch("cinna.main.sync_session.run_foreground")
 @patch("cinna.main.sync_session.start")
 @patch("cinna.main.ensure_mutagen_ready")

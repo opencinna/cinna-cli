@@ -1,9 +1,11 @@
 """cinna CLI — local development for Cinna Core agents."""
 
+import logging
 import os
 import platform
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -20,6 +22,8 @@ from cinna.config import (
 )
 from cinna.mcp_proxy import run_mcp_proxy
 from cinna.mutagen_runtime import ensure_mutagen_ready
+
+logger = logging.getLogger("cinna.exec")
 
 
 @click.group()
@@ -128,13 +132,24 @@ def exec_cmd(command: tuple[str, ...]):
 def _run_remote_exec(config, command_str: str) -> int:
     """Drive the /exec SSE stream and mirror events to the local terminal."""
     exit_code = 0
+    exec_id: str | None = None
+    started_at = time.monotonic()
+    stdout_bytes = 0
+    stderr_bytes = 0
+    first_delta_at: float | None = None
+    terminal_event: str = "no-terminal-event"
+
+    logger.info(
+        "exec start: agent=%s cmd=%r", config.agent_id, command_str
+    )
+
     with PlatformClient(config) as client:
         try:
             for event in client.stream_exec(config.agent_id, command_str):
                 etype = event.get("type")
                 if etype == "exec_id":
-                    # First event — nothing to print. Remember it in case we
-                    # later ship an /exec-interrupt endpoint.
+                    exec_id = event.get("exec_id")
+                    logger.debug("exec_id assigned: %s", exec_id)
                     continue
                 if etype == "tool_result_delta":
                     chunk = event.get("content", "")
@@ -142,15 +157,45 @@ def _run_remote_exec(config, command_str: str) -> int:
                     target = sys.stderr if stream == "stderr" else sys.stdout
                     target.write(chunk)
                     target.flush()
+                    nbytes = len(chunk.encode("utf-8", errors="replace"))
+                    if stream == "stderr":
+                        stderr_bytes += nbytes
+                    else:
+                        stdout_bytes += nbytes
+                    if first_delta_at is None:
+                        first_delta_at = time.monotonic()
+                        logger.debug(
+                            "exec first output (stream=%s, %d bytes) after %.3fs",
+                            stream, nbytes, first_delta_at - started_at,
+                        )
                 elif etype == "done":
                     exit_code = int(event.get("exit_code", 0))
+                    terminal_event = "done"
+                    logger.debug("exec done event: exit_code=%s", exit_code)
                 elif etype == "interrupted":
                     exit_code = int(event.get("exit_code", 130))
+                    terminal_event = "interrupted"
+                    logger.info("exec interrupted by remote: exit_code=%s", exit_code)
                 elif etype == "error":
-                    console.error(event.get("content", "unknown error"))
+                    msg = event.get("content", "unknown error")
+                    console.error(msg)
                     exit_code = 1
+                    terminal_event = "error"
+                    logger.error("exec remote error: %s", msg)
+                else:
+                    logger.debug("exec unknown event type=%r: %.200s", etype, event)
         except KeyboardInterrupt:
             exit_code = 130
+            terminal_event = "keyboard-interrupt"
+            logger.info("exec interrupted locally (Ctrl-C)")
+
+    duration = time.monotonic() - started_at
+    logger.info(
+        "exec stop: agent=%s exec_id=%s exit_code=%s duration=%.3fs "
+        "stdout=%dB stderr=%dB terminal=%s",
+        config.agent_id, exec_id, exit_code, duration,
+        stdout_bytes, stderr_bytes, terminal_event,
+    )
     return exit_code
 
 

@@ -140,6 +140,9 @@ class PlatformClient:
         """
         url = f"/api/v1/cli/agents/{agent_id}/exec"
         payload = {"command": command}
+        logger.info(
+            "stream_exec open: agent=%s cmd=%.200s", agent_id, command
+        )
         with self._client.stream(
             "POST", url, json=payload, timeout=EXEC_STREAM_TIMEOUT
         ) as response:
@@ -149,15 +152,23 @@ class PlatformClient:
                 self._handle_response(response)
                 return
 
+            logger.debug(
+                "stream_exec connected: agent=%s status=%s", agent_id, response.status_code
+            )
+            event_count = 0
             for line in response.iter_lines():
                 if not line:
                     continue
                 if line.startswith("data: "):
                     data_str = line[6:]
                     try:
+                        event_count += 1
                         yield json.loads(data_str)
                     except json.JSONDecodeError:
                         logger.warning("Could not parse SSE event: %s", data_str[:200])
+            logger.debug(
+                "stream_exec closed: agent=%s events=%d", agent_id, event_count
+            )
 
     def close(self):
         self._client.close()
