@@ -125,7 +125,9 @@ class PlatformClient:
 
     # --- Remote exec (SSE stream) ---
 
-    def stream_exec(self, agent_id: str, command: str) -> Iterator[dict]:
+    def stream_exec(
+        self, agent_id: str, command: str, timeout: int | None = None
+    ) -> Iterator[dict]:
         """POST /api/v1/cli/agents/{id}/exec — stream command output events.
 
         Yields parsed event dicts. Known shapes:
@@ -137,11 +139,20 @@ class PlatformClient:
 
         The caller is responsible for interpreting `done`/`interrupted` and
         mapping to a process exit code.
+
+        ``timeout`` (seconds) bounds the remote command's wall-clock run
+        time on the platform side. When omitted, the platform applies its
+        default.
         """
         url = f"/api/v1/cli/agents/{agent_id}/exec"
-        payload = {"command": command}
+        payload: dict = {"command": command}
+        if timeout is not None:
+            payload["timeout"] = timeout
         logger.info(
-            "stream_exec open: agent=%s cmd=%.200s", agent_id, command
+            "stream_exec open: agent=%s timeout=%s cmd=%.200s",
+            agent_id,
+            timeout,
+            command,
         )
         with self._client.stream(
             "POST", url, json=payload, timeout=EXEC_STREAM_TIMEOUT

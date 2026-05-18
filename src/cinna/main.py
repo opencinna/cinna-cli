@@ -110,8 +110,16 @@ def set_token(setup_input: tuple[str, ...], name: str | None):
 
 
 @cli.command(name="exec", context_settings={"ignore_unknown_options": True})
+@click.option(
+    "--timeout",
+    "-t",
+    type=click.IntRange(min=1, max=86400),
+    default=1800,
+    show_default=True,
+    help="Max wall-clock seconds the remote command may run before being killed.",
+)
 @click.argument("command", nargs=-1, required=True)
-def exec_cmd(command: tuple[str, ...]):
+def exec_cmd(timeout: int, command: tuple[str, ...]):
     """Run a command in the remote agent environment.
 
     Output streams back in real time via the platform. Exit code matches the
@@ -121,15 +129,21 @@ def exec_cmd(command: tuple[str, ...]):
       cinna exec python scripts/main.py
       cinna exec pip install pandas
       cinna exec bash -c 'ls -la'
+      cinna exec --timeout 3600 python long_backfill.py
+
+    If your remote command takes its own ``--timeout`` flag, separate it
+    from cinna's option with ``--``:
+
+      cinna exec --timeout 3600 -- python tool.py --timeout 30
     """
     root = find_workspace_root()
     config = load_config(root)
 
-    exit_code = _run_remote_exec(config, " ".join(command))
+    exit_code = _run_remote_exec(config, " ".join(command), timeout=timeout)
     sys.exit(exit_code)
 
 
-def _run_remote_exec(config, command_str: str) -> int:
+def _run_remote_exec(config, command_str: str, timeout: int = 1800) -> int:
     """Drive the /exec SSE stream and mirror events to the local terminal."""
     exit_code = 0
     exec_id: str | None = None
@@ -140,12 +154,17 @@ def _run_remote_exec(config, command_str: str) -> int:
     terminal_event: str = "no-terminal-event"
 
     logger.info(
-        "exec start: agent=%s cmd=%r", config.agent_id, command_str
+        "exec start: agent=%s timeout=%ds cmd=%r",
+        config.agent_id,
+        timeout,
+        command_str,
     )
 
     with PlatformClient(config) as client:
         try:
-            for event in client.stream_exec(config.agent_id, command_str):
+            for event in client.stream_exec(
+                config.agent_id, command_str, timeout=timeout
+            ):
                 etype = event.get("type")
                 if etype == "exec_id":
                     exec_id = event.get("exec_id")
