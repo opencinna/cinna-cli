@@ -272,7 +272,7 @@ def run_setup(setup_input: str, machine_name: str) -> None:
         # in the shared Mutagen daemon.
         if sync_started:
             console.status("Live sync attached — press Ctrl-C to stop.")
-            sync_session.run_foreground(config)
+            sync_session.run_foreground(config, workspace_root)
             console.status("Sync session terminated.")
     finally:
         client.close()
