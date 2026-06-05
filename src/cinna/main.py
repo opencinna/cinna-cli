@@ -3,6 +3,7 @@
 import logging
 import os
 import platform
+import shlex
 import shutil
 import sys
 import time
@@ -125,10 +126,16 @@ def exec_cmd(timeout: int, command: tuple[str, ...]):
     Output streams back in real time via the platform. Exit code matches the
     remote process's exit code. Ctrl+C aborts the stream.
 
+    Arguments are passed through transparently: each token you type is
+    re-quoted (``shlex.quote``) before being sent, so spaces and shell
+    metacharacters inside an argument survive the remote shell intact. Use
+    ordinary single-level quoting, exactly as for a local command.
+
     Examples:
       cinna exec python scripts/main.py
       cinna exec pip install pandas
       cinna exec bash -c 'ls -la'
+      cinna exec python -c 'import sys; print(sys.argv)' "a b"
       cinna exec --timeout 3600 python long_backfill.py
 
     If your remote command takes its own ``--timeout`` flag, separate it
@@ -139,7 +146,7 @@ def exec_cmd(timeout: int, command: tuple[str, ...]):
     root = find_workspace_root()
     config = load_config(root)
 
-    exit_code = _run_remote_exec(config, " ".join(command), timeout=timeout)
+    exit_code = _run_remote_exec(config, shlex.join(command), timeout=timeout)
     sys.exit(exit_code)
 
 

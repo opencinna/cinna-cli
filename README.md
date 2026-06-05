@@ -90,10 +90,13 @@ Read-only views onto the live sync session (started by `cinna dev`).
 
 Stream a command through the platform to the remote agent environment. Output streams back live; Ctrl+C aborts. Exit code matches the remote process.
 
+Arguments pass through transparently — each token is re-quoted before being sent, so spaces and shell metacharacters inside an argument survive intact. Use ordinary single-level quoting, exactly as for a local command. To run a shell snippet (pipes, redirects, `&&`), pass it to a shell explicitly: `cinna exec bash -c '…'`.
+
 ```bash
 cinna exec python scripts/main.py
 cinna exec pip install pandas
-cinna exec 'bash -c "ls -la"'
+cinna exec bash -c 'ls -la'
+cinna exec python -c 'import sys; print(sys.argv)' "a b"
 ```
 
 ### `cinna status`

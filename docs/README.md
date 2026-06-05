@@ -328,6 +328,23 @@ Two surfaces expose conflicts:
 
 Ctrl+C closes the SSE stream; the platform cleans up the remote process. Interactive stdin (REPLs, debuggers) is out of scope for the current `/exec` endpoint.
 
+### Argument quoting
+
+There are **two shell passes** between the keyboard and the remote process, and only one round of quoting belongs to each:
+
+1. **Local shell** (the caller's terminal / agent Bash tool) splits the command line into argv and strips one layer of quotes. `exec` is declared `nargs=-1`, so Click receives these already-split tokens as a tuple.
+2. **Remote shell** — the platform runs the `command` string through `/bin/sh -c`, re-parsing it a second time.
+
+`exec_cmd` (`main.py`) bridges the two with `shlex.join(command)`: it re-quotes each token so the remote `sh -c` reconstructs the *exact* argv the caller typed. This makes `cinna exec` a transparent passthrough — callers write ordinary single-level quoting, exactly as for a local command:
+
+```bash
+cinna exec python -c 'import sys; print(sys.argv)' "a b" '[{"x":"y z"}]'
+```
+
+The historical `" ".join(command)` dropped the word boundaries that the local shell's quoting had implied, so any argument containing a space or a shell metacharacter (`;`, `(`, `{`, …) was re-split or mis-parsed by the remote shell — e.g. `print(sys.argv)` failing with `/bin/sh: Syntax error: word unexpected (expecting ")")`. Regression coverage: `test_exec_command_requotes_args` in `tests/test_main.py`.
+
+To run an actual remote shell snippet (pipes, redirects, `&&`), pass it explicitly to a shell: `cinna exec bash -c 'a | b > c'`.
+
 ---
 
 ## Bootstrap Flow

@@ -215,7 +215,35 @@ def test_exec_command(mock_load, mock_find, mock_exec, runner, workspace_root, s
 
     result = runner.invoke(cli, ["exec", "python", "scripts/main.py"])
     assert result.exit_code == 0
-    mock_exec.assert_called_once_with(sample_config, "python scripts/main.py")
+    mock_exec.assert_called_once_with(
+        sample_config, "python scripts/main.py", timeout=1800
+    )
+
+
+@patch("cinna.main._run_remote_exec")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_exec_command_requotes_args(
+    mock_load, mock_find, mock_exec, runner, workspace_root, sample_config
+):
+    """Tokens with spaces / shell metacharacters must be re-quoted so the
+    remote shell reconstructs the exact argv the caller intended, rather than
+    re-splitting them. Regression for `cinna exec` mangling quoted arguments.
+    """
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_exec.return_value = 0
+
+    result = runner.invoke(
+        cli,
+        ["exec", "python", "-c", "import sys; print(sys.argv)", "a b", '[{"x":"y z"}]'],
+    )
+    assert result.exit_code == 0
+    mock_exec.assert_called_once_with(
+        sample_config,
+        """python -c 'import sys; print(sys.argv)' 'a b' '[{"x":"y z"}]'""",
+        timeout=1800,
+    )
 
 
 @patch("cinna.main.PlatformClient")
