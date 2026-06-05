@@ -13,9 +13,13 @@ def runner():
 
 
 def test_version(runner):
+    from cinna import __version__
+
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.output
+    # __version__ is derived from package metadata, not hard-coded — assert the
+    # CLI reports whatever the installed package version is.
+    assert __version__ in result.output
 
 
 def test_status_no_workspace(runner):

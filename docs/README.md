@@ -442,6 +442,45 @@ uv run ruff format --check src/
 
 ---
 
+## Release Management
+
+The CLI is published to [PyPI](https://pypi.org/project/cinna-cli/) by `.github/workflows/publish.yml`, which runs on any pushed tag matching `v*` (and via manual `workflow_dispatch`). It builds the sdist + wheel with `uv build`, runs `twine check`, then publishes through PyPI **Trusted Publishing** (OIDC — no stored API token) from the GitHub `pypi` environment.
+
+### Cutting a release
+
+Versioning is SemVer (`MAJOR.MINOR.PATCH`); a patch release is the common case. From a clean `main` with the changes you want to ship already merged:
+
+1. **Bump the version** — edit `version` in `pyproject.toml` (e.g. `0.1.4` → `0.1.5`).
+2. **Refresh the lockfile** — run `uv lock` so the `cinna-cli` entry in `uv.lock` matches the new version. These two files are the *only* changes in a release commit.
+3. **Commit** with the exact message `release vX.Y.Z` (this is the established convention — release commits touch nothing but `pyproject.toml` + `uv.lock`).
+4. **Tag** the release commit: `git tag vX.Y.Z` (lightweight tag, on the `release` commit).
+5. **Push both** the branch and the tag: `git push origin main && git push origin vX.Y.Z`. Pushing the tag is what triggers the publish workflow.
+
+```bash
+# version already bumped in pyproject.toml
+uv lock
+git add pyproject.toml uv.lock
+git commit -m "release v0.1.5"
+git tag v0.1.5
+git push origin main && git push origin v0.1.5
+```
+
+### Manual approval gate
+
+> **The release manager must manually approve the PyPI publish.** Pushing the tag only *starts* the workflow — the `publish` job targets the protected `pypi` environment, which requires a reviewer to sign off before it runs. Go to **https://github.com/opencinna/cinna-cli/actions**, open the run for the tag you just pushed, and **approve the deployment**. Until you approve, the build completes but nothing is published to PyPI.
+
+### Required changes checklist
+
+| File | Change | Why |
+|------|--------|-----|
+| `pyproject.toml` | `version = "X.Y.Z"` | The single source of truth for the published package version. |
+| `uv.lock` | regenerated via `uv lock` | Keeps the lockfile's `cinna-cli` entry in sync; CI builds from a consistent tree. |
+| git tag `vX.Y.Z` | created on the release commit | The only trigger for the publish workflow. |
+
+`pyproject.toml` is the **only** place the version lives. `src/cinna/__init__.py` derives `__version__` at runtime from the installed package metadata (`importlib.metadata.version("cinna-cli")`), which is what `cinna --version` reports — so it tracks `pyproject.toml` automatically and never needs a manual bump. (It falls back to `0.0.0+unknown` only when run from a source tree with no installed metadata.)
+
+---
+
 ## Tech Stack
 
 | Component | Choice | Rationale |
