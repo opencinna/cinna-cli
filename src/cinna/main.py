@@ -471,6 +471,29 @@ def dev():
     session — sync does not outlive the TUI. To observe sync from another
     terminal without affecting it, use ``cinna sync status``.
     """
+    _run_dev_session(favor_remote=False)
+
+
+@cli.command()
+def redev():
+    """Start a dev session, resolving startup conflicts in favor of remote.
+
+    Identical to ``cinna dev``, except conflicts surfaced by the initial
+    reconciliation — files that changed on both sides since the last session
+    — are resolved automatically with the remote version winning. Use it to
+    resume work on an agent that was modified from the platform side while
+    your local copy sat idle, without re-running setup.
+
+    The displaced local versions are backed up under
+    ``.cinna/sync/redev-backup/<timestamp>/`` before being overwritten.
+    Only startup conflicts are auto-resolved; conflicts that arise later in
+    the session are surfaced normally in the Conflicts tab.
+    """
+    _run_dev_session(favor_remote=True)
+
+
+def _run_dev_session(favor_remote: bool) -> None:
+    """Shared body of ``cinna dev`` / ``cinna redev``."""
     root = find_workspace_root()
     config = load_config(root)
 
@@ -478,7 +501,30 @@ def dev():
         ensure_mutagen_ready(client, config, root, interactive=sys.stdin.isatty())
 
     st = sync_session.start(config, root)
-    console.status(f"Sync session created ({st.state}) — attaching live view. Press Ctrl-C to stop.")
+
+    if favor_remote:
+        console.status(f"Sync session created ({st.state}).")
+        with console.spinner("Reconciling with remote (remote wins conflicts)…"):
+            res = sync_session.resolve_startup_conflicts_favor_remote(config, root)
+        if res.resolved:
+            console.status(
+                f"Resolved {len(res.resolved)} conflict(s) in favor of remote."
+            )
+            if res.backup_dir is not None:
+                console.status(
+                    f"Local versions backed up to {res.backup_dir}"
+                )
+        else:
+            console.status("No conflicts — local workspace is consistent with remote.")
+        if res.remaining:
+            console.warn(
+                f"{len(res.remaining)} conflict(s) could not be auto-resolved — "
+                "resolve them in the Conflicts tab."
+            )
+        console.status("Attaching live view. Press Ctrl-C to stop.")
+    else:
+        console.status(f"Sync session created ({st.state}) — attaching live view. Press Ctrl-C to stop.")
+
     sync_session.run_foreground(config, root)
     console.status("Sync session terminated.")
 

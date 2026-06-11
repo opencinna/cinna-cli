@@ -79,6 +79,17 @@ cinna set-token yWo36tbkdAOzrALxOEKq31_OA2iMelEg
 
 Start a foreground dev session — creates / resumes the Mutagen sync session for this workspace and attaches the terminal to a two-tab TUI (status + raw Mutagen details). Ctrl-C terminates the session; sync does not outlive the TUI. To observe sync from another terminal without affecting it, use `cinna sync status`.
 
+### `cinna redev`
+
+Like `cinna dev`, but conflicts surfaced by the initial reconciliation are resolved automatically in favor of the **remote** version. Use it to resume work on an agent that was modified from the platform side while your local copy sat idle — same connection, same credentials, no re-setup; the remote data simply wins the startup divergence.
+
+The displaced local versions are backed up under `.cinna/sync/redev-backup/<timestamp>/` before being overwritten. Only startup conflicts are auto-resolved — conflicts that arise later in the session are surfaced normally (Conflicts tab / `cinna sync conflicts`).
+
+```bash
+cd hr-manager-agent/
+cinna redev    # remote wins the initial conflicts, then a normal dev session
+```
+
 ### `cinna sync status | conflicts`
 
 Read-only views onto the live sync session (started by `cinna dev`).

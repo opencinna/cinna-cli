@@ -307,6 +307,84 @@ def test_dev_starts_session_and_attaches_foreground(
     mock_run_fg.assert_called_once_with(sample_config, workspace_root)
 
 
+@patch("cinna.main.sync_session.resolve_startup_conflicts_favor_remote")
+@patch("cinna.main.sync_session.run_foreground")
+@patch("cinna.main.sync_session.start")
+@patch("cinna.main.ensure_mutagen_ready")
+@patch("cinna.main.PlatformClient")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_dev_does_not_auto_resolve_conflicts(
+    mock_load, mock_find, mock_client_cls, mock_ensure, mock_start, mock_run_fg,
+    mock_resolve, runner, workspace_root, sample_config,
+):
+    from cinna.sync_session import SyncStatus
+
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_start.return_value = SyncStatus(session_name="cinna-abc", state="connected")
+    mock_run_fg.return_value = 0
+
+    result = runner.invoke(cli, ["dev"])
+    assert result.exit_code == 0
+    mock_resolve.assert_not_called()
+
+
+@patch("cinna.main.sync_session.resolve_startup_conflicts_favor_remote")
+@patch("cinna.main.sync_session.run_foreground")
+@patch("cinna.main.sync_session.start")
+@patch("cinna.main.ensure_mutagen_ready")
+@patch("cinna.main.PlatformClient")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_redev_resolves_remote_wins_then_attaches(
+    mock_load, mock_find, mock_client_cls, mock_ensure, mock_start, mock_run_fg,
+    mock_resolve, runner, workspace_root, sample_config,
+):
+    from cinna.sync_session import RemoteWinsResult, SyncStatus
+
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_start.return_value = SyncStatus(session_name="cinna-abc", state="connected")
+    mock_resolve.return_value = RemoteWinsResult(
+        resolved=["shared.txt"],
+        backup_dir=workspace_root / ".cinna" / "sync" / "redev-backup" / "x",
+    )
+    mock_run_fg.return_value = 0
+
+    result = runner.invoke(cli, ["redev"])
+    assert result.exit_code == 0
+    mock_resolve.assert_called_once_with(sample_config, workspace_root)
+    mock_run_fg.assert_called_once_with(sample_config, workspace_root)
+    assert "Resolved 1 conflict(s) in favor of remote" in result.output
+    assert "backed up" in result.output
+
+
+@patch("cinna.main.sync_session.resolve_startup_conflicts_favor_remote")
+@patch("cinna.main.sync_session.run_foreground")
+@patch("cinna.main.sync_session.start")
+@patch("cinna.main.ensure_mutagen_ready")
+@patch("cinna.main.PlatformClient")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_redev_warns_about_unresolved_conflicts(
+    mock_load, mock_find, mock_client_cls, mock_ensure, mock_start, mock_run_fg,
+    mock_resolve, runner, workspace_root, sample_config,
+):
+    from cinna.sync_session import RemoteWinsResult, SyncStatus
+
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_start.return_value = SyncStatus(session_name="cinna-abc", state="connected")
+    mock_resolve.return_value = RemoteWinsResult(remaining=["stuck.txt"])
+    mock_run_fg.return_value = 0
+
+    result = runner.invoke(cli, ["redev"])
+    assert result.exit_code == 0
+    assert "No conflicts" in result.output
+    assert "could not be auto-resolved" in result.output
+
+
 def test_list_empty_registry(runner, monkeypatch, tmp_path):
     """`cinna list` on a fresh machine announces no agents instead of crashing."""
     import cinna.config as config_module

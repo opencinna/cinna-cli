@@ -209,7 +209,7 @@ mutagen sync list --template '{{json .}}' cap-conflict | python3 -c 'import json
 
 **Why we don't switch sync mode:** `two-way-resolved` would auto-resolve in alpha's favor, but its effect is session-wide — every conflict would resolve the same way. There's no per-file mode flag. The delete + reset approach is per-file.
 
-**Where we use it:** `src/cinna/sync_tui.py:_resolve_selected`. For the beta-side delete cinna shells out to `cinna exec rm -f -- <path>` since beta lives on the remote agent.
+**Where we use it:** `src/cinna/sync_tui.py:_resolve_selected`. For the beta-side delete cinna shells out to `cinna exec rm -f -- <path>` since beta lives on the remote agent. Also `src/cinna/sync_session.py:resolve_startup_conflicts_favor_remote` (`cinna redev`), which batches the recipe: moves every conflicted local path into a backup dir, then issues one `mutagen sync reset` so all remote versions propagate back at once. The multi-conflict caveat above doesn't bite there because *all* losers are removed before the single reset.
 
 ---
 

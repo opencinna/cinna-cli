@@ -288,3 +288,160 @@ def test_start_gives_up_with_friendly_error_after_max_waking_retries(
     # error — that's the noise we're hiding from the user.
     assert "1013" not in msg
     assert "magic number" not in msg
+
+
+# ─── redev: startup conflict resolution in remote's favor ──────────────────
+
+
+def test_extract_conflict_paths_from_changes():
+    from cinna.sync_session import extract_conflict_paths
+
+    session = {
+        "conflicts": [
+            {
+                "root": "shared.txt",
+                "alphaChanges": [{"path": "shared.txt"}],
+                "betaChanges": [{"path": "shared.txt"}],
+            },
+            {
+                "root": "docs/notes.md",
+                "alphaChanges": [{"path": "docs/notes.md"}],
+                "betaChanges": [{"path": "docs/notes.md"}],
+            },
+        ]
+    }
+    assert extract_conflict_paths(session) == ["docs/notes.md", "shared.txt"]
+
+
+def test_extract_conflict_paths_root_only():
+    """Directory/file disagreements may carry only `root` (capabilities §6)."""
+    from cinna.sync_session import extract_conflict_paths
+
+    session = {"conflicts": [{"root": "data", "alphaChanges": [], "betaChanges": []}]}
+    assert extract_conflict_paths(session) == ["data"]
+
+
+def test_extract_conflict_paths_empty():
+    from cinna.sync_session import extract_conflict_paths
+
+    assert extract_conflict_paths(None) == []
+    assert extract_conflict_paths({}) == []
+    assert extract_conflict_paths({"conflicts": []}) == []
+
+
+def _watching(conflicts=None, cycles=1):
+    return {
+        "name": "cinna-agent123",
+        "status": "watching",
+        "successfulCycles": cycles,
+        "conflicts": conflicts or [],
+    }
+
+
+@patch("cinna.sync_session.time.sleep")
+@patch("cinna.sync_session._run_mutagen")
+@patch("cinna.sync_session._find_session")
+def test_resolve_startup_conflicts_favor_remote(
+    mock_find, mock_run, mock_sleep, sample_config, tmp_path
+):
+    """Local losers are moved to a backup dir, then a single reset propagates
+    the remote versions back (delete-loser + reset recipe, capabilities §8)."""
+    from cinna.sync_session import resolve_startup_conflicts_favor_remote
+
+    ws = tmp_path / "workspace"
+    (ws / "docs").mkdir(parents=True)
+    (ws / "shared.txt").write_text("LOCAL")
+    (ws / "docs" / "notes.md").write_text("LOCAL NOTES")
+
+    conflicts = [
+        {"root": "shared.txt",
+         "alphaChanges": [{"path": "shared.txt"}],
+         "betaChanges": [{"path": "shared.txt"}]},
+        {"root": "docs/notes.md",
+         "alphaChanges": [{"path": "docs/notes.md"}],
+         "betaChanges": [{"path": "docs/notes.md"}]},
+    ]
+    mock_find.side_effect = [_watching(conflicts), _watching()]
+    mock_run.return_value = MagicMock(returncode=0)
+
+    result = resolve_startup_conflicts_favor_remote(sample_config, tmp_path)
+
+    assert result.resolved == ["docs/notes.md", "shared.txt"]
+    assert result.remaining == []
+
+    # Local copies moved out of the workspace into the backup dir.
+    assert not (ws / "shared.txt").exists()
+    assert not (ws / "docs" / "notes.md").exists()
+    assert result.backup_dir is not None
+    assert (result.backup_dir / "shared.txt").read_text() == "LOCAL"
+    assert (result.backup_dir / "docs" / "notes.md").read_text() == "LOCAL NOTES"
+
+    # Exactly one batched reset for both conflicts.
+    reset_calls = [c for c in mock_run.call_args_list if c[0][0][:2] == ["sync", "reset"]]
+    assert len(reset_calls) == 1
+
+
+@patch("cinna.sync_session.time.sleep")
+@patch("cinna.sync_session._run_mutagen")
+@patch("cinna.sync_session._find_session")
+def test_resolve_startup_no_conflicts_is_noop(
+    mock_find, mock_run, mock_sleep, sample_config, tmp_path
+):
+    from cinna.sync_session import resolve_startup_conflicts_favor_remote
+
+    (tmp_path / "workspace").mkdir()
+    mock_find.return_value = _watching()
+
+    result = resolve_startup_conflicts_favor_remote(sample_config, tmp_path)
+
+    assert result.resolved == []
+    assert result.remaining == []
+    assert result.backup_dir is None
+    mock_run.assert_not_called()
+
+
+@patch("cinna.sync_session.time.sleep")
+@patch("cinna.sync_session._run_mutagen")
+@patch("cinna.sync_session._find_session")
+def test_resolve_startup_reports_remaining_after_max_rounds(
+    mock_find, mock_run, mock_sleep, sample_config, tmp_path
+):
+    """A conflict the daemon keeps reporting ends up in `remaining`, not
+    silently swallowed."""
+    from cinna.sync_session import resolve_startup_conflicts_favor_remote
+
+    (tmp_path / "workspace").mkdir()
+    sticky = [{"root": "x.txt",
+               "alphaChanges": [{"path": "x.txt"}],
+               "betaChanges": [{"path": "x.txt"}]}]
+    mock_find.return_value = _watching(sticky)
+    mock_run.return_value = MagicMock(returncode=0)
+
+    result = resolve_startup_conflicts_favor_remote(sample_config, tmp_path)
+
+    assert result.resolved == []
+    assert result.remaining == ["x.txt"]
+
+
+@patch("cinna.sync_session.time.sleep")
+@patch("cinna.sync_session._find_session")
+def test_wait_until_settled_times_out(mock_find, mock_sleep, sample_config):
+    import click
+    import pytest
+    from cinna.sync_session import _wait_until_settled
+
+    mock_find.return_value = {"status": "scanning"}
+    with pytest.raises(click.ClickException, match="Timed out"):
+        _wait_until_settled(sample_config, timeout=0)
+
+
+@patch("cinna.sync_session.time.sleep")
+@patch("cinna.sync_session._find_session")
+def test_wait_until_settled_rejects_paused(mock_find, mock_sleep, sample_config):
+    import click
+    import pytest
+    from cinna.sync_session import _wait_until_settled
+
+    mock_find.return_value = {"status": "watching", "paused": True, "successfulCycles": 3}
+    with pytest.raises(click.ClickException, match="paused"):
+        _wait_until_settled(sample_config, timeout=5)

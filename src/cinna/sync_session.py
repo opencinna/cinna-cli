@@ -550,3 +550,129 @@ def resolve_conflict(group: ConflictGroup, side: str) -> None:
 def session_log_dir(workspace_root: Path) -> Path:
     """Where we cache per-session breadcrumbs (exec history, etc.)."""
     return config_dir(workspace_root) / "sync"
+
+
+# ─── redev: startup conflict resolution in remote's favor ──────────────────
+
+
+def extract_conflict_paths(session: dict | None) -> list[str]:
+    """Flatten the session's ``conflicts[]`` JSON into sorted relative paths.
+
+    Mirrors the TUI's ``_extract_conflicts`` but path-only: collects every
+    path from ``alphaChanges`` / ``betaChanges``, falling back to the
+    conflict's ``root`` for kinds (directory/file disagreement, asymmetric
+    delete) whose per-side change arrays are empty.
+    """
+    if not session:
+        return []
+    paths: set[str] = set()
+    for c in session.get("conflicts") or []:
+        found = False
+        for side in ("alphaChanges", "betaChanges"):
+            for change in c.get(side) or []:
+                p = change.get("path") or c.get("root") or ""
+                if p:
+                    paths.add(p)
+                    found = True
+        if not found and c.get("root"):
+            paths.add(c["root"])
+    return sorted(paths)
+
+
+_SETTLE_POLL_SECONDS = 1.0
+
+
+def _wait_until_settled(
+    config: CinnaConfig, timeout: float = 600.0, require_cycle: bool = True
+) -> dict:
+    """Block until the session has finished a reconciliation pass.
+
+    Settled = status ``watching`` plus evidence a cycle actually ran (a
+    successful-cycle count or a populated ``conflicts[]`` — a cycle with
+    conflicts still parks in ``watching``). ``require_cycle=False`` drops
+    that evidence requirement; use it after ``mutagen sync reset``, which may
+    clear the cycle counter.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        session = _find_session(config)
+        if session is not None:
+            if session.get("paused"):
+                raise click.ClickException(
+                    "Sync session is paused — resume it or re-run 'cinna dev'."
+                )
+            raw = base_status((session.get("status") or "").lower())
+            cycles = _safe_int(session.get("successfulCycles"))
+            if raw == "watching" and (
+                not require_cycle or cycles >= 1 or session.get("conflicts")
+            ):
+                return session
+        time.sleep(_SETTLE_POLL_SECONDS)
+    raise click.ClickException(
+        "Timed out waiting for the initial sync to settle. Check connectivity "
+        "with 'cinna sync status' and re-run."
+    )
+
+
+@dataclass
+class RemoteWinsResult:
+    resolved: list[str] = field(default_factory=list)
+    remaining: list[str] = field(default_factory=list)
+    backup_dir: Path | None = None
+
+
+_REDEV_MAX_ROUNDS = 3
+
+
+def resolve_startup_conflicts_favor_remote(
+    config: CinnaConfig, workspace_root: Path, timeout: float = 600.0
+) -> RemoteWinsResult:
+    """Resolve every conflict of a just-started session in remote's favor.
+
+    Waits for the fresh session's first reconciliation, then applies the
+    delete-loser + ``mutagen sync reset`` recipe (see
+    docs/mutagen_capabilities.md §8) to all conflicted paths in one batch:
+    the *local* copy is moved aside so the remote version propagates back.
+    Displaced local copies land under
+    ``.cinna/sync/redev-backup/<timestamp>/`` rather than being deleted.
+
+    Runs a few rounds because the daemon may briefly report stale conflicts
+    right after a reset; paths still conflicted after the last round are
+    returned in ``remaining`` for the caller to surface.
+    """
+    session = _wait_until_settled(config, timeout)
+    ws_root = workspace_dir(workspace_root)
+    backup_root = (
+        session_log_dir(workspace_root)
+        / "redev-backup"
+        / time.strftime("%Y%m%d-%H%M%S")
+    )
+    result = RemoteWinsResult()
+    resolved: set[str] = set()
+
+    for _ in range(_REDEV_MAX_ROUNDS):
+        conflict_paths = extract_conflict_paths(session)
+        if not conflict_paths:
+            break
+        logger.info(
+            "redev: resolving %d conflict(s) in favor of remote: %s",
+            len(conflict_paths),
+            conflict_paths,
+        )
+        for rel in conflict_paths:
+            local = ws_root / rel
+            if local.exists() or local.is_symlink():
+                backup = backup_root / rel
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(local), str(backup))
+                result.backup_dir = backup_root
+            resolved.add(rel)
+        _run_mutagen(["sync", "reset", session_name(config.agent_id)], config)
+        # Give the daemon a beat to process the reset before re-reading state,
+        # otherwise we may observe the pre-reset snapshot and burn a round.
+        time.sleep(_SETTLE_POLL_SECONDS)
+        session = _wait_until_settled(config, timeout, require_cycle=False)
+
+    result.remaining = extract_conflict_paths(session)
+    result.resolved = sorted(resolved - set(result.remaining))
+    return result
