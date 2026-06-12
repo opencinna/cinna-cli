@@ -253,17 +253,114 @@ class AccountClient:
         )
         return self._handle_response(response).json()
 
-    def create_agent(self, name: str, description: str | None = None) -> dict:
+    def create_agent(
+        self,
+        name: str,
+        description: str | None = None,
+        user_workspace_id: str | None = None,
+    ) -> dict:
         """POST /api/v1/cli/account/agents — create an agent (thin client).
 
         Sends only user-specified fields; the backend applies all defaults
         (AI credentials, env template, environment creation) and returns the
-        full agent record.
+        full agent record. ``user_workspace_id`` targets the account's active
+        user workspace (``None`` = Default).
         """
         body: dict = {"name": name}
         if description is not None:
             body["description"] = description
+        if user_workspace_id is not None:
+            body["user_workspace_id"] = user_workspace_id
         response = self._client.post("/api/v1/cli/account/agents", json=body)
+        return self._handle_response(response).json()
+
+    # --- User workspaces ---
+
+    def list_user_workspaces(self) -> dict:
+        """GET /api/v1/cli/account/user-workspaces — the user's own workspaces.
+
+        Catalogue for ``cinna account user-workspace list`` / activation. The
+        *active* workspace is a client-side setting in ``.cinna/account.json``;
+        the backend keeps no active-workspace state.
+        """
+        response = self._client.get("/api/v1/cli/account/user-workspaces")
+        return self._handle_response(response).json()
+
+    # --- Credentials (drafts only — never secret values) ---
+
+    def list_credential_types(self) -> dict:
+        """GET /api/v1/cli/account/credentials/types — type + required-field map."""
+        response = self._client.get("/api/v1/cli/account/credentials/types")
+        return self._handle_response(response).json()
+
+    def list_credentials(self, user_workspace_id: str | None = None) -> dict:
+        """GET /api/v1/cli/account/credentials — metadata-only credential listing.
+
+        ``user_workspace_id``: ``None`` = all, ``""`` = Default workspace, a UUID
+        string = that workspace.
+        """
+        params = (
+            None
+            if user_workspace_id is None
+            else {"user_workspace_id": user_workspace_id}
+        )
+        response = self._client.get(
+            "/api/v1/cli/account/credentials", params=params
+        )
+        return self._handle_response(response).json()
+
+    def create_credential(
+        self,
+        name: str,
+        cred_type: str,
+        notes: str | None = None,
+        service_uri: str | None = None,
+        allow_sharing: bool = False,
+        user_workspace_id: str | None = None,
+    ) -> dict:
+        """POST /api/v1/cli/account/credentials — create a draft credential.
+
+        No secret value is ever sent — the credential is created empty and the
+        user fills it in the UI. Returns ``{credential, required_fields,
+        setup_url}``.
+        """
+        body: dict = {"name": name, "type": cred_type, "allow_sharing": allow_sharing}
+        if notes is not None:
+            body["notes"] = notes
+        if service_uri is not None:
+            body["service_uri"] = service_uri
+        if user_workspace_id is not None:
+            body["user_workspace_id"] = user_workspace_id
+        response = self._client.post("/api/v1/cli/account/credentials", json=body)
+        return self._handle_response(response).json()
+
+    def update_credential(self, credential_id: str, fields: dict) -> dict:
+        """PUT /api/v1/cli/account/credentials/{id} — metadata-only update.
+
+        ``fields`` may contain name / notes / service_uri / allow_sharing /
+        allow_template_sharing. Never a secret value.
+        """
+        response = self._client.put(
+            f"/api/v1/cli/account/credentials/{credential_id}", json=fields
+        )
+        return self._handle_response(response).json()
+
+    def delete_credential(self, credential_id: str, force: bool = False) -> dict:
+        """DELETE /api/v1/cli/account/credentials/{id} — tier-gated delete."""
+        params = {"force": True} if force else None
+        response = self._client.delete(
+            f"/api/v1/cli/account/credentials/{credential_id}", params=params
+        )
+        return self._handle_response(response).json()
+
+    def share_credential_with_agent(
+        self, credential_id: str, agent_id: str
+    ) -> dict:
+        """POST /api/v1/cli/account/credentials/{id}/share-with-agent — attach."""
+        response = self._client.post(
+            f"/api/v1/cli/account/credentials/{credential_id}/share-with-agent",
+            json={"agent_id": agent_id},
+        )
         return self._handle_response(response).json()
 
     def connect_agent_api(

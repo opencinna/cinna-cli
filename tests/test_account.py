@@ -1004,7 +1004,9 @@ def test_agent_create_prints_record_and_hint(
         cli, ["agent", "create", "CRM Agent", "--description", "crm"]
     )
     assert result.exit_code == 0, result.output
-    mock_client.create_agent.assert_called_once_with("CRM Agent", "crm")
+    mock_client.create_agent.assert_called_once_with(
+        "CRM Agent", "crm", user_workspace_id=None
+    )
     assert "agent-new-1" in result.output
     assert "https://ui.example.com/agent/agent-new-1" in result.output
     assert "cinna agent sync crm-agent" in result.output
@@ -1479,6 +1481,303 @@ def test_account_client_create_agent_thin_body(account_client):
     # Thin client: unspecified fields are omitted entirely.
     body = json.loads(route.calls[0].request.content)
     assert body == {"name": "CRM Agent"}
+
+
+# --- Active user workspace ---
+
+
+WORKSPACES_LISTING = {
+    "count": 2,
+    "data": [
+        {"id": "ws-1", "name": "Sales", "user_id": "u-1"},
+        {"id": "ws-2", "name": "Finance", "user_id": "u-1"},
+    ],
+}
+
+
+@patch("cinna.account.AccountClient")
+def test_user_workspace_list_marks_active(
+    mock_client_cls, runner, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("COLUMNS", "240")
+    root = tmp_path / "my-cinna"
+    root.mkdir()
+    (root / "agents").mkdir()
+    save_account_config(
+        AccountConfig(
+            platform_url="https://platform.example.com",
+            frontend_url="https://ui.example.com",
+            account_token="account-token-abc",
+            machine_name="laptop",
+            user_workspace_id="ws-2",
+            user_workspace_name="Finance",
+        ),
+        root,
+    )
+    monkeypatch.chdir(root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_user_workspaces.return_value = WORKSPACES_LISTING
+
+    result = runner.invoke(cli, ["account", "user-workspace", "list"])
+    assert result.exit_code == 0, result.output
+    assert "Sales" in result.output
+    assert "Finance" in result.output
+    assert "Default" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_user_workspace_activate_persists(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_user_workspaces.return_value = WORKSPACES_LISTING
+
+    result = runner.invoke(
+        cli, ["account", "user-workspace", "activate", "Sales"]
+    )
+    assert result.exit_code == 0, result.output
+    cfg = load_account_config(account_root)
+    assert cfg.user_workspace_id == "ws-1"
+    assert cfg.user_workspace_name == "Sales"
+
+
+@patch("cinna.account.AccountClient")
+def test_user_workspace_activate_default_clears(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    # Pre-set an active workspace, then clear via `activate default`.
+    cfg = load_account_config(account_root)
+    cfg.user_workspace_id = "ws-1"
+    cfg.user_workspace_name = "Sales"
+    save_account_config(cfg, account_root)
+
+    result = runner.invoke(
+        cli, ["account", "user-workspace", "activate", "default"]
+    )
+    assert result.exit_code == 0, result.output
+    cleared = load_account_config(account_root)
+    assert cleared.user_workspace_id is None
+    assert cleared.user_workspace_name is None
+    # Clearing is purely local — no workspace listing is fetched.
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_user_workspaces.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_create_threads_active_workspace(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    cfg = load_account_config(account_root)
+    cfg.user_workspace_id = "ws-1"
+    cfg.user_workspace_name = "Sales"
+    save_account_config(cfg, account_root)
+
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.create_agent.return_value = {"id": "agent-new-1", "name": "CRM Agent"}
+
+    result = runner.invoke(cli, ["agent", "create", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.create_agent.assert_called_once_with(
+        "CRM Agent", None, user_workspace_id="ws-1"
+    )
+
+
+# --- Account credentials (drafts only) ---
+
+
+CREDENTIALS_LISTING = {
+    "count": 1,
+    "data": [
+        {
+            "id": "cred-1",
+            "name": "Stripe Key",
+            "type": "api_token",
+            "status": "incomplete",
+        }
+    ],
+}
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_list_renders(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.setenv("COLUMNS", "240")
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_credentials.return_value = CREDENTIALS_LISTING
+
+    result = runner.invoke(cli, ["account", "credentials", "list"])
+    assert result.exit_code == 0, result.output
+    assert "Stripe Key" in result.output
+    assert "needs setup" in result.output
+    mock_client.list_credentials.assert_called_once_with(user_workspace_id=None)
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_create_draft_lists_required_fields(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.create_credential.return_value = {
+        "credential": {
+            "id": "cred-1",
+            "name": "Stripe Key",
+            "type": "api_token",
+            "status": "incomplete",
+        },
+        "required_fields": ["api_token"],
+        "setup_url": "https://ui.example.com/credentials",
+    }
+
+    result = runner.invoke(
+        cli,
+        ["account", "credentials", "create", "--name", "Stripe Key", "--type", "api_token"],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.create_credential.assert_called_once_with(
+        "Stripe Key",
+        "api_token",
+        notes=None,
+        service_uri=None,
+        allow_sharing=False,
+        user_workspace_id=None,
+    )
+    assert "api_token" in result.output
+    assert "https://ui.example.com/credentials" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_create_with_agent_attaches(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.create_credential.return_value = {
+        "credential": {"id": "cred-1", "name": "Stripe Key", "type": "api_token", "status": "incomplete"},
+        "required_fields": ["api_token"],
+        "setup_url": "https://ui.example.com/credentials",
+    }
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(
+        cli,
+        [
+            "account", "credentials", "create",
+            "--name", "Stripe Key", "--type", "api_token",
+            "--agent", "CRM Agent",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.share_credential_with_agent.assert_called_once_with(
+        "cred-1", "agent-123"
+    )
+    assert "Attached to" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_share_with_agent_resolves_name(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(
+        cli,
+        ["account", "credentials", "share-with-agent", "cred-1", "--agent", "HR Manager Agent"],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.share_credential_with_agent.assert_called_once_with(
+        "cred-1", "agent-789"
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_delete_confirms(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+
+    result = runner.invoke(
+        cli, ["account", "credentials", "delete", "cred-1", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.delete_credential.assert_called_once_with("cred-1", force=False)
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_update_metadata_only(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.update_credential.return_value = {
+        "id": "cred-1", "name": "Renamed", "status": "incomplete"
+    }
+
+    result = runner.invoke(
+        cli, ["account", "credentials", "update", "cred-1", "--name", "Renamed"]
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.update_credential.assert_called_once_with(
+        "cred-1", {"name": "Renamed"}
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_update_requires_a_field(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    result = runner.invoke(cli, ["account", "credentials", "update", "cred-1"])
+    assert result.exit_code != 0
+    assert "Nothing to update" in result.output + result.stderr
+
+
+# --- AccountClient credential methods (HTTP-level) ---
+
+
+@respx.mock
+def test_account_client_create_credential_draft_body(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/credentials"
+    ).respond(200, json={"credential": {"id": "cred-1"}, "required_fields": [], "setup_url": ""})
+    account_client.create_credential(
+        "Stripe Key", "api_token", user_workspace_id="ws-1"
+    )
+    body = json.loads(route.calls[0].request.content)
+    # No secret value is ever sent — only metadata + structure.
+    assert body == {
+        "name": "Stripe Key",
+        "type": "api_token",
+        "allow_sharing": False,
+        "user_workspace_id": "ws-1",
+    }
+    assert "credential_data" not in body
+
+
+@respx.mock
+def test_account_client_list_credentials_default_filter(account_client):
+    route = respx.get(
+        "https://platform.example.com/api/v1/cli/account/credentials"
+    ).respond(200, json=CREDENTIALS_LISTING)
+    account_client.list_credentials(user_workspace_id="")
+    assert route.calls[0].request.url.params.get("user_workspace_id") == ""
+
+
+@respx.mock
+def test_account_client_delete_credential_force(account_client):
+    route = respx.delete(
+        "https://platform.example.com/api/v1/cli/account/credentials/cred-1"
+    ).respond(200, json={"message": "ok"})
+    account_client.delete_credential("cred-1", force=True)
+    assert route.calls[0].request.url.params.get("force") == "true"
 
 
 @respx.mock

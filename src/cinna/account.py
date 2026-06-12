@@ -59,6 +59,13 @@ class AccountConfig:
     frontend_url: str
     account_token: str
     machine_name: str
+    # Active user workspace for workspace-scoped creates (agents, and the
+    # credentials they inherit). Client-side only — the backend keeps no
+    # active-workspace state; this id is attached to each create call.
+    # ``None`` = the Default (unassigned) workspace. The name is cached for
+    # display and may go stale on rename (the id is authoritative).
+    user_workspace_id: str | None = None
+    user_workspace_name: str | None = None
 
 
 # ── Account config I/O ──────────────────────────────────────────────────────
@@ -493,6 +500,11 @@ def run_account_status() -> None:
     table.add_row("Frontend", account_cfg.frontend_url)
     table.add_row("Machine", account_cfg.machine_name)
     table.add_row("Account root", str(account_root))
+    if account_cfg.user_workspace_id:
+        ws_label = account_cfg.user_workspace_name or account_cfg.user_workspace_id
+        table.add_row("Active workspace", ws_label)
+    else:
+        table.add_row("Active workspace", "[dim]Default[/dim]")
     table.add_row("Synced agents", str(len(children)))
     table.add_row("Token", _format_token_label(token_status))
 
@@ -668,7 +680,11 @@ def run_agent_create(name: str, description: str | None) -> None:
 
     with console.spinner("Creating agent..."):
         with AccountClient(account_cfg) as client:
-            agent = client.create_agent(name, description)
+            agent = client.create_agent(
+                name,
+                description,
+                user_workspace_id=account_cfg.user_workspace_id,
+            )
 
     agent_id = agent.get("id", "?")
     agent_name = agent.get("name", name)
@@ -677,6 +693,9 @@ def run_agent_create(name: str, description: str | None) -> None:
     console.status(f"Agent created: {agent_name}")
     console.console.print(f"  Agent ID:  {agent_id}")
     console.console.print(f"  Web UI:    {agent_link}")
+    if account_cfg.user_workspace_id:
+        ws_label = account_cfg.user_workspace_name or account_cfg.user_workspace_id
+        console.console.print(f"  Workspace: {ws_label}")
     console.console.print()
     console.console.print(
         f"  cinna agent sync {normalize_agent_dir_name(agent_name)}"
@@ -914,3 +933,354 @@ def run_api(
         return
     click.echo(f"HTTP {response.status_code}", err=True)
     sys.exit(1)
+
+
+# ── Active user workspace ───────────────────────────────────────────────────
+
+
+_CLEAR_WORKSPACE_REFS = {"default", "none", "clear", ""}
+
+
+def _resolve_account_workspace(items: list[dict], ref: str) -> dict:
+    """Resolve ``ref`` (workspace id or name) against the workspace listing.
+
+    Matches by workspace UUID, exact name, or case-insensitive name. Raises a
+    ClickException listing the available workspaces when nothing matches, or the
+    ambiguous matches when several share a name.
+    """
+    by_id = [w for w in items if w.get("id") == ref]
+    if by_id:
+        return by_id[0]
+
+    ref_low = ref.strip().lower()
+    matches = [w for w in items if (w.get("name") or "").lower() == ref_low]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        rows = ", ".join(f"{w.get('name')} ({w.get('id')})" for w in matches)
+        raise click.ClickException(
+            f"Workspace '{ref}' is ambiguous — matches: {rows}.\nUse the id instead."
+        )
+
+    available = ", ".join(w.get("name", "?") for w in items) or "none"
+    raise click.ClickException(
+        f"No workspace matches '{ref}'.\n"
+        f"Available workspaces: {available}\n"
+        f"Run 'cinna account user-workspace list' to see them, or 'default' to "
+        f"target the Default workspace."
+    )
+
+
+def run_user_workspace_list() -> None:
+    """List the account's workspaces, marking the active one — `... list`."""
+    from rich.table import Table
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with console.spinner("Fetching workspaces..."):
+        with AccountClient(account_cfg) as client:
+            listing = client.list_user_workspaces()
+
+    items = listing.get("data", [])
+    active_id = account_cfg.user_workspace_id
+
+    table = Table(
+        title=f"User workspaces ({listing.get('count', len(items))})",
+        title_style="bold",
+    )
+    table.add_column("Active", justify="center")
+    table.add_column("Workspace")
+    table.add_column("ID", style="dim")
+
+    # The implicit Default workspace (no row on the server) is always available.
+    table.add_row(
+        "[green]●[/green]" if not active_id else "",
+        "Default [dim](unassigned)[/dim]",
+        "—",
+    )
+    for w in items:
+        is_active = w.get("id") == active_id
+        table.add_row(
+            "[green]●[/green]" if is_active else "",
+            w.get("name", "?"),
+            w.get("id", "?"),
+        )
+
+    console.console.print(table)
+    console.console.print()
+    console.console.print(
+        "[dim]Set the active workspace with "
+        "'cinna account user-workspace activate <name|id>' "
+        "(or 'default' to clear). New agents and their credentials are created "
+        "there.[/dim]"
+    )
+
+
+def run_user_workspace_activate(ref: str) -> None:
+    """Set the active workspace — `cinna account user-workspace activate <ref>`.
+
+    ``ref`` is a workspace name or id; ``default`` / ``none`` clears it to the
+    Default (unassigned) workspace. The selection is stored client-side in
+    ``.cinna/account.json``.
+    """
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    if ref.strip().lower() in _CLEAR_WORKSPACE_REFS:
+        run_user_workspace_clear()
+        return
+
+    with console.spinner("Resolving workspace..."):
+        with AccountClient(account_cfg) as client:
+            listing = client.list_user_workspaces()
+    workspace = _resolve_account_workspace(listing.get("data", []), ref)
+
+    account_cfg.user_workspace_id = workspace["id"]
+    account_cfg.user_workspace_name = workspace.get("name")
+    save_account_config(account_cfg, account_root)
+
+    console.status(f"Active workspace set to '{workspace.get('name')}'.")
+    console.console.print(
+        "[dim]New agents (and the credentials they acquire) will be created in "
+        "this workspace.[/dim]"
+    )
+
+
+def run_user_workspace_clear() -> None:
+    """Clear the active workspace back to Default — `... activate default`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    account_cfg.user_workspace_id = None
+    account_cfg.user_workspace_name = None
+    save_account_config(account_cfg, account_root)
+
+    console.status("Active workspace cleared — new agents land in the Default workspace.")
+
+
+# ── Credentials (drafts only — never secret values) ─────────────────────────
+
+
+def _credential_status_cell(status: str | None) -> str:
+    if status == "complete":
+        return "[green]complete[/green]"
+    if status == "incomplete":
+        return "[yellow]needs setup[/yellow]"
+    return "[dim]—[/dim]"
+
+
+def run_credentials_list(workspace: str | None) -> None:
+    """List the account's credentials (metadata only) — `... credentials list`."""
+    from rich.table import Table
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    # --workspace default → filter the Default (NULL) workspace; an id → that one.
+    ws_filter: str | None = None
+    if workspace is not None:
+        ws_filter = "" if workspace.strip().lower() in _CLEAR_WORKSPACE_REFS else workspace
+
+    with console.spinner("Fetching credentials..."):
+        with AccountClient(account_cfg) as client:
+            listing = client.list_credentials(user_workspace_id=ws_filter)
+
+    items = listing.get("data", [])
+    if not items:
+        console.status("No credentials on this account.")
+        return
+
+    table = Table(
+        title=f"Credentials ({listing.get('count', len(items))})",
+        title_style="bold",
+    )
+    table.add_column("Name")
+    table.add_column("Type", style="dim")
+    table.add_column("Status")
+    table.add_column("ID", style="dim")
+
+    for c in items:
+        table.add_row(
+            c.get("name", "?"),
+            c.get("type", "?"),
+            _credential_status_cell(c.get("status")),
+            c.get("id", "?"),
+        )
+
+    console.console.print(table)
+
+
+def run_credentials_types() -> None:
+    """List credential types + the fields the user must fill — `... types`."""
+    from rich.table import Table
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with console.spinner("Fetching credential types..."):
+        with AccountClient(account_cfg) as client:
+            listing = client.list_credential_types()
+
+    table = Table(title="Credential types", title_style="bold", show_lines=True)
+    table.add_column("Type")
+    table.add_column("Required fields")
+    table.add_column("Note", style="dim")
+
+    for t in listing.get("data", []):
+        fields = ", ".join(t.get("required_fields") or []) or "[dim]—[/dim]"
+        table.add_row(t.get("type", "?"), fields, t.get("note") or "")
+
+    console.console.print(table)
+
+
+def run_credentials_create(
+    name: str,
+    cred_type: str,
+    notes: str | None,
+    service_uri: str | None,
+    share: bool,
+    workspace: str | None,
+    agent_ref: str | None,
+) -> None:
+    """Create a draft credential — `cinna account credentials create`.
+
+    The credential is created empty (no secret value); the user fills it in the
+    UI. With ``--agent`` it is also attached to that agent in one step.
+    """
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    # Default to the account's active workspace; --workspace overrides
+    # ('default'/'none' → Default workspace).
+    user_workspace_id: str | None = account_cfg.user_workspace_id
+    if workspace is not None:
+        user_workspace_id = (
+            None if workspace.strip().lower() in _CLEAR_WORKSPACE_REFS else workspace
+        )
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner("Creating draft credential..."):
+            result = client.create_credential(
+                name,
+                cred_type,
+                notes=notes,
+                service_uri=service_uri,
+                allow_sharing=share,
+                user_workspace_id=user_workspace_id,
+            )
+
+        credential = result.get("credential", {})
+        cred_id = credential.get("id", "?")
+        required = result.get("required_fields") or []
+        setup_url = result.get("setup_url", "")
+
+        attached_to: str | None = None
+        if agent_ref is not None:
+            listing = client.list_account_agents()
+            agent = _resolve_account_agent(listing.get("data", []), agent_ref)
+            with console.spinner(f"Attaching to {agent['name']}..."):
+                client.share_credential_with_agent(cred_id, agent["id"])
+            attached_to = agent["name"]
+
+    console.status(f"Draft credential created: {credential.get('name', name)}")
+    console.console.print(f"  Credential ID:  {cred_id}")
+    console.console.print(f"  Type:           {credential.get('type', cred_type)}")
+    console.console.print(f"  Status:         {_credential_status_cell(credential.get('status'))}")
+    if attached_to:
+        console.console.print(f"  Attached to:    {attached_to}")
+    console.console.print()
+    if required:
+        console.console.print(
+            "[bold]The user must fill these fields[/bold] (the CLI cannot set "
+            "secret values):"
+        )
+        for field in required:
+            console.console.print(f"    • {field}")
+    else:
+        console.console.print(
+            "[dim]This type has no fixed required fields — the user completes it "
+            "in the UI.[/dim]"
+        )
+    if setup_url:
+        console.console.print()
+        console.console.print(f"  Fill it in:     {setup_url}")
+
+
+def run_credentials_update(
+    credential_id: str,
+    name: str | None,
+    notes: str | None,
+    service_uri: str | None,
+    share: bool | None,
+) -> None:
+    """Update credential metadata (never a secret) — `... credentials update`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    fields: dict = {}
+    if name is not None:
+        fields["name"] = name
+    if notes is not None:
+        fields["notes"] = notes
+    if service_uri is not None:
+        fields["service_uri"] = service_uri
+    if share is not None:
+        fields["allow_sharing"] = share
+    if not fields:
+        raise click.ClickException(
+            "Nothing to update — pass at least one of --name / --notes / "
+            "--service-uri / --share / --no-share."
+        )
+
+    with console.spinner("Updating credential..."):
+        with AccountClient(account_cfg) as client:
+            credential = client.update_credential(credential_id, fields)
+
+    console.status(f"Credential updated: {credential.get('name', credential_id)}")
+    console.console.print(
+        f"  Status:  {_credential_status_cell(credential.get('status'))}"
+    )
+
+
+def run_credentials_delete(credential_id: str, force: bool, yes: bool) -> None:
+    """Delete a credential — `cinna account credentials delete`.
+
+    Reuses the platform's blast-radius gate: a Tier 2 delete (publisher-provided
+    in a published bundle with active installs) is refused with 409 unless
+    ``--force``.
+    """
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    if not yes:
+        console.warn(
+            f"This will delete credential {credential_id} and unlink it from any "
+            f"agents using it."
+        )
+        if not click.confirm("Continue?"):
+            raise click.Abort()
+
+    with console.spinner("Deleting credential..."):
+        with AccountClient(account_cfg) as client:
+            client.delete_credential(credential_id, force=force)
+
+    console.status("Credential deleted.")
+
+
+def run_credentials_share(credential_id: str, agent_ref: str) -> None:
+    """Attach a credential to an agent — `... credentials share-with-agent`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        listing = client.list_account_agents()
+        agent = _resolve_account_agent(listing.get("data", []), agent_ref)
+        with console.spinner(f"Attaching credential to {agent['name']}..."):
+            client.share_credential_with_agent(credential_id, agent["id"])
+
+    console.status(f"Credential attached to '{agent['name']}'.")
+    console.console.print(
+        "[dim]Once the user fills the credential's secret in the UI, it syncs "
+        "into the agent's environment automatically.[/dim]"
+    )

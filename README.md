@@ -109,9 +109,38 @@ One-shot summary of the account workspace: platform/frontend URLs, machine name,
 
 Re-download the context package and replace the account workspace's `context/` tree (run from inside the account workspace). Use it when the platform ships updated docs or API reference. The existing tree is only removed after a successful download — a failed refresh warns and leaves the previous `context/` intact.
 
+### `cinna account user-workspace list | activate <name|id> | clear`
+
+Choose the **active user workspace** for the account session. Workspace-scoped resources you create from the account workspace — new agents (`cinna agent create`) and the credentials they acquire — land in the active workspace, just like picking a workspace in the web sidebar before creating things. The selection is stored **client-side** in `.cinna/account.json`; the platform keeps no active-workspace state.
+
+```bash
+cinna account user-workspace list                 # show workspaces, marking the active one
+cinna account user-workspace activate Sales       # by name or id
+cinna account user-workspace activate default     # clear back to the Default (unassigned) workspace
+```
+
+### `cinna account credentials list | types | create | update | delete | share-with-agent`
+
+Draft and wire the credentials your agents need — **without ever handling secret values**. The account CLI scaffolds a credential as a *draft* and attaches it to an agent; the **user fills the secret in the web UI** (the draft shows as "needs setup" until then). This lets a local coding agent set up everything an agent requires and simply tell the user what to fill in — they don't have to think about what to create or share.
+
+The account token can never read or write a credential's secret value — these verbs touch only metadata and structure.
+
+```bash
+cinna account credentials types                                   # types + the fields the user must fill
+cinna account credentials create --name "Stripe Key" --type api_token \
+    --agent billing-agent                                         # create a draft and attach it in one step
+#   → prints required fields (e.g. api_token) + a link to fill them in
+cinna account credentials list                                    # name, type, status (complete / needs setup)
+cinna account credentials share-with-agent <cred_id> --agent crm-agent
+cinna account credentials update <cred_id> --name "Stripe (live)"
+cinna account credentials delete <cred_id> --yes
+```
+
+A new draft lands in the account's [active user workspace](#cinna-account-user-workspace-list--activate-nameid--clear). Deletes reuse the platform's blast-radius gate (a publisher-provided credential in a published bundle with active installs needs `--force`). All write verbs require the `agent-developer` role.
+
 ### `cinna agent create <name> [--description TEXT]`
 
-Create a new agent on the platform from the account workspace — no UI interaction. Thin client: only the name (and optional description) is sent; the backend applies all defaults (default AI credentials, env template, environment creation) exactly as creating from the UI does. Prints the created agent's ID and web UI link, plus a hint to attach a local workspace with `cinna agent sync <name>`. Requires the `agent-developer` role (403 otherwise). Template selection is not supported yet — agents always get the server default.
+Create a new agent on the platform from the account workspace — no UI interaction. Thin client: only the name (and optional description) is sent; the backend applies all defaults (default AI credentials, env template, environment creation) exactly as creating from the UI does. The agent is created in the account's [active user workspace](#cinna-account-user-workspace-list--activate-nameid--clear) (if one is set). Prints the created agent's ID and web UI link, plus a hint to attach a local workspace with `cinna agent sync <name>`. Requires the `agent-developer` role (403 otherwise). Template selection is not supported yet — agents always get the server default.
 
 ```bash
 cinna agent create "CRM Agent" --description "Tracks customer accounts"

@@ -193,6 +193,178 @@ def account_refresh_context():
     run_account_refresh_context()
 
 
+# ─── account user-workspace group ────────────────────────────────────────────
+
+
+@account.group(name="user-workspace")
+def account_user_workspace():
+    """Choose the active user workspace for this account session.
+
+    Workspace-scoped resources created from the account workspace — new agents
+    (``cinna agent create``) and the credentials they acquire (``cinna account
+    credentials``) — land in the active workspace. The selection is stored
+    client-side in ``.cinna/account.json``; the platform keeps no
+    active-workspace state.
+    """
+
+
+@account_user_workspace.command(name="list")
+def account_user_workspace_list():
+    """List the account's workspaces, marking the active one."""
+    from cinna.account import run_user_workspace_list
+
+    run_user_workspace_list()
+
+
+@account_user_workspace.command(name="activate")
+@click.argument("workspace_ref")
+def account_user_workspace_activate(workspace_ref: str):
+    """Set the active workspace to WORKSPACE_REF (name or id).
+
+    Use ``default`` (or ``none``) to clear back to the Default (unassigned)
+    workspace.
+    """
+    from cinna.account import run_user_workspace_activate
+
+    run_user_workspace_activate(workspace_ref)
+
+
+@account_user_workspace.command(name="clear")
+def account_user_workspace_clear():
+    """Clear the active workspace back to Default (unassigned)."""
+    from cinna.account import run_user_workspace_clear
+
+    run_user_workspace_clear()
+
+
+# ─── account credentials group ───────────────────────────────────────────────
+
+
+@account.group(name="credentials")
+def account_credentials():
+    """Draft and wire credentials for your agents (no secret values).
+
+    The account CLI scaffolds credentials as *drafts* and attaches them to
+    agents; it can never read or write a credential's secret value. The user
+    fills the secret in the web UI — the draft shows as "needs setup" until then.
+    """
+
+
+@account_credentials.command(name="list")
+@click.option(
+    "--workspace",
+    default=None,
+    help="Filter by workspace id ('default' = the Default/unassigned workspace).",
+)
+def account_credentials_list(workspace: str | None):
+    """List your credentials with their setup status (metadata only)."""
+    from cinna.account import run_credentials_list
+
+    run_credentials_list(workspace)
+
+
+@account_credentials.command(name="types")
+def account_credentials_types():
+    """List credential types and the fields the user must fill per type."""
+    from cinna.account import run_credentials_types
+
+    run_credentials_types()
+
+
+@account_credentials.command(name="create")
+@click.option("--name", required=True, help="Display name for the credential")
+@click.option(
+    "--type",
+    "cred_type",
+    required=True,
+    help="Credential type (see 'cinna account credentials types'), e.g. api_token",
+)
+@click.option("--notes", default=None, help="Optional notes for the user")
+@click.option("--service-uri", default=None, help="Non-secret audience / target URL")
+@click.option("--share", is_flag=True, help="Allow this credential to be shared")
+@click.option(
+    "--workspace",
+    default=None,
+    help="Workspace id for the credential (defaults to the active workspace; "
+    "'default' = Default/unassigned).",
+)
+@click.option(
+    "--agent",
+    "agent_ref",
+    default=None,
+    help="Also attach the new draft to this agent (name, slug, or id).",
+)
+def account_credentials_create(
+    name: str,
+    cred_type: str,
+    notes: str | None,
+    service_uri: str | None,
+    share: bool,
+    workspace: str | None,
+    agent_ref: str | None,
+):
+    """Create a draft credential the user completes in the UI.
+
+    The credential is created empty — the CLI never sends a secret value. The
+    output lists exactly which fields the user must fill and links to the page
+    where they enter them. With ``--agent`` the draft is attached in one step.
+
+    Examples:
+      cinna account credentials create --name "Stripe Key" --type api_token
+      cinna account credentials create --name "Odoo" --type odoo --agent crm-agent
+    """
+    from cinna.account import run_credentials_create
+
+    run_credentials_create(
+        name, cred_type, notes, service_uri, share, workspace, agent_ref
+    )
+
+
+@account_credentials.command(name="update")
+@click.argument("credential_id")
+@click.option("--name", default=None, help="New display name")
+@click.option("--notes", default=None, help="New notes")
+@click.option("--service-uri", default=None, help="New non-secret audience / target URL")
+@click.option("--share/--no-share", "share", default=None, help="Toggle sharing")
+def account_credentials_update(
+    credential_id: str,
+    name: str | None,
+    notes: str | None,
+    service_uri: str | None,
+    share: bool | None,
+):
+    """Update a credential's metadata (never its secret value)."""
+    from cinna.account import run_credentials_update
+
+    run_credentials_update(credential_id, name, notes, service_uri, share)
+
+
+@account_credentials.command(name="delete")
+@click.argument("credential_id")
+@click.option("--force", is_flag=True, help="Override the Tier-2 blast-radius block")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+def account_credentials_delete(credential_id: str, force: bool, yes: bool):
+    """Delete a credential (unlinks it from any agents using it)."""
+    from cinna.account import run_credentials_delete
+
+    run_credentials_delete(credential_id, force, yes)
+
+
+@account_credentials.command(name="share-with-agent")
+@click.argument("credential_id")
+@click.option(
+    "--agent",
+    "agent_ref",
+    required=True,
+    help="Agent to attach the credential to (name, slug, or id).",
+)
+def account_credentials_share_with_agent(credential_id: str, agent_ref: str):
+    """Attach an existing credential to an agent you own."""
+    from cinna.account import run_credentials_share
+
+    run_credentials_share(credential_id, agent_ref)
+
+
 # ─── agent group ───────────────────────────────────────────────────────────
 
 
