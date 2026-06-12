@@ -18,6 +18,7 @@ This account workspace adds the orchestration layer: one credential (the account
 ```
 .cinna/account.json     # account CLI token — do not edit, never commit
 .claude/settings.json   # pre-approves Bash(cinna:*) so cinna commands don't prompt
+.mcp.json               # wires the knowledge_query MCP tool (live platform search)
 CLAUDE.md               # this file
 context/                # platform knowledge package (see below)
   README.md             #   index — start here
@@ -41,6 +42,8 @@ Each directory under `agents/` is a 100% standard cinna per-agent workspace — 
 - **`context/guides/`** — worked, end-to-end playbooks (e.g. `build-an-agentic-network.md`).
 
 Refresh after platform updates with `cinna account refresh-context`.
+
+**Live knowledge search (`knowledge_query` MCP tool).** Beyond the static `context/` docs, this workspace wires a `knowledge_query` MCP tool (via `.mcp.json` / `opencode.json`) that searches the platform's admin-curated knowledge base live — the same knowledge backend the platform's building agents query. Use it for product/domain questions the bundled `context/` docs don't answer; results come from the knowledge sources your account can access on the platform.
 
 ## Commands
 

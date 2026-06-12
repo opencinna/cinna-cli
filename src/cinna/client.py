@@ -533,6 +533,24 @@ class AccountClient:
         )
         return response
 
+    def search_knowledge(self, query: str, topic: str | None = None) -> dict:
+        """POST /api/v1/cli/account/knowledge/search — user-scoped knowledge search.
+
+        The account-level analogue of the per-agent
+        ``/agents/{id}/knowledge/search``: searches the account user's
+        accessible knowledge sources (public + own private), with no agent and
+        no workspace filter. Used by the account workspace's MCP proxy to serve
+        ``knowledge_query`` tool calls from the local orchestrator agent.
+        """
+        payload: dict = {"query": query}
+        if topic:
+            payload["topic"] = topic
+        response = self._client.post(
+            "/api/v1/cli/account/knowledge/search",
+            json=payload,
+        )
+        return self._handle_response(response).json()
+
     def download_context_package(self) -> bytes:
         """GET /api/v1/cli/account/context-package — orchestrator context tarball.
 

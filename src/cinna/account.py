@@ -12,6 +12,7 @@ Layout:
     my-cinna/
       .cinna/account.json   # account token + platform/frontend URLs + machine name
       CLAUDE.md             # orchestrator prompt (minimal in Phase 1)
+      .mcp.json             # wires the knowledge_query MCP tool (account mode)
       agents/
         crm-agent/          # standard cinna per-agent workspace
 """
@@ -303,19 +304,64 @@ def _write_account_claude_settings(account_root: Path) -> None:
 
     The orchestrator agent drives this workspace almost entirely through
     ``cinna`` subcommands; pre-approving ``Bash(cinna:*)`` removes a permission
-    prompt on every call. Create-if-absent: never clobbers a user's own edits
-    (so it is safe to call again from ``refresh-context``).
+    prompt on every call. ``enableAllProjectMcpServers`` auto-approves the
+    cinna-managed ``.mcp.json`` servers (e.g. ``platform-knowledge``) so Claude
+    Code doesn't prompt "New MCP server found in this project" on first launch,
+    and the ``mcp__platform-knowledge`` allow rule pre-approves that server's
+    tool calls (e.g. ``knowledge_query``) so each invocation doesn't prompt.
+    Create-if-absent: never clobbers a user's own edits (so it is safe to call
+    again from ``refresh-context``).
     """
     settings_path = account_root / ".claude" / "settings.json"
     if settings_path.exists():
         return
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings = {
+        "enableAllProjectMcpServers": True,
         "permissions": {
-            "allow": ["Bash(cinna:*)"],
-        }
+            "allow": ["Bash(cinna:*)", "mcp__platform-knowledge"],
+        },
     }
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+
+
+def _write_account_mcp_config(account_root: Path) -> None:
+    """Wire the account-level knowledge MCP proxy into the orchestrator agent.
+
+    Writes ``.mcp.json`` (Claude Code) and ``opencode.json`` (opencode) that
+    launch ``cinna mcp-proxy`` in **account mode** (``CINNA_ACCOUNT_CONFIG``
+    points at ``.cinna/account.json``). The orchestrator agent then gets a
+    ``knowledge_query`` tool that searches the platform knowledge base live via
+    ``POST /account/knowledge/search`` — the account analogue of the per-agent
+    workspace's knowledge tool. Auto-generated infra: overwritten on every
+    ``cinna account setup`` / ``cinna account refresh-context``.
+    """
+    account_config = str(account_config_path(account_root))
+
+    mcp_json = {
+        "mcpServers": {
+            "platform-knowledge": {
+                "command": "cinna",
+                "args": ["mcp-proxy"],
+                "env": {"CINNA_ACCOUNT_CONFIG": account_config},
+            }
+        }
+    }
+    (account_root / ".mcp.json").write_text(json.dumps(mcp_json, indent=2) + "\n")
+
+    opencode_json = {
+        "mcp": {
+            "platform-knowledge": {
+                "type": "local",
+                "command": ["cinna", "mcp-proxy"],
+                "environment": {"CINNA_ACCOUNT_CONFIG": account_config},
+                "enabled": True,
+            }
+        }
+    }
+    (account_root / "opencode.json").write_text(
+        json.dumps(opencode_json, indent=2) + "\n"
+    )
 
 
 def _write_account_claude_md(account_root: Path, config: AccountConfig) -> None:
@@ -421,6 +467,7 @@ def run_account_setup(
 
     _write_account_claude_md(account_root, config)
     _write_account_claude_settings(account_root)
+    _write_account_mcp_config(account_root)
 
     # Step 3: Context package (best-effort — setup succeeds without it)
     console.step(3, total, "Downloading context package...")
@@ -466,6 +513,10 @@ def run_account_refresh_context() -> None:
 
     # Self-heal the pre-approved-tools config if it was removed (never clobbers).
     _write_account_claude_settings(account_root)
+
+    # Regenerate the knowledge MCP wiring so a CLI upgrade reaches existing
+    # account workspaces (auto-generated infra — safe to overwrite).
+    _write_account_mcp_config(account_root)
 
 
 def run_account_agents(show_all: bool = False) -> None:

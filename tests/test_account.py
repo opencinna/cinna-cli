@@ -233,9 +233,27 @@ def test_account_setup_creates_workspace(
     assert "Account Workspace" in (root / "CLAUDE.md").read_text()
     assert "cinna account agents" in result.output
 
-    # Pre-approved-tools config: Bash(cinna:*) so cinna commands don't prompt.
+    # Pre-approved-tools config: Bash(cinna:*) so cinna commands don't prompt,
+    # plus auto-approval of the cinna-managed .mcp.json servers.
     settings = json.loads((root / ".claude" / "settings.json").read_text())
-    assert settings["permissions"]["allow"] == ["Bash(cinna:*)"]
+    assert settings["permissions"]["allow"] == [
+        "Bash(cinna:*)",
+        "mcp__platform-knowledge",
+    ]
+    assert settings["enableAllProjectMcpServers"] is True
+
+    # Knowledge MCP proxy wiring (.mcp.json / opencode.json) in account mode.
+    mcp = json.loads((root / ".mcp.json").read_text())
+    proxy = mcp["mcpServers"]["platform-knowledge"]
+    assert proxy["command"] == "cinna"
+    assert proxy["args"] == ["mcp-proxy"]
+    assert proxy["env"]["CINNA_ACCOUNT_CONFIG"] == str(account_config_path(root))
+    opencode = json.loads((root / "opencode.json").read_text())
+    oc_proxy = opencode["mcp"]["platform-knowledge"]
+    assert oc_proxy["command"] == ["cinna", "mcp-proxy"]
+    assert oc_proxy["environment"]["CINNA_ACCOUNT_CONFIG"] == str(
+        account_config_path(root)
+    )
 
     # Context package extracted under context/.
     mock_client.download_context_package.assert_called_once()
@@ -438,7 +456,11 @@ def test_refresh_context_self_heals_claude_settings(
     assert result.exit_code == 0, result.output
 
     settings = json.loads((account_root / ".claude" / "settings.json").read_text())
-    assert settings["permissions"]["allow"] == ["Bash(cinna:*)"]
+    assert settings["permissions"]["allow"] == [
+        "Bash(cinna:*)",
+        "mcp__platform-knowledge",
+    ]
+    assert settings["enableAllProjectMcpServers"] is True
 
 
 @patch("cinna.account.AccountClient")
@@ -495,6 +517,86 @@ def test_context_extraction_rejects_malicious_members(
     assert not (account_root / "evil.txt").exists()
     assert not (account_root / "abs.txt").exists()
     assert not Path("/abs.txt").exists()
+
+
+# --- knowledge MCP proxy wiring ---
+
+
+def test_write_account_mcp_config_wires_account_mode(account_root):
+    """`_write_account_mcp_config` writes .mcp.json + opencode.json pointing the
+    proxy at account.json via CINNA_ACCOUNT_CONFIG (account-mode knowledge tool)."""
+    from cinna.account import _write_account_mcp_config
+
+    _write_account_mcp_config(account_root)
+
+    expected_cfg = str(account_config_path(account_root))
+
+    mcp = json.loads((account_root / ".mcp.json").read_text())
+    proxy = mcp["mcpServers"]["platform-knowledge"]
+    assert proxy["command"] == "cinna"
+    assert proxy["args"] == ["mcp-proxy"]
+    assert proxy["env"]["CINNA_ACCOUNT_CONFIG"] == expected_cfg
+
+    opencode = json.loads((account_root / "opencode.json").read_text())
+    oc = opencode["mcp"]["platform-knowledge"]
+    assert oc["type"] == "local"
+    assert oc["command"] == ["cinna", "mcp-proxy"]
+    assert oc["enabled"] is True
+    assert oc["environment"]["CINNA_ACCOUNT_CONFIG"] == expected_cfg
+
+
+def test_refresh_context_regenerates_mcp_config(account_root, account_cfg):
+    """`cinna account refresh-context` self-heals the MCP wiring so a CLI
+    upgrade reaches existing account workspaces."""
+    from cinna.account import run_account_refresh_context
+
+    # Simulate a workspace set up before the MCP wiring shipped.
+    assert not (account_root / ".mcp.json").exists()
+
+    with patch("cinna.account.find_account_root", return_value=account_root), patch(
+        "cinna.account._install_context_package", return_value=True
+    ):
+        run_account_refresh_context()
+
+    assert (account_root / ".mcp.json").is_file()
+    mcp = json.loads((account_root / ".mcp.json").read_text())
+    assert "platform-knowledge" in mcp["mcpServers"]
+
+
+def test_mcp_proxy_account_mode_builds_account_server(account_root, monkeypatch):
+    """`run_mcp_proxy` in account mode (CINNA_ACCOUNT_CONFIG set) loads the
+    account config and builds a platform-knowledge server — never touching the
+    per-agent CINNA_CONFIG path."""
+    from cinna import mcp_proxy
+
+    monkeypatch.setenv("CINNA_ACCOUNT_CONFIG", str(account_config_path(account_root)))
+    monkeypatch.delenv("CINNA_CONFIG", raising=False)
+
+    captured: dict = {}
+
+    def fake_account_server(cfg):
+        captured["account_cfg"] = cfg
+        return object()
+
+    def boom(*a, **k):  # per-agent path must not run
+        raise AssertionError("per-agent create_mcp_server called in account mode")
+
+    async def fake_run():
+        captured["served"] = True
+
+    monkeypatch.setattr(mcp_proxy, "create_account_mcp_server", fake_account_server)
+    monkeypatch.setattr(mcp_proxy, "create_mcp_server", boom)
+    # Avoid spinning up a real stdio transport — replace asyncio.run.
+    monkeypatch.setattr(mcp_proxy.asyncio, "run", lambda coro: coro.close())
+
+    mcp_proxy.run_mcp_proxy()
+
+    assert captured["account_cfg"].account_token == account_cfg_token(account_root)
+    assert captured["account_cfg"].platform_url == "https://platform.example.com"
+
+
+def account_cfg_token(account_root: Path) -> str:
+    return load_account_config(account_root).account_token
 
 
 # --- cinna account agents ---

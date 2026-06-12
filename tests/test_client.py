@@ -1,15 +1,30 @@
 """Tests for client module."""
 
+import json
 import pytest
 import respx
 
-from cinna.client import PlatformClient
+from cinna.account import AccountConfig
+from cinna.client import AccountClient, PlatformClient
 from cinna.errors import AuthenticationError, PlatformError
 
 
 @pytest.fixture
 def client(sample_config):
     c = PlatformClient(sample_config)
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def account_client():
+    cfg = AccountConfig(
+        platform_url="https://platform.example.com",
+        frontend_url="https://platform.example.com",
+        account_token="account-token-abc",
+        machine_name="laptop",
+    )
+    c = AccountClient(cfg)
     yield c
     c.close()
 
@@ -44,6 +59,39 @@ def test_search_knowledge(client):
     )
     result = client.search_knowledge("agent-123", "how to deploy?")
     assert len(result["results"]) == 1
+
+
+@respx.mock
+def test_account_search_knowledge(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/knowledge/search"
+    ).respond(
+        200, json={"results": [{"content": "Answer", "source": "doc", "similarity": 0.9}]}
+    )
+    result = account_client.search_knowledge("how do bundles work?", topic="bundles")
+    assert len(result["results"]) == 1
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"query": "how do bundles work?", "topic": "bundles"}
+
+
+@respx.mock
+def test_account_search_knowledge_omits_empty_topic(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/knowledge/search"
+    ).respond(200, json={"results": []})
+    result = account_client.search_knowledge("anything")
+    assert result["results"] == []
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"query": "anything"}  # no topic key when omitted
+
+
+@respx.mock
+def test_account_search_knowledge_401_raises(account_client):
+    respx.post(
+        "https://platform.example.com/api/v1/cli/account/knowledge/search"
+    ).respond(401, json={"detail": "Account token rejected"})
+    with pytest.raises(AuthenticationError):
+        account_client.search_knowledge("x")
 
 
 @respx.mock

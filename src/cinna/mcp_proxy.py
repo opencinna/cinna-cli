@@ -76,6 +76,80 @@ def create_mcp_server(config: CinnaConfig) -> Server:
     return server
 
 
+def create_account_mcp_server(account_config) -> Server:
+    """Create an MCP server backed by the account-level knowledge search.
+
+    The account analogue of ``create_mcp_server``: instead of a single agent's
+    knowledge base it searches the account user's accessible platform knowledge
+    sources (public + own private) via ``POST /account/knowledge/search``. Used
+    by the account workspace so the local orchestrator agent gets the same
+    ``knowledge_query`` tool while building, without a per-agent token.
+    """
+    from cinna.client import AccountClient
+
+    server = Server("platform-knowledge")
+    logger.info(
+        "Account MCP server created for %s (%s)",
+        account_config.machine_name,
+        account_config.platform_url,
+    )
+
+    @server.list_tools()
+    async def list_tools():
+        return [
+            Tool(
+                name="knowledge_query",
+                description=(
+                    "Search the Cinna platform knowledge base for documentation "
+                    "and articles to help build agents"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural language search query",
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "Optional knowledge topic to narrow the search",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            )
+        ]
+
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict):
+        if name != "knowledge_query":
+            logger.warning("Unknown tool called: %s", name)
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+        query = arguments.get("query", "")
+        topic = arguments.get("topic")
+        logger.info("account knowledge_query: query=%r topic=%r", query, topic)
+
+        try:
+            with AccountClient(account_config) as client:
+                response = client.search_knowledge(query, topic)
+        except Exception:
+            logger.exception(
+                "account knowledge_query failed for query=%r topic=%r", query, topic
+            )
+            raise
+        results = response.get("results", [])
+        logger.info("account knowledge_query returned %d results", len(results))
+
+        if not results:
+            return [TextContent(type="text", text="No results found.")]
+
+        formatted = _format_results(results)
+        return [TextContent(type="text", text=formatted)]
+
+    return server
+
+
 def _topic_list(config: CinnaConfig) -> str:
     topics = [t for ks in config.knowledge_sources for t in ks.topics]
     return ", ".join(topics) if topics else "all topics"
@@ -114,27 +188,57 @@ def _setup_mcp_logging(workspace_root: Path) -> None:
 
 
 def run_mcp_proxy():
-    """Entry point for `cinna mcp-proxy` — run as MCP stdio server."""
+    """Entry point for `cinna mcp-proxy` — run as MCP stdio server.
+
+    Two modes, selected by environment variable:
+
+    * ``CINNA_ACCOUNT_CONFIG`` set → **account mode**: search the account user's
+      platform knowledge sources (used by the account workspace's `.mcp.json`).
+    * ``CINNA_CONFIG`` set → **per-agent mode**: search a single agent's
+      knowledge base (used by a per-agent workspace's `.mcp.json`).
+    """
+    account_config_path = os.environ.get("CINNA_ACCOUNT_CONFIG")
     config_path = os.environ.get("CINNA_CONFIG")
-    if not config_path:
-        raise SystemExit("CINNA_CONFIG environment variable not set")
+    if not account_config_path and not config_path:
+        raise SystemExit(
+            "CINNA_CONFIG or CINNA_ACCOUNT_CONFIG environment variable not set"
+        )
 
-    workspace_root = Path(config_path).parent.parent
-    _setup_mcp_logging(workspace_root)
+    if account_config_path:
+        # Account mode: <root>/.cinna/account.json → workspace root is parent.parent
+        workspace_root = Path(account_config_path).parent.parent
+        _setup_mcp_logging(workspace_root)
+        logger.info("MCP proxy starting in account mode (config=%s)", account_config_path)
 
-    logger.info("MCP proxy starting (config=%s)", config_path)
+        from cinna.account import load_account_config
 
-    try:
-        config = load_config(workspace_root)
-    except Exception:
-        logger.exception("Failed to load config from %s", workspace_root)
-        raise
+        try:
+            account_config = load_account_config(workspace_root)
+        except Exception:
+            logger.exception("Failed to load account config from %s", workspace_root)
+            raise
 
-    try:
-        server = create_mcp_server(config)
-    except Exception:
-        logger.exception("Failed to create MCP server")
-        raise
+        try:
+            server = create_account_mcp_server(account_config)
+        except Exception:
+            logger.exception("Failed to create account MCP server")
+            raise
+    else:
+        workspace_root = Path(config_path).parent.parent
+        _setup_mcp_logging(workspace_root)
+        logger.info("MCP proxy starting (config=%s)", config_path)
+
+        try:
+            config = load_config(workspace_root)
+        except Exception:
+            logger.exception("Failed to load config from %s", workspace_root)
+            raise
+
+        try:
+            server = create_mcp_server(config)
+        except Exception:
+            logger.exception("Failed to create MCP server")
+            raise
 
     async def main():
         async with stdio_server() as (read_stream, write_stream):
