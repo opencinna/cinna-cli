@@ -2137,6 +2137,166 @@ def test_agent_api_unknown_agent(
     mock_client.set_agent_api_enabled.assert_not_called()
 
 
+# --- cinna agent-api call (owner-side smoke test) ---
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_api_call_forwards_query(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`cinna agent-api call` resolves the agent and forwards query params."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.call_agent_api.return_value = {
+        "status_code": 200,
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps({"price": 42, "vs_currency": "eur"}),
+        "is_json": True,
+    }
+
+    result = runner.invoke(
+        cli,
+        ["agent-api", "call", "CRM Agent", "btc-rate", "--query", "vs_currency=eur"],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.call_agent_api.assert_called_once_with(
+        "agent-123", "GET", "btc-rate", query={"vs_currency": "eur"}, json_body=None
+    )
+    assert '"vs_currency": "eur"' in result.output
+    assert "[200]" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_api_call_nonzero_exit_on_error_status(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """An inner 4xx prints the body but exits non-zero."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.call_agent_api.return_value = {
+        "status_code": 404,
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps({"detail": "Not found"}),
+        "is_json": True,
+    }
+
+    result = runner.invoke(cli, ["agent-api", "call", "CRM Agent", "missing"])
+    assert result.exit_code == 1, result.output
+    assert "Not found" in result.output
+
+
+# --- cinna agent restart-env ---
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_restart_env(mock_client_cls, runner, account_root, monkeypatch):
+    """`cinna agent restart-env` resolves the agent and prints the status."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.restart_agent_env.return_value = {
+        "environment_id": "env-1",
+        "status": "running",
+        "status_message": "Environment restarted successfully",
+    }
+
+    result = runner.invoke(cli, ["agent", "restart-env", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.restart_agent_env.assert_called_once_with("agent-123")
+    assert "running" in result.output
+
+
+@patch("cinna.account.sync_session.status")
+@patch("cinna.account.resolve_child_workspace")
+@patch("cinna.account.AccountClient")
+def test_agent_restart_env_warns_on_unsynced_edits(
+    mock_client_cls, mock_resolve, mock_status, runner, account_root, monkeypatch, sample_config
+):
+    """D2: restart warns + aborts (unless confirmed) when the synced workspace
+    has unsynced local edits, so a restart can't silently clobber them."""
+    from cinna.sync_session import SyncStatus
+
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    # Agent is synced locally with pending local changes.
+    mock_resolve.return_value = (account_root / "agents" / "crm-agent", sample_config)
+    mock_status.return_value = SyncStatus(
+        session_name="cinna-abc", state="connected", pending_to_remote=3
+    )
+
+    # Decline the confirmation → abort, restart NOT called.
+    result = runner.invoke(cli, ["agent", "restart-env", "CRM Agent"], input="n\n")
+    assert result.exit_code != 0
+    assert "unsynced local change" in result.output
+    mock_client.restart_agent_env.assert_not_called()
+
+    # Confirm → proceeds.
+    mock_client.restart_agent_env.return_value = {
+        "environment_id": "env-1", "status": "running", "status_message": None
+    }
+    result = runner.invoke(cli, ["agent", "restart-env", "CRM Agent"], input="y\n")
+    assert result.exit_code == 0, result.output
+    mock_client.restart_agent_env.assert_called_once_with("agent-123")
+
+
+# --- cinna agent show ---
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_show(mock_client_cls, runner, account_root, monkeypatch):
+    """`cinna agent show` prints prompts, features, and credential metadata."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.inspect_agent.return_value = {
+        "id": "agent-123",
+        "name": "CRM Agent",
+        "description": "desc",
+        "features": {"agent_api_enabled": True, "webapp_enabled": False},
+        "prompts": {
+            "entrypoint": "You are the entrypoint.",
+            "workflow": None,
+            "refiner": None,
+        },
+        "credentials": [{"name": "OpenAI Key", "type": "ai"}],
+        "agent_api_status": None,
+    }
+
+    result = runner.invoke(cli, ["agent", "show", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.inspect_agent.assert_called_once_with("agent-123")
+    assert "You are the entrypoint." in result.output
+    assert "OpenAI Key" in result.output
+    assert "agent_api_enabled" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_show_prompts_only(mock_client_cls, runner, account_root, monkeypatch):
+    """`--prompts` skips features + credentials."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.inspect_agent.return_value = {
+        "id": "agent-123",
+        "name": "CRM Agent",
+        "description": None,
+        "features": {"agent_api_enabled": True},
+        "prompts": {"entrypoint": "EP", "workflow": "WF", "refiner": None},
+        "credentials": [{"name": "Secret", "type": "ai"}],
+        "agent_api_status": None,
+    }
+
+    result = runner.invoke(cli, ["agent", "show", "CRM Agent", "--prompts"])
+    assert result.exit_code == 0, result.output
+    assert "EP" in result.output
+    # Features + credentials are suppressed in --prompts mode.
+    assert "Secret" not in result.output
+    assert "Features:" not in result.output
+
+
 # --- AccountClient agent-api request shapes ---
 
 
@@ -2169,3 +2329,43 @@ def test_account_client_get_agent_api_spec(account_client):
     result = account_client.get_agent_api_spec("agent-123")
     assert result == _SAMPLE_SPEC
     assert route.calls[0].request.url.params["agent_id"] == "agent-123"
+
+
+@respx.mock
+def test_account_client_call_agent_api(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/agent-api/call"
+    ).respond(200, json={"status_code": 200, "headers": {}, "body": "{}", "is_json": True})
+    account_client.call_agent_api(
+        "agent-123", "GET", "btc-rate", query={"vs_currency": "eur"}
+    )
+    body = json.loads(route.calls[0].request.content)
+    assert body == {
+        "agent_id": "agent-123",
+        "method": "GET",
+        "path": "btc-rate",
+        "query": {"vs_currency": "eur"},
+    }
+
+
+@respx.mock
+def test_account_client_restart_agent_env(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/agents/agent-123/restart-env"
+    ).respond(200, json={"environment_id": "env-1", "status": "running", "status_message": None})
+    result = account_client.restart_agent_env("agent-123")
+    assert result["status"] == "running"
+    assert route.called
+
+
+@respx.mock
+def test_account_client_inspect_agent(account_client):
+    route = respx.get(
+        "https://platform.example.com/api/v1/cli/account/agents/agent-123/inspect"
+    ).respond(200, json={
+        "id": "agent-123", "name": "CRM", "features": {}, "prompts": {},
+        "credentials": [], "agent_api_status": None,
+    })
+    result = account_client.inspect_agent("agent-123")
+    assert result["id"] == "agent-123"
+    assert route.called

@@ -445,3 +445,158 @@ def test_wait_until_settled_rejects_paused(mock_find, mock_sleep, sample_config)
     mock_find.return_value = {"status": "watching", "paused": True, "successfulCycles": 3}
     with pytest.raises(click.ClickException, match="paused"):
         _wait_until_settled(sample_config, timeout=5)
+
+
+# ─── B3: daemon-sourced conflict listing (status/conflicts agree) ──────────
+
+
+@patch("cinna.sync_session._find_session")
+def test_daemon_conflict_paths_sources_from_json(mock_find, sample_config):
+    """`sync conflicts` reads the daemon's conflicts[] (matches status count),
+    not a disk walk — two-way-safe writes no .conflict.* files."""
+    from cinna.sync_session import daemon_conflict_paths
+
+    mock_find.return_value = _watching([
+        {"root": "a.txt", "alphaChanges": [{"path": "a.txt"}], "betaChanges": [{"path": "a.txt"}]},
+        {"root": "dir/b.txt", "alphaChanges": [{"path": "dir/b.txt"}], "betaChanges": []},
+    ])
+    assert daemon_conflict_paths(sample_config) == ["a.txt", "dir/b.txt"]
+
+
+@patch("cinna.sync_session._find_session")
+def test_daemon_conflict_paths_empty(mock_find, sample_config):
+    from cinna.sync_session import daemon_conflict_paths
+
+    mock_find.return_value = _watching()
+    assert daemon_conflict_paths(sample_config) == []
+
+
+# ─── B2: two-directional resolve ───────────────────────────────────────────
+
+
+@patch("cinna.sync_session.time.sleep")
+@patch("cinna.sync_session._run_mutagen")
+@patch("cinna.sync_session._find_session")
+def test_resolve_conflicts_prefer_local_deletes_remote(
+    mock_find, mock_run, mock_sleep, sample_config, tmp_path
+):
+    """prefer='local' deletes the remote loser (via the callable) and resets;
+    local files are left untouched so they propagate out."""
+    from cinna.sync_session import resolve_conflicts
+
+    ws = tmp_path / "workspace"
+    ws.mkdir(parents=True)
+    (ws / "shared.txt").write_text("LOCAL")
+
+    conflicts = [{"root": "shared.txt",
+                  "alphaChanges": [{"path": "shared.txt"}],
+                  "betaChanges": [{"path": "shared.txt"}]}]
+    mock_find.side_effect = [_watching(conflicts), _watching()]
+    mock_run.return_value = MagicMock(returncode=0)
+
+    deleted: list[str] = []
+
+    def _remote_delete(rel: str) -> bool:
+        deleted.append(rel)
+        return True
+
+    result = resolve_conflicts(
+        sample_config, tmp_path, prefer="local", remote_delete=_remote_delete
+    )
+
+    assert result.resolved == ["shared.txt"]
+    assert result.remaining == []
+    assert deleted == ["shared.txt"]
+    # Local copy is preserved (it's the winner).
+    assert (ws / "shared.txt").read_text() == "LOCAL"
+    # Exactly one batched reset.
+    reset_calls = [c for c in mock_run.call_args_list if c[0][0][:2] == ["sync", "reset"]]
+    assert len(reset_calls) == 1
+
+
+@patch("cinna.sync_session.time.sleep")
+@patch("cinna.sync_session._run_mutagen")
+@patch("cinna.sync_session._find_session")
+def test_resolve_conflicts_prefer_local_failed_delete_stays_remaining(
+    mock_find, mock_run, mock_sleep, sample_config, tmp_path
+):
+    """A remote delete that fails leaves the path in `remaining`, not resolved."""
+    from cinna.sync_session import resolve_conflicts
+
+    (tmp_path / "workspace").mkdir()
+    sticky = [{"root": "x.txt",
+               "alphaChanges": [{"path": "x.txt"}],
+               "betaChanges": [{"path": "x.txt"}]}]
+    mock_find.return_value = _watching(sticky)
+    mock_run.return_value = MagicMock(returncode=0)
+
+    result = resolve_conflicts(
+        sample_config, tmp_path, prefer="local", remote_delete=lambda rel: False
+    )
+    assert result.resolved == []
+    assert result.remaining == ["x.txt"]
+
+
+def test_resolve_conflicts_prefer_local_requires_deleter(sample_config, tmp_path):
+    import pytest
+    from cinna.sync_session import resolve_conflicts
+
+    with pytest.raises(ValueError, match="remote_delete"):
+        resolve_conflicts(sample_config, tmp_path, prefer="local")
+
+
+def test_resolve_conflicts_rejects_bad_prefer(sample_config, tmp_path):
+    import pytest
+    from cinna.sync_session import resolve_conflicts
+
+    with pytest.raises(ValueError, match="prefer"):
+        resolve_conflicts(sample_config, tmp_path, prefer="sideways")
+
+
+# ─── B1: one-shot flush + headless ensure_session ──────────────────────────
+
+
+@patch("cinna.sync_session._run_mutagen")
+@patch("cinna.sync_session._find_session")
+def test_flush_blocks_and_returns_status(mock_find, mock_run, sample_config):
+    from cinna.sync_session import flush
+
+    mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+    mock_find.return_value = _watching()
+    st = flush(sample_config)
+    assert st.state == "connected"
+    flush_calls = [c for c in mock_run.call_args_list if c[0][0][:2] == ["sync", "flush"]]
+    assert len(flush_calls) == 1
+
+
+@patch("cinna.sync_session._create_session")
+@patch("cinna.sync_session.write_mutagen_yml")
+@patch("cinna.sync_session.ensure_daemon_running")
+@patch("cinna.sync_session.upsert_agent_registry")
+@patch("cinna.sync_session._find_session")
+def test_ensure_session_reuses_existing(
+    mock_find, mock_upsert, mock_daemon, mock_write, mock_create, sample_config, tmp_path
+):
+    """ensure_session reuses a live session and does NOT terminate/recreate it."""
+    from cinna.sync_session import ensure_session
+
+    mock_find.return_value = _watching()
+    ensure_session(sample_config, tmp_path)
+    mock_create.assert_not_called()
+
+
+@patch("cinna.sync_session.status")
+@patch("cinna.sync_session._create_session")
+@patch("cinna.sync_session.write_mutagen_yml")
+@patch("cinna.sync_session.ensure_daemon_running")
+@patch("cinna.sync_session.upsert_agent_registry")
+@patch("cinna.sync_session._find_session")
+def test_ensure_session_creates_when_missing(
+    mock_find, mock_upsert, mock_daemon, mock_write, mock_create, mock_status,
+    sample_config, tmp_path
+):
+    from cinna.sync_session import ensure_session
+
+    mock_find.return_value = None
+    ensure_session(sample_config, tmp_path)
+    mock_create.assert_called_once()

@@ -875,13 +875,45 @@ def run_connect_mcp(
         console.console.print(f"  {result['authorize_url']}")
 
 
+def _humanize_age(iso_ts: str | None) -> str | None:
+    """Turn an ISO timestamp into a compact relative age (e.g. ``3m ago``)."""
+    if not iso_ts:
+        return None
+    from datetime import datetime, timezone
+
+    try:
+        ts = datetime.fromisoformat(iso_ts)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = (datetime.now(timezone.utc) - ts).total_seconds()
+    except (ValueError, TypeError):
+        return None
+    if delta < 0:
+        return "just now"
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h ago"
+    return f"{int(delta // 86400)}d ago"
+
+
 def _print_agent_api_status(status: dict) -> None:
-    """Render an agent-api status dict (from enable / refresh) for humans."""
+    """Render an agent-api status dict (from enable / refresh) for humans.
+
+    ``State`` reflects the live *serving child*; ``Spec harvested`` dates the
+    cached spec separately, so a stale spec is visible rather than masquerading
+    as current (friction report A2/A4).
+    """
     state = status.get("state", "?")
     enabled = status.get("agent_api_enabled")
     console.console.print(f"  Enabled:        {enabled}")
     console.console.print(f"  State:          {state}")
     console.console.print(f"  Spec available: {status.get('spec_available')}")
+    age = _humanize_age(status.get("spec_fetched_at"))
+    if age:
+        console.console.print(f"  Spec harvested: {age} ({status['spec_fetched_at']})")
     if status.get("env_status"):
         console.console.print(f"  Env status:     {status['env_status']}")
     if status.get("last_error"):
@@ -949,6 +981,167 @@ def run_agent_api_spec(agent_ref: str, output: str | None) -> None:
     else:
         # Plain stdout (no rich decoration) so it pipes / parses cleanly.
         click.echo(rendered)
+
+
+def run_agent_api_call(
+    agent_ref: str,
+    method: str,
+    path: str,
+    query_pairs: tuple[str, ...],
+    json_text: str | None,
+) -> None:
+    """Smoke-test one of a producer's own endpoints — `cinna agent-api call`.
+
+    Hits the owner-preview proxy (no consumer token), so query params ARE
+    forwarded — this catches a silent query-drop in seconds. Exit codes mirror
+    `cinna api`: 0 for an inner 2xx, 1 for an inner 4xx/5xx (body still printed).
+    """
+    json_body = None
+    if json_text is not None:
+        try:
+            json_body = json.loads(json_text)
+        except json.JSONDecodeError as e:
+            raise click.ClickException(f"--json is not valid JSON: {e}")
+
+    query: dict[str, str | list[str]] = {}
+    for pair in query_pairs:
+        if "=" not in pair:
+            raise click.ClickException(f"--query expects key=value, got '{pair}'.")
+        key, value = pair.split("=", 1)
+        existing = query.get(key)
+        if existing is None:
+            query[key] = value
+        elif isinstance(existing, list):
+            existing.append(value)
+        else:
+            query[key] = [existing, value]
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_account_agent(
+            client.list_account_agents().get("data", []), agent_ref
+        )
+        with console.spinner(f"{method.upper()} {path}..."):
+            result = client.call_agent_api(
+                agent["id"], method.upper(), path, query=query or None, json_body=json_body
+            )
+
+    status_code = result.get("status_code", 0)
+    console.console.print(f"→ {method.upper()} {path}  [{status_code}]")
+    body = result.get("body", "")
+    if result.get("is_json") and body:
+        try:
+            body = json.dumps(json.loads(body), indent=2)
+        except (ValueError, TypeError):
+            pass
+    if body:
+        click.echo(body)
+    if not (200 <= status_code < 300):
+        sys.exit(1)
+
+
+def run_agent_restart_env(agent_ref: str) -> None:
+    """Restart an agent's environment — `cinna agent restart-env`.
+
+    The recovery path for a stuck env / poisoned producer API. Blocks until the
+    container is back, then prints the post-restart status.
+    """
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_account_agent(
+            client.list_account_agents().get("data", []), agent_ref
+        )
+
+        # D2 guard: a restart re-materializes backend-managed scaffold files and
+        # bounces the container — if this machine has unsynced local edits or
+        # parked conflicts for the agent, the restart can clobber them. Warn (and
+        # confirm) before proceeding so the builder can `cinna sync push` first.
+        resolved = resolve_child_workspace(account_root, agent_ref)
+        if resolved is not None:
+            _child_root, child_cfg = resolved
+            try:
+                st = sync_session.status(child_cfg)
+            except Exception:
+                st = None
+            if st is not None and st.exists and (
+                st.pending_to_remote > 0 or st.conflict_count > 0
+            ):
+                bits = []
+                if st.pending_to_remote > 0:
+                    bits.append(f"{st.pending_to_remote} unsynced local change(s)")
+                if st.conflict_count > 0:
+                    bits.append(f"{st.conflict_count} conflict(s)")
+                console.warn(
+                    f"This machine has {' and '.join(bits)} for {agent['name']}. "
+                    "A restart may overwrite them with the backend scaffold. "
+                    "Run 'cinna sync push --agent "
+                    f"{normalize_agent_dir_name(agent['name'])}' first to be safe."
+                )
+                if not click.confirm("Restart anyway?", default=False):
+                    raise click.Abort()
+
+        with console.spinner(f"Restarting environment for {agent['name']}..."):
+            result = client.restart_agent_env(agent["id"])
+
+    console.status(f"Environment restarted for {agent['name']}")
+    console.console.print(f"  Status: {result.get('status')}")
+    if result.get("status_message"):
+        console.console.print(f"  Message: {result['status_message']}")
+
+
+def run_agent_show(agent_ref: str, prompts_only: bool) -> None:
+    """Show an agent's effective config — `cinna agent show [--prompts]`.
+
+    Prints the prompts the runtime actually reads, enabled features, and
+    connected credential names/types (never secrets). Confirms "is what I
+    edited actually live?" in one call.
+    """
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_account_agent(
+            client.list_account_agents().get("data", []), agent_ref
+        )
+        with console.spinner("Inspecting agent..."):
+            info = client.inspect_agent(agent["id"])
+
+    console.status(f"{info.get('name')} ({info.get('id')})")
+    prompts = info.get("prompts", {})
+    console.console.print()
+    console.console.print("Prompts (as the runtime reads them):")
+    for label in ("entrypoint", "workflow", "refiner"):
+        value = prompts.get(label)
+        if value:
+            preview = value if len(value) <= 2000 else value[:2000] + "\n…(truncated)"
+            console.console.print(f"  [{label}]")
+            click.echo(preview)
+        else:
+            console.console.print(f"  [{label}] (empty)")
+
+    if prompts_only:
+        return
+
+    console.console.print()
+    console.console.print("Features:")
+    for key, value in (info.get("features") or {}).items():
+        console.console.print(f"  {key}: {value}")
+
+    creds = info.get("credentials") or []
+    console.console.print()
+    console.console.print(f"Connected credentials ({len(creds)}):")
+    for cred in creds:
+        console.console.print(f"  - {cred.get('name')}  [{cred.get('type')}]")
+
+    status = info.get("agent_api_status")
+    if status:
+        console.console.print()
+        console.console.print("Agent REST API:")
+        _print_agent_api_status(status)
 
 
 def _resolve_discoverable_connector(items: list[dict], producer_ref: str) -> dict:

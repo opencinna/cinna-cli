@@ -432,6 +432,39 @@ def agent_create(name: str, description: str | None):
     run_agent_create(name, description)
 
 
+@agent.command(name="restart-env")
+@click.argument("agent_ref")
+def agent_restart_env(agent_ref: str):
+    """Restart AGENT_REF's environment (recover a stuck env / poisoned API).
+
+    The first-class recovery path: bounces the agent's container without the
+    raw API escape hatch. Blocks until the env is back, then prints its status.
+    Use this when a producer's REST API is stuck reporting an old error, or the
+    env is otherwise wedged.
+    """
+    from cinna.account import run_agent_restart_env
+
+    run_agent_restart_env(agent_ref)
+
+
+@agent.command(name="show")
+@click.argument("agent_ref")
+@click.option(
+    "--prompts", "prompts_only", is_flag=True,
+    help="Show only the effective prompts (skip features + credentials)",
+)
+def agent_show(agent_ref: str, prompts_only: bool):
+    """Show AGENT_REF's effective prompts, features, and connected credentials.
+
+    Prints the prompts the runtime actually reads, the enabled features, and
+    the names/types of connected credentials (never secrets) — so you can
+    confirm "is what I edited actually live?" without opening the browser.
+    """
+    from cinna.account import run_agent_show
+
+    run_agent_show(agent_ref, prompts_only)
+
+
 # ─── connect group ─────────────────────────────────────────────────────────
 
 
@@ -554,6 +587,43 @@ def agent_api_spec(agent_ref: str, output: str | None):
     from cinna.account import run_agent_api_spec
 
     run_agent_api_spec(agent_ref, output)
+
+
+@agent_api.command(name="call")
+@click.argument("agent_ref")
+@click.argument("path")
+@click.option(
+    "--method", "-X", default="GET",
+    type=click.Choice(
+        ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        case_sensitive=False,
+    ),
+    help="HTTP method (default GET)",
+)
+@click.option("--query", "query_pairs", multiple=True, help="Query param key=value (repeatable)")
+@click.option("--json", "json_text", default=None, help="Inline JSON request body")
+def agent_api_call(
+    agent_ref: str,
+    path: str,
+    method: str,
+    query_pairs: tuple[str, ...],
+    json_text: str | None,
+):
+    """Smoke-test AGENT_REF's own REST API endpoint at PATH.
+
+    Calls the producer's endpoint through the owner-preview proxy (no consumer
+    token, no policy edge). Query params ARE forwarded, so this verifies an
+    endpoint end-to-end — including query handling — in one shot, instead of
+    hand-rolling a consumer probe. Exit code is 0 for a 2xx, 1 for a 4xx/5xx
+    (the body is printed either way).
+
+    Examples:
+      cinna agent-api call btc-rate-api btc-rate --query vs_currency=eur
+      cinna agent-api call orders-api orders -X POST --json '{"sku": "A1"}'
+    """
+    from cinna.account import run_agent_api_call
+
+    run_agent_api_call(agent_ref, method, path, query_pairs, json_text)
 
 
 # ─── api (escape hatch) ────────────────────────────────────────────────────
@@ -1043,20 +1113,74 @@ def _run_dev_session(favor_remote: bool) -> None:
     console.status("Sync session terminated.")
 
 
+def _resolve_sync_target(agent_ref: str | None):
+    """Resolve a sync command's (workspace_root, config).
+
+    Without ``--agent`` it uses the current workspace. With ``--agent`` it
+    resolves a child workspace synced under the account workspace — so every
+    ``cinna sync`` subcommand works from the account root, consistent with
+    ``cinna exec --agent``.
+    """
+    if agent_ref is not None:
+        from cinna.account import find_account_root, resolve_child_workspace
+
+        account_root = find_account_root()
+        resolved = resolve_child_workspace(account_root, agent_ref)
+        if resolved is None:
+            raise click.ClickException(
+                f"Agent '{agent_ref}' is not synced in this account workspace.\n"
+                f"Run 'cinna agent sync {agent_ref}' first."
+            )
+        return resolved  # (root, config)
+    root = find_workspace_root()
+    return root, load_config(root)
+
+
+def _make_remote_deleter(config):
+    """Return a ``delete(relpath) -> bool`` that removes a remote workspace file.
+
+    Used by local-wins conflict resolution: the losing copy lives on the remote
+    agent, so we shell it out through the exec stream (``rm -f -- <path>``) and
+    report success from the terminal ``done`` event's exit code.
+    """
+    def _delete(relpath: str) -> bool:
+        remote_path = f"/app/workspace/{relpath}"
+        cmd = f"rm -f -- {shlex.quote(remote_path)}"
+        exit_code = 1
+        try:
+            with PlatformClient(config) as client:
+                for event in client.stream_exec(config.agent_id, cmd, timeout=60):
+                    etype = event.get("type")
+                    if etype == "done":
+                        exit_code = int(event.get("exit_code", 0))
+                    elif etype == "error":
+                        logger.error("remote rm error for %s: %s", relpath, event.get("content"))
+                        return False
+        except Exception as exc:  # network / stream failure
+            logger.error("remote rm failed for %s: %s", relpath, exc)
+            return False
+        return exit_code == 0
+
+    return _delete
+
+
 @cli.group()
 def sync():
-    """Inspect the continuous workspace sync session.
+    """Inspect and drive the continuous workspace sync session.
 
-    Use ``cinna dev`` to start sync. These subcommands are read-only views —
-    safe to run from another terminal while a dev session is live.
+    ``status`` / ``conflicts`` are read-only views (safe to run alongside a live
+    ``cinna dev``). ``push`` / ``pull`` are one-shot, blocking flushes for
+    scripted (headless) builders, and ``resolve`` clears parked conflicts. All
+    subcommands accept ``--agent <ref>`` to target a synced child workspace from
+    the account root.
     """
 
 
 @sync.command("status")
-def sync_status():
+@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
+def sync_status(agent_ref: str | None):
     """Print the sync session state."""
-    root = find_workspace_root()
-    config = load_config(root)
+    root, config = _resolve_sync_target(agent_ref)
 
     st = sync_session.status(config)
     from rich.table import Table
@@ -1072,33 +1196,156 @@ def sync_status():
     if st.last_error:
         table.add_row("Last error", f"[red]{st.last_error}[/red]")
     console.console.print(table)
+    if st.conflict_count:
+        console.console.print(
+            "\n[yellow]⚠ Your edits are NOT fully live — "
+            f"{st.conflict_count} file(s) conflicted.[/yellow] "
+            "Run 'cinna sync conflicts' to list them, then "
+            "'cinna sync resolve --prefer local' (or remote)."
+        )
 
 
 @sync.command("conflicts")
-def sync_conflicts():
-    """List sync conflicts Mutagen has surfaced."""
-    root = find_workspace_root()
-    config = load_config(root)
+@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
+def sync_conflicts(agent_ref: str | None):
+    """List sync conflicts the Mutagen daemon has parked.
 
-    conflicts = sync_session.list_conflicts(config, root)
-    if not conflicts:
-        console.status("No conflicts.")
+    Sources from the daemon's conflict list (authoritative), so this agrees
+    with the count shown by ``cinna sync status`` — two-way-safe does not write
+    ``.conflict.*`` files on disk, so a disk walk would always look empty.
+    """
+    _root, config = _resolve_sync_target(agent_ref)
+
+    paths = sync_session.daemon_conflict_paths(config)
+    if not paths:
+        console.status("✓ No conflicts.")
         return
 
     from rich.table import Table
 
-    table = Table(title=f"Conflicts ({len(conflicts)})")
+    table = Table(title=f"Conflicts ({len(paths)})")
     table.add_column("#", style="dim", justify="right")
-    table.add_column("Path")
-    table.add_column("Side", style="dim")
-    for i, c in enumerate(conflicts, 1):
-        rel = c.path.relative_to(root)
-        table.add_row(str(i), str(rel), c.kind)
+    table.add_column("Path (relative to workspace/)")
+    for i, p in enumerate(paths, 1):
+        table.add_row(str(i), p)
     console.console.print(table)
     console.console.print(
-        "\nResolve by opening the file(s) in your editor, picking the keeper,"
-        " and deleting the .conflict.* copy."
+        "\nResolve with 'cinna sync resolve --prefer local' (your local edits "
+        "win) or '--prefer remote' (the container's version wins)."
     )
+
+
+@sync.command("push")
+@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
+@click.option("--force", is_flag=True, help="Local wins: clear conflicts in favor of local before flushing")
+def sync_push(agent_ref: str | None, force: bool):
+    """Flush local → remote once and block until settled (headless-friendly).
+
+    Ensures a sync session exists (reusing a live ``cinna dev`` session, or
+    creating a detached one that persists in the daemon), then forces a sync
+    cycle and waits for it to settle. With ``--force``, any parked conflicts are
+    resolved in favor of your local copy first ("my local is the truth").
+    """
+    root, config = _resolve_sync_target(agent_ref)
+    with console.spinner("Ensuring sync session…"):
+        sync_session.ensure_session(config, root)
+
+    if force:
+        with console.spinner("Resolving conflicts in favor of local…"):
+            res = sync_session.resolve_conflicts(
+                config, root, prefer="local",
+                remote_delete=_make_remote_deleter(config),
+            )
+        if res.resolved:
+            console.status(f"Resolved {len(res.resolved)} conflict(s) in favor of local.")
+        if res.remaining:
+            console.warn(f"{len(res.remaining)} conflict(s) could not be resolved: {', '.join(res.remaining)}")
+
+    # `mutagen sync flush` is bidirectional; the push/pull distinction is the
+    # --force resolution direction, not the flush itself.
+    with console.spinner("Flushing sync…"):
+        st = sync_session.flush(config)
+    console.status(f"Sync settled ({st.state}).")
+    if st.conflict_count:
+        console.warn(
+            f"{st.conflict_count} conflict(s) remain — your edits are NOT fully live. "
+            "Re-run with --force (local wins) or 'cinna sync resolve'."
+        )
+
+
+@sync.command("pull")
+@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
+@click.option("--force", is_flag=True, help="Remote wins: clear conflicts in favor of remote before flushing")
+def sync_pull(agent_ref: str | None, force: bool):
+    """Flush remote → local once and block until settled.
+
+    The mirror of ``push``: ensures a session, optionally resolves conflicts in
+    favor of the remote (``--force``), then flushes and waits to settle. Useful
+    after the backend regenerates managed files (prompts, credentials).
+    """
+    root, config = _resolve_sync_target(agent_ref)
+    with console.spinner("Ensuring sync session…"):
+        sync_session.ensure_session(config, root)
+
+    if force:
+        with console.spinner("Resolving conflicts in favor of remote…"):
+            res = sync_session.resolve_conflicts(config, root, prefer="remote")
+        if res.resolved:
+            console.status(f"Resolved {len(res.resolved)} conflict(s) in favor of remote.")
+            if res.backup_dir is not None:
+                console.status(f"Local versions backed up to {res.backup_dir}")
+        if res.remaining:
+            console.warn(f"{len(res.remaining)} conflict(s) could not be resolved: {', '.join(res.remaining)}")
+
+    # `mutagen sync flush` is bidirectional; the push/pull distinction is the
+    # --force resolution direction, not the flush itself.
+    with console.spinner("Flushing sync…"):
+        st = sync_session.flush(config)
+    console.status(f"Sync settled ({st.state}).")
+    if st.conflict_count:
+        console.warn(
+            f"{st.conflict_count} conflict(s) remain. "
+            "Re-run with --force (remote wins) or 'cinna sync resolve'."
+        )
+
+
+@sync.command("resolve")
+@click.option("--prefer", type=click.Choice(["local", "remote"]), required=True, help="Which side wins")
+@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
+def sync_resolve(prefer: str, agent_ref: str | None):
+    """Clear parked sync conflicts in favor of local or remote.
+
+    ``--prefer local`` keeps your local edits (the remote losing copies are
+    deleted and your version propagates out); ``--prefer remote`` keeps the
+    container's version (your local copies are backed up under .cinna/sync/ and
+    the remote propagates back). The one-command replacement for the manual
+    kill/delete/restart dance.
+    """
+    root, config = _resolve_sync_target(agent_ref)
+
+    st = sync_session.status(config)
+    if not st.exists:
+        raise click.ClickException(
+            "No sync session is running. Start one with 'cinna dev' or "
+            "'cinna sync push' first."
+        )
+
+    remote_delete = _make_remote_deleter(config) if prefer == "local" else None
+    with console.spinner(f"Resolving conflicts in favor of {prefer}…"):
+        res = sync_session.resolve_conflicts(
+            config, root, prefer=prefer, remote_delete=remote_delete
+        )
+    if res.resolved:
+        console.status(f"Resolved {len(res.resolved)} conflict(s) in favor of {prefer}.")
+        if res.backup_dir is not None:
+            console.status(f"Local versions backed up to {res.backup_dir}")
+    else:
+        console.status("No conflicts to resolve.")
+    if res.remaining:
+        console.warn(
+            f"{len(res.remaining)} conflict(s) could not be resolved: "
+            f"{', '.join(res.remaining)}"
+        )
 
 
 # ─── disconnect ────────────────────────────────────────────────────────────

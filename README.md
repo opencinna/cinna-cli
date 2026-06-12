@@ -208,16 +208,21 @@ cd hr-manager-agent/
 cinna redev    # remote wins the initial conflicts, then a normal dev session
 ```
 
-### `cinna sync status | conflicts`
+### `cinna sync status | conflicts | push | pull | resolve`
 
-Read-only views onto the live sync session (started by `cinna dev`).
+Inspect and drive the sync session. `status` / `conflicts` are read-only views (safe alongside a live `cinna dev`); `push` / `pull` / `resolve` are for scripted (headless) builders who aren't running the TUI. All accept `--agent <ref>` to target a synced child workspace from the account root.
 
-- `status` — state, pending changes, conflict count.
-- `conflicts` — list any conflict copies Mutagen has written. Resolve by picking a winner in your editor and deleting the `.conflict.*` copy.
+- `status` — state, pending changes, conflict count. Warns loudly when conflicts mean your edits aren't fully live.
+- `conflicts` — list conflicted paths (sourced from the Mutagen daemon, so it agrees with `status`; two-way-safe writes no `.conflict.*` files on disk).
+- `push [--force]` — ensure a session, then flush and block until settled. `--force` resolves any parked conflicts in favor of **local** first ("my local is the truth"). The session persists in the daemon so later edits keep syncing.
+- `pull [--force]` — the mirror; `--force` resolves in favor of **remote** (e.g. after the backend regenerates managed files).
+- `resolve --prefer local|remote` — clear parked conflicts in one command. `local` deletes the remote losing copies (your version propagates out); `remote` backs up your local copies under `.cinna/sync/` and takes the container's version. Replaces the manual kill/delete/restart dance.
 
 ### `cinna exec <command…>`
 
 Stream a command through the platform to the remote agent environment. Output streams back live; Ctrl+C aborts. Exit code matches the remote process.
+
+The command runs with the **workspace root (`/app/workspace`) as its working directory**, so relative paths resolve against the synced workspace — e.g. `cinna exec python scripts/main.py` runs `/app/workspace/scripts/main.py` (the same cwd the scheduler uses). No need to prefix paths with `/app/workspace/`.
 
 Arguments pass through transparently — each token is re-quoted before being sent, so spaces and shell metacharacters inside an argument survive intact. Use ordinary single-level quoting, exactly as for a local command. To run a shell snippet (pipes, redirects, `&&`), pass it to a shell explicitly: `cinna exec bash -c '…'`.
 
@@ -310,7 +315,7 @@ claude        # or: opencode
 
 ## Sync & Conflict Resolution
 
-`cinna sync` drives Mutagen in `two-way-safe` mode with VCS-aware ignores. When the same file changes on both sides, Mutagen writes `<file>.conflict.<side>.<timestamp>` instead of picking a winner — inspect them with `cinna sync conflicts`, resolve, and delete the conflict copy.
+`cinna sync` drives Mutagen in `two-way-safe` mode with VCS-aware ignores (including the backend-managed `credentials/` directory, so it never conflicts on files you're told not to edit). When the same file changes on both sides, Mutagen parks a conflict (it does **not** pick a winner, and does not write `.conflict.*` files in this mode) — list them with `cinna sync conflicts`, then clear them with `cinna sync resolve --prefer local` (your edits win) or `--prefer remote` (the container's version wins). For a non-interactive flush, `cinna sync push` / `cinna sync pull` settle the session and exit.
 
 Large binary files and build artifacts are ignored by default (see `mutagen.yml`). Add your own ignores there if needed.
 

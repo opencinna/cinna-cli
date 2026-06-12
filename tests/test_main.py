@@ -556,3 +556,103 @@ def test_disconnect_all_removes_workspaces(mock_stop, runner, tmp_path, sample_c
     assert not ws_a.exists()
     assert not ws_b.exists()
     assert mock_stop.call_count == 2
+
+
+# ─── sync push / pull / resolve / conflicts (friction B1–B3) ───────────────
+
+
+@patch("cinna.main.sync_session.flush")
+@patch("cinna.main.sync_session.ensure_session")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_sync_push_ensures_and_flushes(
+    mock_load, mock_find, mock_ensure, mock_flush, runner, workspace_root, sample_config
+):
+    from cinna.sync_session import SyncStatus
+
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_flush.return_value = SyncStatus(session_name="cinna-abc", state="connected")
+
+    result = runner.invoke(cli, ["sync", "push"])
+    assert result.exit_code == 0, result.output
+    mock_ensure.assert_called_once()
+    mock_flush.assert_called_once()
+
+
+@patch("cinna.main._make_remote_deleter")
+@patch("cinna.main.sync_session.resolve_conflicts")
+@patch("cinna.main.sync_session.flush")
+@patch("cinna.main.sync_session.ensure_session")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_sync_push_force_resolves_local_first(
+    mock_load, mock_find, mock_ensure, mock_flush, mock_resolve, mock_deleter,
+    runner, workspace_root, sample_config
+):
+    from cinna.sync_session import ResolveResult, SyncStatus
+
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_resolve.return_value = ResolveResult(resolved=["a.txt"], remaining=[])
+    mock_flush.return_value = SyncStatus(session_name="cinna-abc", state="connected")
+
+    result = runner.invoke(cli, ["sync", "push", "--force"])
+    assert result.exit_code == 0, result.output
+    # Local wins → resolve_conflicts called with prefer='local'.
+    _, kwargs = mock_resolve.call_args
+    assert kwargs.get("prefer") == "local"
+    mock_flush.assert_called_once()
+
+
+@patch("cinna.main.sync_session.resolve_conflicts")
+@patch("cinna.main.sync_session.status")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_sync_resolve_prefer_remote(
+    mock_load, mock_find, mock_status, mock_resolve, runner, workspace_root, sample_config
+):
+    from cinna.sync_session import ResolveResult, SyncStatus
+
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_status.return_value = SyncStatus(session_name="cinna-abc", state="connected")
+    mock_resolve.return_value = ResolveResult(resolved=["a.txt"], remaining=[])
+
+    result = runner.invoke(cli, ["sync", "resolve", "--prefer", "remote"])
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_resolve.call_args
+    assert kwargs.get("prefer") == "remote"
+
+
+@patch("cinna.main.sync_session.status")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_sync_resolve_requires_running_session(
+    mock_load, mock_find, mock_status, runner, workspace_root, sample_config
+):
+    from cinna.sync_session import SyncStatus
+
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_status.return_value = SyncStatus(session_name="cinna-abc", state="missing")
+
+    result = runner.invoke(cli, ["sync", "resolve", "--prefer", "local"])
+    assert result.exit_code != 0
+    assert "No sync session" in result.output
+
+
+@patch("cinna.main.sync_session.daemon_conflict_paths")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_sync_conflicts_lists_daemon_paths(
+    mock_load, mock_find, mock_paths, runner, workspace_root, sample_config
+):
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_paths.return_value = ["a.txt", "dir/b.txt"]
+
+    result = runner.invoke(cli, ["sync", "conflicts"])
+    assert result.exit_code == 0, result.output
+    assert "a.txt" in result.output
+    assert "dir/b.txt" in result.output

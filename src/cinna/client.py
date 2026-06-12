@@ -452,6 +452,52 @@ class AccountClient:
         )
         return self._handle_response(response).json()
 
+    def call_agent_api(
+        self,
+        agent_id: str,
+        method: str,
+        path: str,
+        query: dict | None = None,
+        json_body=None,
+    ) -> dict:
+        """POST /api/v1/cli/account/agent-api/call — owner-side endpoint smoke test.
+
+        Invokes one endpoint on the producer's own REST API (query params ARE
+        forwarded) and returns the buffered response
+        ``{status_code, headers, body, is_json}``.
+        """
+        body: dict = {"agent_id": agent_id, "method": method, "path": path}
+        if query:
+            body["query"] = query
+        if json_body is not None:
+            body["json_body"] = json_body
+        response = self._client.post(
+            "/api/v1/cli/account/agent-api/call", json=body
+        )
+        return self._handle_response(response).json()
+
+    def restart_agent_env(self, agent_id: str) -> dict:
+        """POST /api/v1/cli/account/agents/{id}/restart-env — restart the env.
+
+        Blocks until the container is back; returns
+        ``{environment_id, status, status_message}``.
+        """
+        response = self._client.post(
+            f"/api/v1/cli/account/agents/{agent_id}/restart-env"
+        )
+        return self._handle_response(response).json()
+
+    def inspect_agent(self, agent_id: str) -> dict:
+        """GET /api/v1/cli/account/agents/{id}/inspect — effective config.
+
+        Returns the agent's prompts, enabled features, connected credential
+        metadata (name + type only), and live agent-api status when enabled.
+        """
+        response = self._client.get(
+            f"/api/v1/cli/account/agents/{agent_id}/inspect"
+        )
+        return self._handle_response(response).json()
+
     def api_proxy(
         self,
         method: str,

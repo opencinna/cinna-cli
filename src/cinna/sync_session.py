@@ -46,6 +46,11 @@ sync:
         - .mypy_cache/
         - .pytest_cache/
         - .DS_Store
+        # Backend-managed, regenerated remotely on every env (re)start. A stale
+        # local copy would otherwise conflict on a file the user is told never
+        # to edit. The container holds the authoritative copy; read it with
+        # `cinna exec cat credentials/credentials.json` rather than syncing it.
+        - credentials/
     scan:
       mode: full
 """
@@ -281,6 +286,44 @@ def start(config: CinnaConfig, workspace_root: Path) -> SyncStatus:
         logger.info("Terminating pre-existing session %s before creating fresh one", existing.get("name"))
         _run_mutagen(["sync", "terminate", session_name(config.agent_id)], config)
 
+    _create_session(config, workspace_root)
+    return status(config)
+
+
+def ensure_session(config: CinnaConfig, workspace_root: Path) -> SyncStatus:
+    """Ensure a sync session exists WITHOUT terminating an existing one.
+
+    The headless counterpart to ``start()``: used by the one-shot ``cinna sync
+    push`` / ``pull`` verbs so a scripted builder gets a session in the daemon
+    (creating it only if missing) and reuses a live ``cinna dev`` session rather
+    than killing it. The session persists in the daemon after the command exits,
+    so subsequent edits keep syncing until ``cinna dev`` or ``cinna disconnect``.
+    """
+    upsert_agent_registry(
+        config.agent_id,
+        config.platform_url,
+        config.cli_token,
+        workspace_root,
+        frontend_url=config.frontend_url,
+    )
+    ensure_daemon_running(config)
+    write_mutagen_yml(workspace_root)
+
+    existing = _find_session(config)
+    if existing is not None:
+        return _to_status(config, existing)
+
+    _create_session(config, workspace_root)
+    return status(config)
+
+
+def _create_session(config: CinnaConfig, workspace_root: Path) -> None:
+    """Create the per-agent Mutagen session (caller handles pre-existing ones).
+
+    Shared by ``start()`` (which terminates any existing session first) and
+    ``ensure_session()`` (which only creates when missing). Retries transparently
+    on a stale daemon (refresh SSH env) and on an agent env that is still waking.
+    """
     local_path = workspace_dir(workspace_root)
     local_path.mkdir(parents=True, exist_ok=True)
     # OpenSSH-style `host:path`, not `ssh://host/path`. Mutagen's parser
@@ -354,6 +397,27 @@ def start(config: CinnaConfig, workspace_root: Path) -> SyncStatus:
             f"{result.stderr.strip() or result.stdout.strip()}"
         )
 
+
+def flush(config: CinnaConfig, timeout: float = 600.0) -> SyncStatus:
+    """Force a sync cycle and block until it completes; return the new status.
+
+    ``mutagen sync flush`` triggers an immediate reconciliation and blocks until
+    it finishes (or fails), so a one-shot ``cinna sync push`` / ``pull`` exits
+    only once local↔remote is settled. Parked conflicts do not fail the flush —
+    they surface in the returned status's ``conflict_count``.
+    """
+    result = _run_mutagen(
+        ["sync", "flush", session_name(config.agent_id)], config
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        # A flush with unresolved conflicts can exit non-zero on some Mutagen
+        # versions; the conflicts are reported via status, so don't hard-fail on
+        # that — only raise on a genuine transport / session error.
+        if "conflict" not in stderr.lower():
+            raise click.ClickException(
+                f"Sync flush failed:\n{stderr or result.stdout.strip()}"
+            )
     return status(config)
 
 
@@ -463,10 +527,14 @@ class Conflict:
 
 
 def list_conflicts(config: CinnaConfig, workspace_root: Path) -> list[Conflict]:
-    """Walk workspace for Mutagen conflict copies.
+    """Walk workspace for Mutagen conflict-copy files.
 
-    Mutagen writes `<name>.conflict.<side>.<ts>` when it can't auto-merge. We
-    surface them path-first so the CLI/TUI can offer resolution UX.
+    NOTE: two-way-safe (mutagen 0.18.x) does NOT write `.conflict.<side>` files
+    (capabilities §7), so this returns empty in normal operation. The
+    `cinna sync conflicts` CLI now sources conflicts from the daemon JSON via
+    ``daemon_conflict_paths`` instead. This fs-walk is retained only as the
+    fallback path documented in §7 ("if a future mutagen starts writing those
+    files again") — do not wire it back into a live code path.
     """
     root = workspace_dir(workspace_root)
     if not root.exists():
@@ -670,6 +738,96 @@ def resolve_startup_conflicts_favor_remote(
         _run_mutagen(["sync", "reset", session_name(config.agent_id)], config)
         # Give the daemon a beat to process the reset before re-reading state,
         # otherwise we may observe the pre-reset snapshot and burn a round.
+        time.sleep(_SETTLE_POLL_SECONDS)
+        session = _wait_until_settled(config, timeout, require_cycle=False)
+
+    result.remaining = extract_conflict_paths(session)
+    result.resolved = sorted(resolved - set(result.remaining))
+    return result
+
+
+# ─── Authoritative conflict listing + two-directional resolve ──────────────
+
+
+def daemon_conflict_paths(config: CinnaConfig) -> list[str]:
+    """Conflict paths from the Mutagen daemon JSON (authoritative).
+
+    two-way-safe does NOT write ``.conflict.<side>`` files (mutagen 0.18.x — see
+    docs/mutagen_capabilities.md §7), so a disk walk finds nothing even when
+    conflicts exist. Sourcing from the session's ``conflicts[]`` array (like the
+    TUI) is what makes ``cinna sync conflicts`` agree with the count
+    ``cinna sync status`` reports.
+    """
+    return extract_conflict_paths(_find_session(config))
+
+
+@dataclass
+class ResolveResult:
+    resolved: list[str] = field(default_factory=list)
+    remaining: list[str] = field(default_factory=list)
+    backup_dir: Path | None = None
+
+
+def resolve_conflicts(
+    config: CinnaConfig,
+    workspace_root: Path,
+    prefer: str,
+    remote_delete=None,
+    timeout: float = 600.0,
+) -> ResolveResult:
+    """Resolve all current conflicts in favor of one side.
+
+    Applies the delete-loser + ``mutagen sync reset`` recipe
+    (docs/mutagen_capabilities.md §8) to every conflicted path:
+
+    - ``prefer="remote"`` — move each conflicted *local* file into a backup dir
+      (under ``.cinna/sync/resolve-backup/<ts>/``) so the remote version
+      propagates back. (Same mechanism as ``cinna redev``.)
+    - ``prefer="local"`` — delete each conflicted *remote* file via the supplied
+      ``remote_delete(relpath) -> bool`` callable (which shells through
+      ``cinna exec rm``) so the local version propagates out.
+
+    A single ``mutagen sync reset`` per round converges all losers at once;
+    repeats a few rounds for daemon settle. Paths whose loser-removal failed (or
+    that the daemon still reports) are returned in ``remaining``.
+    """
+    if prefer not in ("local", "remote"):
+        raise ValueError(f"prefer must be 'local' or 'remote', got {prefer!r}")
+    if prefer == "local" and remote_delete is None:
+        raise ValueError("remote_delete callable is required for prefer='local'")
+
+    session = _wait_until_settled(config, timeout)
+    ws_root = workspace_dir(workspace_root)
+    backup_root = (
+        session_log_dir(workspace_root)
+        / "resolve-backup"
+        / time.strftime("%Y%m%d-%H%M%S")
+    )
+    result = ResolveResult()
+    resolved: set[str] = set()
+
+    for _ in range(_REDEV_MAX_ROUNDS):
+        conflict_paths = extract_conflict_paths(session)
+        if not conflict_paths:
+            break
+        logger.info(
+            "resolve: %d conflict(s) in favor of %s: %s",
+            len(conflict_paths), prefer, conflict_paths,
+        )
+        for rel in conflict_paths:
+            if prefer == "remote":
+                local = ws_root / rel
+                if local.exists() or local.is_symlink():
+                    backup = backup_root / rel
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(local), str(backup))
+                    result.backup_dir = backup_root
+                resolved.add(rel)
+            else:  # prefer == "local" → remove the remote loser
+                if remote_delete(rel):
+                    resolved.add(rel)
+                # On failure, leave it; it'll appear in `remaining`.
+        _run_mutagen(["sync", "reset", session_name(config.agent_id)], config)
         time.sleep(_SETTLE_POLL_SECONDS)
         session = _wait_until_settled(config, timeout, require_cycle=False)
 

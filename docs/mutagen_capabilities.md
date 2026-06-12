@@ -177,7 +177,9 @@ This contradicts older docs / forum posts about mutagen that describe conflict-m
 
 **Reproduce:** §6, then check `ls -la /tmp/c-a /tmp/c-b` after the conflict appears — only `shared.txt` is present on each side.
 
-**If a future mutagen starts writing those files again:** `src/cinna/sync_session.py:list_conflicts` already walks for `*.conflict.<side>.<ts>` and is the path to surface them. The `cinna sync conflicts` CLI subcommand still uses it. The TUI currently does not — it sources conflicts from JSON via `_extract_conflicts`.
+**Implication for the CLI:** `cinna sync conflicts` therefore sources from the daemon JSON (`src/cinna/sync_session.py:daemon_conflict_paths` → `extract_conflict_paths`), the same `conflicts[]` array `cinna sync status` counts — so the two agree. The fs-walk `list_conflicts` is retained only as the fallback below.
+
+**If a future mutagen starts writing those files again:** `src/cinna/sync_session.py:list_conflicts` already walks for `*.conflict.<side>.<ts>` and is the path to surface them. Neither the `cinna sync conflicts` CLI nor the TUI uses it today (both source from JSON: `daemon_conflict_paths` / `_extract_conflicts` respectively).
 
 ---
 
@@ -235,6 +237,23 @@ mutagen sync list           # note any non-cinna sessions
 mutagen daemon stop
 mutagen daemon start
 mutagen sync list           # same sessions reappear, all paused for a moment
+```
+
+---
+
+## 11. `mutagen sync flush` blocks until the cycle completes
+
+**What we rely on:** `mutagen sync flush <session>` forces an immediate synchronization cycle and **blocks until that cycle finishes** (or errors), rather than returning immediately like most subcommands. This is what lets the one-shot `cinna sync push` / `cinna sync pull` verbs flush local↔remote and exit only once settled — no separate `_wait_until_settled` poll is needed after a flush.
+
+**Conflicts:** a flush with parked conflicts can exit non-zero on some versions while still having flushed the non-conflicting changes. `src/cinna/sync_session.py:flush` therefore treats a non-zero exit whose stderr mentions "conflict" as success (the conflicts are surfaced via `status().conflict_count`), and hard-fails only on other (transport/session) errors.
+
+**Where we use it:** `src/cinna/sync_session.py:flush`, driven by `cinna sync push` / `cinna sync pull`.
+
+**Reproduce:**
+```bash
+# with a live session that has pending local changes:
+mutagen sync flush <session>   # returns only after the cycle settles
+echo $?                        # 0 when clean
 ```
 
 ---
