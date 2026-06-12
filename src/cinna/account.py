@@ -298,6 +298,45 @@ def _load_account_template() -> str:
     )
 
 
+def _write_account_claude_settings(account_root: Path) -> None:
+    """Write ``.claude/settings.json`` pre-approving the ``cinna`` CLI.
+
+    The orchestrator agent drives this workspace almost entirely through
+    ``cinna`` subcommands; pre-approving ``Bash(cinna:*)`` removes a permission
+    prompt on every call. Create-if-absent: never clobbers a user's own edits
+    (so it is safe to call again from ``refresh-context``).
+    """
+    settings_path = account_root / ".claude" / "settings.json"
+    if settings_path.exists():
+        return
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = {
+        "permissions": {
+            "allow": ["Bash(cinna:*)"],
+        }
+    }
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+
+
+def _write_account_claude_md(account_root: Path, config: AccountConfig) -> None:
+    """Render the orchestrator ``CLAUDE.md`` from the bundled template.
+
+    Auto-generated and safe to overwrite (the file header says so), so both
+    ``cinna account setup`` and ``cinna account refresh-context`` regenerate it —
+    a refresh therefore picks up new commands / guidance shipped with a CLI
+    upgrade without forcing a full re-setup.
+    """
+    from datetime import datetime, timezone
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    claude_md = (
+        _load_account_template()
+        .replace("{timestamp}", timestamp)
+        .replace("{frontend_url}", config.frontend_url)
+    )
+    (account_root / "CLAUDE.md").write_text(claude_md)
+
+
 def _install_context_package(
     account_cfg: AccountConfig, account_root: Path, *, replace: bool = False
 ) -> bool:
@@ -352,8 +391,6 @@ def run_account_setup(
     setup_input: str, machine_name: str, dir_name: str = DEFAULT_ACCOUNT_DIR
 ) -> None:
     """Full account setup flow — called by `cinna account setup <token_or_url>`."""
-    from datetime import datetime, timezone
-
     total = 3
 
     # Guard the target directory before burning the single-use setup token.
@@ -382,13 +419,8 @@ def run_account_setup(
     save_account_config(config, account_root)
     agents_dir(account_root).mkdir(exist_ok=True)
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    claude_md = (
-        _load_account_template()
-        .replace("{timestamp}", timestamp)
-        .replace("{frontend_url}", config.frontend_url)
-    )
-    (account_root / "CLAUDE.md").write_text(claude_md)
+    _write_account_claude_md(account_root, config)
+    _write_account_claude_settings(account_root)
 
     # Step 3: Context package (best-effort — setup succeeds without it)
     console.step(3, total, "Downloading context package...")
@@ -410,10 +442,14 @@ def run_account_setup(
 
 
 def run_account_refresh_context() -> None:
-    """Re-download and replace `context/` — called by `cinna account refresh-context`.
+    """Re-download `context/` and regenerate `CLAUDE.md` — called by
+    `cinna account refresh-context`.
 
-    The old tree is only removed after a successful download, so a failed
-    refresh leaves the existing context intact (warn-don't-die).
+    The old context tree is only removed after a successful download, so a
+    failed refresh leaves the existing context intact (warn-don't-die). The
+    orchestrator `CLAUDE.md` is re-rendered from the bundled template too, so a
+    CLI upgrade's new commands / guidance reach existing account workspaces
+    without a full re-setup.
     """
     account_root = find_account_root()
     account_cfg = load_account_config(account_root)
@@ -423,9 +459,23 @@ def run_account_refresh_context() -> None:
     if ok:
         console.status(f"Context refreshed under {account_root / 'context'}")
 
+    # Always regenerate the auto-generated orchestrator guide (independent of
+    # the context download — the template ships with the CLI, not the package).
+    _write_account_claude_md(account_root, account_cfg)
+    console.status("Orchestrator CLAUDE.md regenerated")
 
-def run_account_agents() -> None:
-    """List accessible agents — called by `cinna account agents`."""
+    # Self-heal the pre-approved-tools config if it was removed (never clobbers).
+    _write_account_claude_settings(account_root)
+
+
+def run_account_agents(show_all: bool = False) -> None:
+    """List accessible agents — called by `cinna account agents`.
+
+    By default the listing is scoped to the account's **active user workspace**
+    (the one chosen with `cinna account user-workspace activate`, stored in
+    `.cinna/account.json`); `--all` shows every accessible agent across all
+    workspaces. The header states exactly which workspace is being shown.
+    """
     from rich.table import Table
 
     account_root = find_account_root()
@@ -433,18 +483,56 @@ def run_account_agents() -> None:
 
     with console.spinner("Fetching agents..."):
         with AccountClient(account_cfg) as client:
+            # Always fetch the full set; scope to the active workspace below
+            # (client-side) so the data is exact and resolvers stay unaffected.
             listing = client.list_account_agents()
 
-    items = listing.get("data", [])
-    if not items:
+    all_items = listing.get("data", [])
+
+    active_id = account_cfg.user_workspace_id or None
+    active_label = (
+        account_cfg.user_workspace_name or active_id
+        if active_id
+        else "Default (unassigned)"
+    )
+
+    if show_all:
+        items = all_items
+        scope_line = f"Showing [bold]all agents[/bold] across all workspaces ({len(items)})"
+    else:
+        items = [
+            a
+            for a in all_items
+            if (str(a["user_workspace_id"]) if a.get("user_workspace_id") else None)
+            == (str(active_id) if active_id else None)
+        ]
+        scope_line = (
+            f"Showing agents in workspace: [bold]{active_label}[/bold] "
+            f"({len(items)} of {len(all_items)} accessible)"
+        )
+
+    console.console.print(scope_line)
+    if not show_all:
+        console.console.print(
+            "[dim]Use --all to list agents across every workspace.[/dim]"
+        )
+
+    if not all_items:
         console.status("No accessible agents on this account.")
+        return
+    if not items:
+        console.status(
+            f"No agents in workspace '{active_label}'. "
+            "Run with --all, or 'cinna account user-workspace activate <id>' "
+            "to switch workspaces."
+        )
         return
 
     children = list_child_workspaces(account_root)
     workspace_by_agent_id = {cfg.agent_id: path for path, cfg in children}
 
     table = Table(
-        title=f"Accessible agents ({listing.get('count', len(items))})",
+        title=f"Accessible agents ({len(items)})",
         title_style="bold",
         show_lines=True,
     )
@@ -785,6 +873,82 @@ def run_connect_mcp(
         console.console.print()
         console.warn("Authorization required — open this URL to finish the connection:")
         console.console.print(f"  {result['authorize_url']}")
+
+
+def _print_agent_api_status(status: dict) -> None:
+    """Render an agent-api status dict (from enable / refresh) for humans."""
+    state = status.get("state", "?")
+    enabled = status.get("agent_api_enabled")
+    console.console.print(f"  Enabled:        {enabled}")
+    console.console.print(f"  State:          {state}")
+    console.console.print(f"  Spec available: {status.get('spec_available')}")
+    if status.get("env_status"):
+        console.console.print(f"  Env status:     {status['env_status']}")
+    if status.get("last_error"):
+        console.console.print(f"  Last error:     {status['last_error']}")
+
+
+def run_agent_api_enable(agent_ref: str, enabled: bool) -> None:
+    """Toggle a producer agent's REST API — `cinna agent-api enable`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_account_agent(client.list_account_agents().get("data", []), agent_ref)
+        verb = "Enabling" if enabled else "Disabling"
+        with console.spinner(f"{verb} REST API..."):
+            status = client.set_agent_api_enabled(agent["id"], enabled=enabled)
+
+    console.status(
+        f"REST API {'enabled' if enabled else 'disabled'} for {agent['name']}"
+    )
+    _print_agent_api_status(status)
+    if enabled:
+        console.console.print()
+        console.console.print(
+            "Author the API in the producer's workspace under "
+            "agent_api/*.py (+ policy.yaml), sync it (cinna dev / cinna exec), "
+            "then 'cinna agent-api refresh' and 'cinna agent-api spec' to verify."
+        )
+
+
+def run_agent_api_refresh(agent_ref: str) -> None:
+    """Force a spec + policy re-harvest — `cinna agent-api refresh`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_account_agent(client.list_account_agents().get("data", []), agent_ref)
+        with console.spinner("Re-harvesting spec + policy..."):
+            status = client.refresh_agent_api(agent["id"])
+
+    console.status(f"Refreshed REST API for {agent['name']}")
+    _print_agent_api_status(status)
+    if status.get("last_error"):
+        console.console.print()
+        console.warn(
+            "The harvest reported an error (see Last error above). Fix the "
+            "agent_api/ code or policy.yaml, sync, and refresh again."
+        )
+
+
+def run_agent_api_spec(agent_ref: str, output: str | None) -> None:
+    """Print (or save) a producer's harvested OpenAPI spec — `cinna agent-api spec`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_account_agent(client.list_account_agents().get("data", []), agent_ref)
+        with console.spinner("Fetching spec..."):
+            spec = client.get_agent_api_spec(agent["id"])
+
+    rendered = json.dumps(spec, indent=2)
+    if output:
+        Path(output).write_text(rendered + "\n")
+        console.status(f"Spec written to {output}")
+    else:
+        # Plain stdout (no rich decoration) so it pipes / parses cleanly.
+        click.echo(rendered)
 
 
 def _resolve_discoverable_connector(items: list[dict], producer_ref: str) -> dict:

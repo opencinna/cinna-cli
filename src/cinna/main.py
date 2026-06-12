@@ -159,8 +159,17 @@ def account_setup(setup_input: tuple[str, ...], name: str | None, dir_name: str)
 
 
 @account.command(name="agents")
-def account_agents():
+@click.option(
+    "--all", "show_all", is_flag=True,
+    help="List agents across all workspaces (default: the active workspace only)",
+)
+def account_agents(show_all: bool):
     """List the agents this account can access.
+
+    Scoped by default to the **active user workspace** (set with
+    ``cinna account user-workspace activate``); pass ``--all`` to list every
+    accessible agent across all workspaces. The header states which workspace is
+    shown.
 
     Shows, per agent: name + id, building rights (foreign bundle installs are
     view-only), whether a remote environment is active, and whether a local
@@ -168,7 +177,7 @@ def account_agents():
     """
     from cinna.account import run_account_agents
 
-    run_account_agents()
+    run_account_agents(show_all=show_all)
 
 
 @account.command(name="status")
@@ -484,6 +493,67 @@ def connect_mcp(
     from cinna.account import run_connect_mcp
 
     run_connect_mcp(producer_ref, consumer_ref, label, conversation_only, building_only)
+
+
+# ─── agent-api group ───────────────────────────────────────────────────────
+
+
+@cli.group(name="agent-api")
+def agent_api():
+    """Manage a producer agent's REST API (the `agent_api` feature).
+
+    The build→verify loop a coding agent drives before wiring two agents:
+    ``enable`` the API on a producer, author ``agent_api/*.py`` + ``policy.yaml``
+    in its synced workspace, ``refresh`` to re-harvest the OpenAPI spec, and
+    ``spec`` to read it back. Once verified, wire a consumer with
+    ``cinna connect agent-api``. Run from the account workspace.
+    """
+
+
+@agent_api.command(name="enable")
+@click.argument("agent_ref")
+@click.option("--disable", is_flag=True, help="Disable the REST API instead of enabling it")
+def agent_api_enable(agent_ref: str, disable: bool):
+    """Enable (or --disable) the REST API on producer AGENT_REF.
+
+    AGENT_REF is the agent's display name, slug, or id (see
+    ``cinna account agents``). Prints the resulting status so you can confirm
+    the toggle and whether a spec is already available.
+    """
+    from cinna.account import run_agent_api_enable
+
+    run_agent_api_enable(agent_ref, enabled=not disable)
+
+
+@agent_api.command(name="refresh")
+@click.argument("agent_ref")
+def agent_api_refresh(agent_ref: str):
+    """Re-harvest AGENT_REF's OpenAPI spec + policy.yaml on demand.
+
+    Use after editing the producer's ``agent_api/`` code or ``policy.yaml`` so
+    the cached spec/guardrails pick up the change without waiting for the next
+    automatic reload. Prints the status (including any harvest error).
+    """
+    from cinna.account import run_agent_api_refresh
+
+    run_agent_api_refresh(agent_ref)
+
+
+@agent_api.command(name="spec")
+@click.argument("agent_ref")
+@click.option(
+    "--output", "-o", default=None,
+    help="Write the spec JSON to this file instead of stdout",
+)
+def agent_api_spec(agent_ref: str, output: str | None):
+    """Print AGENT_REF's harvested OpenAPI spec as JSON (or save with -o).
+
+    Reads the cached spec (or harvests import-only from a running env). Plain
+    JSON to stdout so it pipes / parses cleanly.
+    """
+    from cinna.account import run_agent_api_spec
+
+    run_agent_api_spec(agent_ref, output)
 
 
 # ─── api (escape hatch) ────────────────────────────────────────────────────

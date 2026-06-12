@@ -416,6 +416,42 @@ class AccountClient:
         response = self._client.post("/api/v1/cli/account/connect/mcp", json=body)
         return self._handle_response(response).json()
 
+    # --- Agent REST API producer management ---
+
+    def set_agent_api_enabled(self, agent_id: str, enabled: bool = True) -> dict:
+        """POST /api/v1/cli/account/agent-api/enable — toggle the producer API.
+
+        Returns the resulting agent-api status (``agent_api_enabled``, ``state``,
+        ``spec_available``, ``last_error``, ...), so the caller can verify the
+        toggle took effect in one round-trip.
+        """
+        response = self._client.post(
+            "/api/v1/cli/account/agent-api/enable",
+            json={"agent_id": agent_id, "enabled": enabled},
+        )
+        return self._handle_response(response).json()
+
+    def refresh_agent_api(self, agent_id: str) -> dict:
+        """POST /api/v1/cli/account/agent-api/refresh — force a spec re-harvest.
+
+        Re-imports the producer's ``agent_api/`` modules and re-parses
+        ``policy.yaml``, then returns the status (``last_error`` reflects a
+        harvest failure — the call never raises on one).
+        """
+        response = self._client.post(
+            "/api/v1/cli/account/agent-api/refresh",
+            json={"agent_id": agent_id},
+        )
+        return self._handle_response(response).json()
+
+    def get_agent_api_spec(self, agent_id: str) -> dict:
+        """GET /api/v1/cli/account/agent-api/spec — the harvested OpenAPI spec."""
+        response = self._client.get(
+            "/api/v1/cli/account/agent-api/spec",
+            params={"agent_id": agent_id},
+        )
+        return self._handle_response(response).json()
+
     def api_proxy(
         self,
         method: str,

@@ -233,6 +233,10 @@ def test_account_setup_creates_workspace(
     assert "Account Workspace" in (root / "CLAUDE.md").read_text()
     assert "cinna account agents" in result.output
 
+    # Pre-approved-tools config: Bash(cinna:*) so cinna commands don't prompt.
+    settings = json.loads((root / ".claude" / "settings.json").read_text())
+    assert settings["permissions"]["allow"] == ["Bash(cinna:*)"]
+
     # Context package extracted under context/.
     mock_client.download_context_package.assert_called_once()
     assert (root / "context" / "README.md").read_text() == "# Context index\n"
@@ -389,6 +393,14 @@ def test_refresh_context_replaces_tree(
     assert not (account_root / "context" / "stale-file.md").exists()
     assert (account_root / "context" / "examples" / "platform_helper.py").is_file()
 
+    # refresh-context also regenerates the orchestrator CLAUDE.md from the
+    # bundled template, so a CLI upgrade's new commands reach existing
+    # workspaces without a full re-setup.
+    claude_md = (account_root / "CLAUDE.md").read_text()
+    assert "Orchestrator CLAUDE.md regenerated" in result.output
+    assert "cinna account user-workspace list" in claude_md
+    assert "cinna agent-api enable" in claude_md
+
 
 @patch("cinna.account.AccountClient")
 def test_refresh_context_failure_preserves_old_tree(
@@ -410,6 +422,43 @@ def test_refresh_context_failure_preserves_old_tree(
     assert result.exit_code == 0, result.output
     assert "Context package download failed" in result.output
     assert (account_root / "context" / "README.md").read_text() == "# OLD index\n"
+
+
+@patch("cinna.account.AccountClient")
+def test_refresh_context_self_heals_claude_settings(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """refresh-context creates .claude/settings.json if it's missing."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.download_context_package.return_value = make_context_tarball()
+
+    assert not (account_root / ".claude" / "settings.json").exists()
+    result = runner.invoke(cli, ["account", "refresh-context"])
+    assert result.exit_code == 0, result.output
+
+    settings = json.loads((account_root / ".claude" / "settings.json").read_text())
+    assert settings["permissions"]["allow"] == ["Bash(cinna:*)"]
+
+
+@patch("cinna.account.AccountClient")
+def test_refresh_context_preserves_user_claude_settings(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A user-edited .claude/settings.json is never clobbered by refresh."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.download_context_package.return_value = make_context_tarball()
+
+    claude_dir = account_root / ".claude"
+    claude_dir.mkdir()
+    custom = {"permissions": {"allow": ["Bash(cinna:*)", "Bash(git:*)"]}}
+    (claude_dir / "settings.json").write_text(json.dumps(custom))
+
+    result = runner.invoke(cli, ["account", "refresh-context"])
+    assert result.exit_code == 0, result.output
+    # Untouched — the user's extra permission survives.
+    assert json.loads((claude_dir / "settings.json").read_text()) == custom
 
 
 def test_refresh_context_outside_account_workspace(runner, tmp_path, monkeypatch):
@@ -513,6 +562,126 @@ def test_account_agents_outside_account_workspace(
     assert result.exit_code != 0
     assert "Not in a cinna account workspace" in result.output
     mock_client_cls.assert_not_called()
+
+
+# Listing with per-row workspace ids for the workspace-scoping tests.
+_WS_AGENTS_LISTING = {
+    "count": 3,
+    "data": [
+        {
+            "id": "agent-eng-1",
+            "name": "Eng Alpha",
+            "user_workspace_id": "ws-eng",
+            "can_build": True,
+            "is_foreign_install": False,
+            "has_active_environment": True,
+        },
+        {
+            "id": "agent-eng-2",
+            "name": "Eng Beta",
+            "user_workspace_id": "ws-eng",
+            "can_build": True,
+            "is_foreign_install": False,
+            "has_active_environment": False,
+        },
+        {
+            "id": "agent-default-1",
+            "name": "Loose Agent",
+            "user_workspace_id": None,
+            "can_build": True,
+            "is_foreign_install": False,
+            "has_active_environment": False,
+        },
+    ],
+}
+
+
+def _save_cfg_with_workspace(account_root, ws_id, ws_name):
+    """Persist an account config bound to a given active workspace."""
+    save_account_config(
+        AccountConfig(
+            platform_url="https://platform.example.com",
+            frontend_url="https://ui.example.com",
+            account_token="account-token-abc",
+            machine_name="laptop",
+            user_workspace_id=ws_id,
+            user_workspace_name=ws_name,
+        ),
+        account_root,
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_account_agents_scoped_to_active_workspace(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """Default listing is scoped to the active workspace; header names it."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    _save_cfg_with_workspace(account_root, "ws-eng", "Engineering")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = _WS_AGENTS_LISTING
+
+    result = runner.invoke(cli, ["account", "agents"])
+    assert result.exit_code == 0, result.output
+    assert "workspace: Engineering" in result.output
+    assert "2 of 3 accessible" in result.output
+    assert "Eng Alpha" in result.output
+    assert "Eng Beta" in result.output
+    # The Default-workspace agent is hidden under the scoped view.
+    assert "Loose Agent" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_account_agents_all_flag_shows_every_workspace(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """--all ignores the active workspace and lists every agent."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    _save_cfg_with_workspace(account_root, "ws-eng", "Engineering")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = _WS_AGENTS_LISTING
+
+    result = runner.invoke(cli, ["account", "agents", "--all"])
+    assert result.exit_code == 0, result.output
+    assert "all agents" in result.output
+    assert "Eng Alpha" in result.output
+    assert "Loose Agent" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_account_agents_default_workspace_scope(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """With no active workspace, the scope is the Default (unassigned) set."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    # account_root fixture already wrote a Default (no-workspace) config.
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = _WS_AGENTS_LISTING
+
+    result = runner.invoke(cli, ["account", "agents"])
+    assert result.exit_code == 0, result.output
+    assert "Default (unassigned)" in result.output
+    assert "Loose Agent" in result.output
+    assert "Eng Alpha" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_account_agents_empty_active_workspace(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """An active workspace with no agents prints a helpful hint, not a table."""
+    monkeypatch.chdir(account_root)
+    _save_cfg_with_workspace(account_root, "ws-empty", "Empty WS")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = _WS_AGENTS_LISTING
+
+    result = runner.invoke(cli, ["account", "agents"])
+    assert result.exit_code == 0, result.output
+    assert "No agents in workspace 'Empty WS'" in result.output
+    assert "--all" in result.output
 
 
 # --- cinna account status ---
@@ -1826,3 +1995,177 @@ def test_account_client_api_proxy_request_body(account_client):
         "query": {"a": "1"},
         "json_body": {"title": "t"},
     }
+
+
+# --- cinna agent-api enable / refresh / spec ---
+
+
+_ENABLED_STATUS = {
+    "agent_api_enabled": True,
+    "state": "running",
+    "spec_available": True,
+    "last_error": None,
+    "policy": None,
+}
+
+_DISABLED_STATUS = {
+    "agent_api_enabled": False,
+    "state": "disabled",
+    "spec_available": False,
+    "last_error": None,
+    "policy": None,
+}
+
+_SAMPLE_SPEC = {
+    "openapi": "3.1.0",
+    "info": {"title": "CRM Agent API", "version": "1.0.0"},
+    "paths": {"/orders": {"get": {"operationId": "list_orders"}}},
+}
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_api_enable_resolves_and_toggles(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`cinna agent-api enable` resolves the agent and enables by default."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.set_agent_api_enabled.return_value = _ENABLED_STATUS
+
+    result = runner.invoke(cli, ["agent-api", "enable", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.set_agent_api_enabled.assert_called_once_with("agent-123", enabled=True)
+    assert "enabled for CRM Agent" in result.output
+    assert "running" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_api_disable_flag(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`--disable` flips the toggle off."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.set_agent_api_enabled.return_value = _DISABLED_STATUS
+
+    result = runner.invoke(cli, ["agent-api", "enable", "agent-123", "--disable"])
+    assert result.exit_code == 0, result.output
+    mock_client.set_agent_api_enabled.assert_called_once_with("agent-123", enabled=False)
+    assert "disabled for CRM Agent" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_api_refresh(mock_client_cls, runner, account_root, monkeypatch):
+    """`cinna agent-api refresh` re-harvests and prints status."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.refresh_agent_api.return_value = _ENABLED_STATUS
+
+    result = runner.invoke(cli, ["agent-api", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.refresh_agent_api.assert_called_once_with("agent-123")
+    assert "Refreshed REST API for CRM Agent" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_api_refresh_surfaces_harvest_error(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A harvest error in the status is surfaced as a warning, not an exception."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.refresh_agent_api.return_value = {
+        **_ENABLED_STATUS,
+        "spec_available": False,
+        "last_error": "ImportError: orders.py line 3",
+    }
+
+    result = runner.invoke(cli, ["agent-api", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "ImportError" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_api_spec_prints_json(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`cinna agent-api spec` prints the harvested spec as plain JSON."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_api_spec.return_value = _SAMPLE_SPEC
+
+    result = runner.invoke(cli, ["agent-api", "spec", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.get_agent_api_spec.assert_called_once_with("agent-123")
+    # Output is valid JSON round-tripping the spec.
+    assert json.loads(result.output) == _SAMPLE_SPEC
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_api_spec_writes_to_file(
+    mock_client_cls, runner, account_root, monkeypatch, tmp_path
+):
+    """`-o` writes the spec to a file instead of stdout."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_api_spec.return_value = _SAMPLE_SPEC
+
+    out = tmp_path / "spec.json"
+    result = runner.invoke(cli, ["agent-api", "spec", "CRM Agent", "-o", str(out)])
+    assert result.exit_code == 0, result.output
+    assert json.loads(out.read_text()) == _SAMPLE_SPEC
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_api_unknown_agent(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """An unresolved agent ref fails before any agent-api call."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(cli, ["agent-api", "enable", "nope"])
+    assert result.exit_code != 0
+    assert "No accessible agent matches 'nope'" in result.output
+    mock_client.set_agent_api_enabled.assert_not_called()
+
+
+# --- AccountClient agent-api request shapes ---
+
+
+@respx.mock
+def test_account_client_set_agent_api_enabled(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/agent-api/enable"
+    ).respond(200, json=_ENABLED_STATUS)
+    result = account_client.set_agent_api_enabled("agent-123", enabled=True)
+    assert result["state"] == "running"
+    body = json.loads(route.calls[0].request.content)
+    assert body == {"agent_id": "agent-123", "enabled": True}
+
+
+@respx.mock
+def test_account_client_refresh_agent_api(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/agent-api/refresh"
+    ).respond(200, json=_ENABLED_STATUS)
+    account_client.refresh_agent_api("agent-123")
+    body = json.loads(route.calls[0].request.content)
+    assert body == {"agent_id": "agent-123"}
+
+
+@respx.mock
+def test_account_client_get_agent_api_spec(account_client):
+    route = respx.get(
+        "https://platform.example.com/api/v1/cli/account/agent-api/spec"
+    ).respond(200, json=_SAMPLE_SPEC)
+    result = account_client.get_agent_api_spec("agent-123")
+    assert result == _SAMPLE_SPEC
+    assert route.calls[0].request.url.params["agent_id"] == "agent-123"
