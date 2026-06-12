@@ -39,6 +39,11 @@ class CinnaConfig:
     # exchange response; falls back to ``platform_url`` for backwards compat
     # with configs written before this field existed.
     frontend_url: str | None = None
+    # Server-side id of the CLI token row. Only known for tokens minted via
+    # the account workspace (`cinna agent sync`); used by `cinna agent unsync`
+    # to revoke the child token server-side. None for tokens from the
+    # per-agent setup exchange (which doesn't return the id).
+    cli_token_id: str | None = None
     knowledge_sources: list[KnowledgeSource] = field(default_factory=list)
     mutagen_version: str | None = None
     last_sync_runtime_check_at: str | None = None

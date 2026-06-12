@@ -189,3 +189,201 @@ class PlatformClient:
 
     def __exit__(self, *args):
         self.close()
+
+
+class AccountClient:
+    """HTTP client for the account-scoped CLI routes (`/api/v1/cli/account/*`).
+
+    Authenticates with the account CLI token from ``.cinna/account.json``.
+    The account token only works on the account route group — per-agent
+    sync/exec calls keep going through ``PlatformClient`` with the per-agent
+    child token.
+    """
+
+    def __init__(self, account_config):
+        self.config = account_config
+        self.base_url = account_config.platform_url.rstrip("/")
+        self._client = httpx.Client(
+            base_url=self.base_url,
+            headers={"Authorization": f"Bearer {account_config.account_token}"},
+            timeout=DEFAULT_TIMEOUT,
+            follow_redirects=True,
+        )
+
+    def _handle_response(self, response: httpx.Response) -> httpx.Response:
+        """Check response status, surfacing backend error details verbatim."""
+        logger.debug(
+            "%s %s -> %s (%d bytes)",
+            response.request.method,
+            response.request.url,
+            response.status_code,
+            len(response.content),
+        )
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail", response.text)
+            except Exception:
+                detail = response.text
+            if response.status_code == 401:
+                logger.error("Account token rejected: %s", detail)
+                raise AuthenticationError(detail)
+            logger.error(
+                "Platform error %s: %s (url: %s)",
+                response.status_code,
+                detail,
+                response.request.url,
+            )
+            raise PlatformError(response.status_code, detail)
+        return response
+
+    # --- Account-scoped routes (account token auth) ---
+
+    def list_account_agents(self) -> dict:
+        """GET /api/v1/cli/account/agents — accessible agents with can_build flags."""
+        response = self._client.get("/api/v1/cli/account/agents")
+        return self._handle_response(response).json()
+
+    def mint_agent_token(
+        self, agent_id: str, machine_name: str, machine_info: str | None
+    ) -> dict:
+        """POST /api/v1/cli/account/agents/{id}/mint — mint a per-agent child token."""
+        response = self._client.post(
+            f"/api/v1/cli/account/agents/{agent_id}/mint",
+            json={"machine_name": machine_name, "machine_info": machine_info},
+        )
+        return self._handle_response(response).json()
+
+    def create_agent(self, name: str, description: str | None = None) -> dict:
+        """POST /api/v1/cli/account/agents — create an agent (thin client).
+
+        Sends only user-specified fields; the backend applies all defaults
+        (AI credentials, env template, environment creation) and returns the
+        full agent record.
+        """
+        body: dict = {"name": name}
+        if description is not None:
+            body["description"] = description
+        response = self._client.post("/api/v1/cli/account/agents", json=body)
+        return self._handle_response(response).json()
+
+    def connect_agent_api(
+        self,
+        producer_agent_id: str,
+        consumer_agent_id: str,
+        credential_label: str | None = None,
+        read_only_override: bool = False,
+    ) -> dict:
+        """POST /api/v1/cli/account/connect/agent-api — one-click REST wire."""
+        body: dict = {
+            "producer_agent_id": producer_agent_id,
+            "consumer_agent_id": consumer_agent_id,
+        }
+        if credential_label is not None:
+            body["credential_label"] = credential_label
+        if read_only_override:
+            body["read_only_override"] = True
+        response = self._client.post(
+            "/api/v1/cli/account/connect/agent-api", json=body
+        )
+        return self._handle_response(response).json()
+
+    def list_discoverable_mcp(self, consumer_agent_id: str | None = None) -> dict:
+        """GET /api/v1/cli/account/connect/mcp/discoverable — a2a connector picker."""
+        params = (
+            {"consumer_agent_id": consumer_agent_id} if consumer_agent_id else None
+        )
+        response = self._client.get(
+            "/api/v1/cli/account/connect/mcp/discoverable", params=params
+        )
+        return self._handle_response(response).json()
+
+    def connect_mcp(
+        self,
+        connector_id: str,
+        consumer_agent_id: str,
+        mcp_mode_conversation: bool = True,
+        mcp_mode_building: bool = True,
+        label: str | None = None,
+    ) -> dict:
+        """POST /api/v1/cli/account/connect/mcp — wire an agent2agent MCP connector."""
+        body: dict = {
+            "connector_id": connector_id,
+            "consumer_agent_id": consumer_agent_id,
+        }
+        if not mcp_mode_conversation:
+            body["mcp_mode_conversation"] = False
+        if not mcp_mode_building:
+            body["mcp_mode_building"] = False
+        if label is not None:
+            body["label"] = label
+        response = self._client.post("/api/v1/cli/account/connect/mcp", json=body)
+        return self._handle_response(response).json()
+
+    def api_proxy(
+        self,
+        method: str,
+        path: str,
+        query: dict | None = None,
+        json_body=None,
+    ) -> httpx.Response:
+        """POST /api/v1/cli/account/api-proxy — generic escape hatch.
+
+        Returns the raw response: the backend mirrors the inner route's status
+        and body 1:1, so non-2xx is normal output here, not an exception. Only
+        a 401 (invalid account token) raises.
+        """
+        body: dict = {"method": method, "path": path}
+        if query:
+            body["query"] = query
+        if json_body is not None:
+            body["json_body"] = json_body
+        response = self._client.post("/api/v1/cli/account/api-proxy", json=body)
+        if response.status_code == 401:
+            try:
+                detail = response.json().get("detail", "")
+            except Exception:
+                detail = response.text
+            logger.error("Account token rejected: %s", detail)
+            raise AuthenticationError(detail)
+        logger.debug(
+            "api-proxy %s %s -> %s (%d bytes)",
+            method,
+            path,
+            response.status_code,
+            len(response.content),
+        )
+        return response
+
+    def download_context_package(self) -> bytes:
+        """GET /api/v1/cli/account/context-package — orchestrator context tarball.
+
+        Returns the gzip tarball bytes (all members under a top-level
+        ``context/`` prefix). Extracted into the account workspace root by
+        `cinna account setup` / `cinna account refresh-context`.
+        """
+        response = self._client.get(
+            "/api/v1/cli/account/context-package",
+            timeout=DOWNLOAD_TIMEOUT,
+        )
+        return self._handle_response(response).content
+
+    def revoke_child_token(self, token_id: str) -> dict:
+        """DELETE /api/v1/cli/account/tokens/children/{token_id}.
+
+        Revoke a child token this account token minted (`cinna agent unsync`).
+        Idempotent server-side; 404 if the id is not a cli-type child minted
+        by this account token (provenance-scoped, no existence leak).
+        """
+        response = self._client.delete(
+            f"/api/v1/cli/account/tokens/children/{token_id}"
+        )
+        return self._handle_response(response).json()
+
+    def close(self):
+        self._client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()

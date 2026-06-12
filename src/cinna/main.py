@@ -107,6 +107,255 @@ def set_token(setup_input: tuple[str, ...], name: str | None):
     run_set_token(" ".join(setup_input), name)
 
 
+# ─── account group ─────────────────────────────────────────────────────────
+
+
+@cli.group()
+def account():
+    """Account-level workspace: discover agents, manage the account session.
+
+    An account workspace is bootstrapped once from the platform's
+    Settings → Local Development card. From it, ``cinna agent sync`` attaches
+    standard per-agent workspaces under ``agents/`` without any further UI
+    interaction.
+    """
+
+
+@account.command(name="setup", context_settings={"ignore_unknown_options": True})
+@click.argument("setup_input", nargs=-1, type=click.UNPROCESSED, required=True)
+@click.option(
+    "--name",
+    default=None,
+    help="Machine name for this account session",
+)
+@click.option(
+    "--dir",
+    "dir_name",
+    default="my-cinna",
+    show_default=True,
+    help="Directory to create the account workspace in",
+)
+def account_setup(setup_input: tuple[str, ...], name: str | None, dir_name: str):
+    """Set up an account workspace from an account setup token.
+
+    Accepts any of these formats (paste directly from Settings → Local
+    Development):
+
+    \b
+      cinna account setup curl -sL http://host/api/cli-setup/account/TOKEN | python3 -
+      cinna account setup http://host/api/cli-setup/account/TOKEN
+      cinna account setup TOKEN
+    """
+    from cinna.account import run_account_setup
+
+    if name is None:
+        default_name = _default_machine_name()
+        if sys.stdin.isatty():
+            name = click.prompt("Machine name", default=default_name)
+        else:
+            name = default_name
+
+    run_account_setup(" ".join(setup_input), name, dir_name)
+
+
+@account.command(name="agents")
+def account_agents():
+    """List the agents this account can access.
+
+    Shows, per agent: name + id, building rights (foreign bundle installs are
+    view-only), whether a remote environment is active, and whether a local
+    workspace is already synced under ``agents/``.
+    """
+    from cinna.account import run_account_agents
+
+    run_account_agents()
+
+
+@account.command(name="status")
+def account_status():
+    """Show account workspace info and account token validity."""
+    from cinna.account import run_account_status
+
+    run_account_status()
+
+
+@account.command(name="refresh-context")
+def account_refresh_context():
+    """Re-download the context package and replace ``context/``.
+
+    The context package (platform docs, generated API reference, example
+    scripts) is installed by ``cinna account setup``; refresh it when the
+    platform ships updated docs. The old tree is replaced only after a
+    successful download.
+    """
+    from cinna.account import run_account_refresh_context
+
+    run_account_refresh_context()
+
+
+# ─── agent group ───────────────────────────────────────────────────────────
+
+
+@cli.group()
+def agent():
+    """Attach / detach per-agent workspaces from the account workspace."""
+
+
+@agent.command(name="sync")
+@click.argument("agent_ref")
+@click.option(
+    "--name",
+    default=None,
+    help="Machine name for the minted token (defaults to the account machine name)",
+)
+def agent_sync(agent_ref: str, name: str | None):
+    """Mint a CLI token for AGENT_REF and attach a standard workspace.
+
+    AGENT_REF is the agent's display name, slug, or id (see
+    ``cinna account agents``). The workspace lands under
+    ``agents/<slug>/`` and is identical to one created by ``cinna setup`` —
+    ``cd agents/<slug> && cinna dev`` afterwards.
+    """
+    from cinna.account import run_agent_sync
+
+    run_agent_sync(agent_ref, name)
+
+
+@agent.command(name="unsync")
+@click.argument("agent_ref")
+def agent_unsync(agent_ref: str):
+    """Detach AGENT_REF's workspace: stop sync, revoke its token, clean up.
+
+    Equivalent to ``cinna disconnect`` inside ``agents/<slug>/`` plus a
+    server-side revoke of the minted token. Workspace files are preserved.
+    """
+    from cinna.account import run_agent_unsync
+
+    run_agent_unsync(agent_ref)
+
+
+@agent.command(name="create")
+@click.argument("name")
+@click.option("--description", default=None, help="Agent description")
+def agent_create(name: str, description: str | None):
+    """Create a new agent on the platform (run from the account workspace).
+
+    Thin client: only NAME (and the optional description) is sent — the
+    backend applies all defaults (AI credentials, env template, environment)
+    exactly as creating from the UI does. Prints the created agent's id and
+    web UI link; attach a local workspace afterwards with
+    ``cinna agent sync <name>``.
+    """
+    from cinna.account import run_agent_create
+
+    run_agent_create(name, description)
+
+
+# ─── connect group ─────────────────────────────────────────────────────────
+
+
+@cli.group()
+def connect():
+    """Wire agents together from the account workspace.
+
+    One-click producer→consumer connections: the producer's REST API
+    (``agent-api``) or its agent2agent MCP connector (``mcp``). Agents are
+    referenced by display name, slug, or id (see ``cinna account agents``).
+    """
+
+
+@connect.command(name="agent-api")
+@click.option("--producer", "producer_ref", required=True, help="Agent exposing the REST API (name, slug, or id)")
+@click.option("--consumer", "consumer_ref", required=True, help="Agent that will call it (name, slug, or id)")
+@click.option("--label", default=None, help="Label for the created credential")
+@click.option("--read-only", is_flag=True, help="Restrict the consumer to read-only API access")
+def connect_agent_api(
+    producer_ref: str, consumer_ref: str, label: str | None, read_only: bool
+):
+    """Connect CONSUMER to PRODUCER's REST API.
+
+    Mints a producer API token and attaches it to the consumer as a
+    credential. The credential rides the consumer's normal credential sync
+    into its remote environment — no manual key handling.
+    """
+    from cinna.account import run_connect_agent_api
+
+    run_connect_agent_api(producer_ref, consumer_ref, label, read_only)
+
+
+@connect.command(name="mcp")
+@click.option("--producer", "producer_ref", required=True, help="Agent exposing an agent2agent MCP connector (name, slug, or id)")
+@click.option("--consumer", "consumer_ref", required=True, help="Agent that will consume it (name, slug, or id)")
+@click.option("--label", default=None, help="Label for the created credential")
+@click.option("--conversation-only", is_flag=True, help="Enable the connection in conversation mode only")
+@click.option("--building-only", is_flag=True, help="Enable the connection in building mode only")
+def connect_mcp(
+    producer_ref: str,
+    consumer_ref: str,
+    label: str | None,
+    conversation_only: bool,
+    building_only: bool,
+):
+    """Connect CONSUMER to PRODUCER's agent2agent MCP connector.
+
+    The producer is resolved against the discoverable-connectors listing
+    (it must expose an agent2agent MCP connector your account may consume).
+    By default the connection is enabled in both conversation and building
+    modes. If the connector requires OAuth, the printed authorize URL must
+    be opened to finish the connection.
+    """
+    if conversation_only and building_only:
+        raise click.ClickException(
+            "--conversation-only and --building-only are mutually exclusive."
+        )
+
+    from cinna.account import run_connect_mcp
+
+    run_connect_mcp(producer_ref, consumer_ref, label, conversation_only, building_only)
+
+
+# ─── api (escape hatch) ────────────────────────────────────────────────────
+
+
+@cli.command(name="api")
+@click.argument("method", type=click.Choice(["GET", "POST", "PUT", "PATCH", "DELETE"], case_sensitive=False))
+@click.argument("path")
+@click.option("--json", "json_text", default=None, help="Inline JSON request body")
+@click.option("--data", "data_file", default=None, help="JSON request body from a file (@file.json)")
+@click.option("--query", "query_pairs", multiple=True, help="Query parameter as key=value (repeatable)")
+def api_cmd(
+    method: str,
+    path: str,
+    json_text: str | None,
+    data_file: str | None,
+    query_pairs: tuple[str, ...],
+):
+    """Call the platform API through the account escape hatch.
+
+    PATH is relative to the API root (no /api/v1 prefix), e.g. ``agents`` or
+    ``agents/<id>``. The catalogue of callable endpoints lives in the account
+    workspace's ``context/api_reference/`` (see ``cinna account
+    refresh-context``). Excluded categories — credentials, user management,
+    admin, CLI, MFA/auth, streaming routes — are denied by the platform;
+    don't waste calls on them.
+
+    The inner response is passed through verbatim: the body is printed to
+    stdout (pretty-printed for JSON) and the exit code is 0 for 2xx, 1 for an
+    inner 4xx/5xx, and 2 when the escape hatch itself refuses the call
+    (policy denial, rate limit, size cap — reported on stderr).
+
+    Examples:
+      cinna api GET agents
+      cinna api GET agents --query limit=5
+      cinna api POST agents/<id>/duplicate
+      cinna api PATCH agents/<id> --json '{"description": "updated"}'
+      cinna api POST tasks --data @task.json
+    """
+    from cinna.account import run_api
+
+    run_api(method, path, json_text, data_file, query_pairs)
+
+
 # ─── exec ──────────────────────────────────────────────────────────────────
 
 
@@ -119,8 +368,14 @@ def set_token(setup_input: tuple[str, ...], name: str | None):
     show_default=True,
     help="Max wall-clock seconds the remote command may run before being killed.",
 )
+@click.option(
+    "--agent",
+    "agent_ref",
+    default=None,
+    help="Run against a synced agent from the account workspace (name, slug, or id).",
+)
 @click.argument("command", nargs=-1, required=True)
-def exec_cmd(timeout: int, command: tuple[str, ...]):
+def exec_cmd(timeout: int, agent_ref: str | None, command: tuple[str, ...]):
     """Run a command in the remote agent environment.
 
     Output streams back in real time via the platform. Exit code matches the
@@ -131,20 +386,37 @@ def exec_cmd(timeout: int, command: tuple[str, ...]):
     metacharacters inside an argument survive the remote shell intact. Use
     ordinary single-level quoting, exactly as for a local command.
 
+    With ``--agent``, runs from an account workspace against the named synced
+    agent (using that child workspace's own token). The agent must already be
+    synced (``cinna agent sync <agent>``).
+
     Examples:
       cinna exec python scripts/main.py
       cinna exec pip install pandas
       cinna exec bash -c 'ls -la'
       cinna exec python -c 'import sys; print(sys.argv)' "a b"
       cinna exec --timeout 3600 python long_backfill.py
+      cinna exec --agent crm-agent python scripts/main.py
 
     If your remote command takes its own ``--timeout`` flag, separate it
     from cinna's option with ``--``:
 
       cinna exec --timeout 3600 -- python tool.py --timeout 30
     """
-    root = find_workspace_root()
-    config = load_config(root)
+    if agent_ref is not None:
+        from cinna.account import find_account_root, resolve_child_workspace
+
+        account_root = find_account_root()
+        resolved = resolve_child_workspace(account_root, agent_ref)
+        if resolved is None:
+            raise click.ClickException(
+                f"Agent '{agent_ref}' is not synced in this account workspace.\n"
+                f"Run 'cinna agent sync {agent_ref}' first."
+            )
+        _root, config = resolved
+    else:
+        root = find_workspace_root()
+        config = load_config(root)
 
     exit_code = _run_remote_exec(config, shlex.join(command), timeout=timeout)
     sys.exit(exit_code)
@@ -610,24 +882,9 @@ def disconnect():
 
     remove_agent_registry(config.agent_id)
 
-    from cinna.context import list_synced_prompt_refs
+    from cinna.bootstrap import remove_workspace_artifacts
 
-    synced_refs = list_synced_prompt_refs(root)
-
-    shutil.rmtree(root / ".cinna", ignore_errors=True)
-
-    for f in [
-        "CLAUDE.md",
-        "BUILDING_AGENT.md",
-        ".mcp.json",
-        "opencode.json",
-        "cinna.log",
-        "mutagen.yml",
-        *synced_refs,
-    ]:
-        p = root / f
-        if p.exists():
-            p.unlink()
+    remove_workspace_artifacts(root)
 
     console.status("Disconnected. Workspace files preserved.")
 

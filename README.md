@@ -75,6 +75,95 @@ cd hr-manager-agent/
 cinna set-token yWo36tbkdAOzrALxOEKq31_OA2iMelEg
 ```
 
+### `cinna account setup <token_or_url>`
+
+Initialize an **account workspace** — a multi-agent root from which you can discover your agents and attach per-agent workspaces without going back to the UI. Setup is initiated from **Settings → Channels → Local Development** on the platform, which emits a `curl | python3` one-liner (same pattern as the per-agent flow):
+
+```bash
+curl -sL https://your-platform.com/api/cli-setup/account/TOKEN | python3 -
+```
+
+Accepts the same input forms as `cinna setup` (full curl command, URL, or bare token — bare tokens need `CINNA_PLATFORM_URL`). Creates `my-cinna/` (override with `--dir`) containing:
+
+```
+my-cinna/
+  .cinna/account.json    # account CLI token + platform/frontend URLs (0600, do not commit)
+  CLAUDE.md              # orchestrator guide for AI tools
+  context/               # platform docs, API reference, example scripts, worked playbooks
+  agents/                # one standard per-agent workspace per `cinna agent sync`
+```
+
+Setup also downloads the **context package** into `context/` — curated platform docs (feature map at `context/platform/README.md`), a generated per-domain REST API reference (`context/api_reference/`), sample platform-API scripts (`context/examples/`), and worked end-to-end playbooks (`context/guides/`, e.g. `build-an-agentic-network.md`). The download is best-effort: if it fails, setup still succeeds with a warning and `cinna account refresh-context` fetches it later.
+
+The account token is only used for the account-level endpoints (listing agents, minting per-agent tokens, the context package). Per-agent work always runs on each child workspace's own token. Revoking the account session in Settings disconnects every agent synced from it.
+
+### `cinna account agents`
+
+List the agents your account can access (run from inside the account workspace). For each agent: display name + ID, building rights (`✓ can build`, `view-only`, or `foreign install` — installed bundles are publisher-managed and can't be synced), whether a remote environment is active, and whether a local workspace already exists under `agents/`.
+
+### `cinna account status`
+
+One-shot summary of the account workspace: platform/frontend URLs, machine name, synced-agent count, and an account-token probe (`valid token` / `expired token` / `no connection`) — the account-level counterpart of `cinna status`.
+
+### `cinna account refresh-context`
+
+Re-download the context package and replace the account workspace's `context/` tree (run from inside the account workspace). Use it when the platform ships updated docs or API reference. The existing tree is only removed after a successful download — a failed refresh warns and leaves the previous `context/` intact.
+
+### `cinna agent create <name> [--description TEXT]`
+
+Create a new agent on the platform from the account workspace — no UI interaction. Thin client: only the name (and optional description) is sent; the backend applies all defaults (default AI credentials, env template, environment creation) exactly as creating from the UI does. Prints the created agent's ID and web UI link, plus a hint to attach a local workspace with `cinna agent sync <name>`. Requires the `agent-developer` role (403 otherwise). Template selection is not supported yet — agents always get the server default.
+
+```bash
+cinna agent create "CRM Agent" --description "Tracks customer accounts"
+cinna agent sync crm-agent
+```
+
+### `cinna agent sync <agent>`
+
+Mint a per-agent CLI token (no UI interaction) and materialize a standard workspace under `agents/<slug>/`. `<agent>` is the display name, slug, or agent ID from `cinna account agents`. The result is identical to what `cinna setup` produces — own `.cinna/config.json`, registry entry, generated `CLAUDE.md` / `BUILDING_AGENT.md` / MCP configs / `mutagen.yml`, and the initial workspace clone — so afterwards:
+
+```bash
+cd agents/hr-manager-agent/
+cinna dev
+```
+
+works exactly as for a manually set-up agent. Synced agents also appear in `cinna list` and in the agent's Integrations-tab session list like any other CLI session. The backend gates minting on building rights: foreign bundle installs and view-only agents are rejected with the server's error message.
+
+### `cinna agent unsync <agent>`
+
+Detach a synced workspace: stop its sync session, revoke the minted CLI token server-side (via the account-scoped revoke endpoint, authenticated with the account token; idempotent), then perform the equivalent of `cinna disconnect`: remove `.cinna/`, generated files, and the registry entry. Workspace files under `agents/<slug>/workspace/` are preserved. The revoke degrades gracefully — if it fails (no connection, or a workspace synced before token-id tracking), a warning is printed and the local teardown still completes; the token then expires on its own or can be revoked from the agent's Integrations tab.
+
+### `cinna connect agent-api --producer <agent> --consumer <agent> [--label TEXT] [--read-only]`
+
+Wire one agent to another's REST API from the account workspace. Resolves both agents (name, slug, or ID), mints a producer API token, and attaches it to the consumer as a credential — which rides the consumer's normal credential sync into its remote environment, so no key ever touches your machine. Prints the credential ID, token prefix, base URL, and spec URL. `--read-only` restricts the consumer to read-only access; `--label` names the credential. Backend errors surface verbatim: 400 if the producer's REST API is disabled, 403/404 for ownership violations.
+
+```bash
+cinna connect agent-api --producer crm-agent --consumer hr-manager-agent --read-only
+```
+
+### `cinna connect mcp --producer <agent> --consumer <agent> [--label TEXT] [--conversation-only|--building-only]`
+
+Wire one agent to another's agent2agent MCP connector. The consumer is resolved from your agents; the producer is resolved against the platform's discoverable-connectors listing (it must expose an agent2agent MCP connector your account is allowed to consume — the error lists the discoverable options otherwise). By default the connection is enabled in both conversation and building modes; scope it with `--conversation-only` / `--building-only`. Prints the credential ID, endpoint, transport, and status — plus an authorize URL to open if the connector requires OAuth.
+
+```bash
+cinna connect mcp --producer crm-agent --consumer hr-manager-agent --building-only
+```
+
+### `cinna api <METHOD> <path> [--json TEXT | --data @file.json] [--query k=v ...]`
+
+Generic escape hatch into the platform API, authenticated with the account token (run from the account workspace). `<path>` is relative to the API root — `agents`, `agents/<id>` — no `/api/v1` prefix. The endpoint catalogue ships in the account workspace under `context/api_reference/`.
+
+- `--json '<obj>'` or `--data @file.json` supply a JSON request body (mutually exclusive); repeatable `--query k=v` supplies query parameters (repeating a key builds a list).
+- The inner response is passed through verbatim: the body prints to stdout (pretty-printed for JSON) and the exit code is `0` for 2xx and `1` for an inner 4xx/5xx — so it composes in shell pipelines.
+- When the escape hatch itself refuses the call, the detail prints to stderr and the exit code is `2`: policy denials (credentials, user management, admin, CLI, MFA/auth, and streaming routes are excluded — shown as `blocked by platform policy: …`), rate limiting (429, with the Retry-After delay), and request/response size caps (413/502).
+
+```bash
+cinna api GET agents
+cinna api GET agents --query limit=5
+cinna api PATCH agents/3fa85f64-5717-4562-b3fc-2c963f66afa6 --json '{"description": "updated"}'
+cinna api POST tasks --data @task.json
+```
+
 ### `cinna dev`
 
 Start a foreground dev session — creates / resumes the Mutagen sync session for this workspace and attaches the terminal to a two-tab TUI (status + raw Mutagen details). Ctrl-C terminates the session; sync does not outlive the TUI. To observe sync from another terminal without affecting it, use `cinna sync status`.
@@ -103,11 +192,14 @@ Stream a command through the platform to the remote agent environment. Output st
 
 Arguments pass through transparently — each token is re-quoted before being sent, so spaces and shell metacharacters inside an argument survive intact. Use ordinary single-level quoting, exactly as for a local command. To run a shell snippet (pipes, redirects, `&&`), pass it to a shell explicitly: `cinna exec bash -c '…'`.
 
+With `--agent <agent>`, run from an account workspace root against the named synced agent (name, slug, or ID) using that child workspace's own token — the agent must already be attached with `cinna agent sync`.
+
 ```bash
 cinna exec python scripts/main.py
 cinna exec pip install pandas
 cinna exec bash -c 'ls -la'
 cinna exec python -c 'import sys; print(sys.argv)' "a b"
+cinna exec --agent crm-agent python scripts/main.py   # from the account root
 ```
 
 ### `cinna status`

@@ -16,6 +16,16 @@ class ConfigNotFoundError(CinnaError):
         )
 
 
+class AccountConfigNotFoundError(CinnaError):
+    """No .cinna/account.json found. User needs to run account setup."""
+
+    def __init__(self):
+        super().__init__(
+            "Not in a cinna account workspace. Run the account setup command "
+            "from the platform UI (Settings → Local Development) first."
+        )
+
+
 class AuthenticationError(CinnaError):
     """CLI token rejected by the platform."""
 
