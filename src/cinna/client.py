@@ -498,6 +498,113 @@ class AccountClient:
         )
         return self._handle_response(response).json()
 
+    # --- Schedules (full CRUD via dedicated account verbs) ---
+
+    def list_schedules(self, agent_id: str) -> dict:
+        """GET /account/agents/{id}/schedules — the agent's schedules."""
+        response = self._client.get(
+            f"/api/v1/cli/account/agents/{agent_id}/schedules"
+        )
+        return self._handle_response(response).json()
+
+    def generate_schedule(
+        self,
+        agent_id: str,
+        natural_language: str,
+        timezone: str,
+        schedule_type: str = "static_prompt",
+    ) -> dict:
+        """POST /account/agents/{id}/schedules/generate — NL → cron preview.
+
+        Stateless: returns ``{success, cron_string, description, next_execution}``
+        (or ``{success: false, error}``); nothing is persisted.
+        """
+        response = self._client.post(
+            f"/api/v1/cli/account/agents/{agent_id}/schedules/generate",
+            json={
+                "natural_language": natural_language,
+                "timezone": timezone,
+                "schedule_type": schedule_type,
+            },
+        )
+        return self._handle_response(response).json()
+
+    def create_schedule(self, agent_id: str, body: dict) -> dict:
+        """POST /account/agents/{id}/schedules — create a schedule.
+
+        ``body`` carries name / cron_string / timezone / description / prompt /
+        enabled / schedule_type / command. 403 on a foreign install.
+        """
+        response = self._client.post(
+            f"/api/v1/cli/account/agents/{agent_id}/schedules", json=body
+        )
+        return self._handle_response(response).json()
+
+    def update_schedule(self, agent_id: str, schedule_id: str, body: dict) -> dict:
+        """PUT /account/agents/{id}/schedules/{sid} — partial update / toggle.
+
+        Only the keys present in ``body`` are changed (the backend applies
+        ``exclude_unset`` semantics). On a foreign install only ``enabled`` may
+        change (else 403).
+        """
+        response = self._client.put(
+            f"/api/v1/cli/account/agents/{agent_id}/schedules/{schedule_id}",
+            json=body,
+        )
+        return self._handle_response(response).json()
+
+    def delete_schedule(self, agent_id: str, schedule_id: str) -> dict:
+        """DELETE /account/agents/{id}/schedules/{sid} — delete (403 on foreign)."""
+        response = self._client.delete(
+            f"/api/v1/cli/account/agents/{agent_id}/schedules/{schedule_id}"
+        )
+        return self._handle_response(response).json()
+
+    def run_schedule(self, agent_id: str, schedule_id: str) -> dict:
+        """POST /account/agents/{id}/schedules/{sid}/run — Run now.
+
+        Returns ``{message}`` (env-state-aware). Allowed on foreign installs.
+        """
+        response = self._client.post(
+            f"/api/v1/cli/account/agents/{agent_id}/schedules/{schedule_id}/run"
+        )
+        return self._handle_response(response).json()
+
+    def schedule_logs(self, agent_id: str, schedule_id: str) -> dict:
+        """GET /account/agents/{id}/schedules/{sid}/logs — last 50 execution logs."""
+        response = self._client.get(
+            f"/api/v1/cli/account/agents/{agent_id}/schedules/{schedule_id}/logs"
+        )
+        return self._handle_response(response).json()
+
+    # --- Status (access / refresh / set pre-command) ---
+
+    def get_agent_status(self, agent_id: str, force_refresh: bool = False) -> dict:
+        """GET /account/agents/{id}/status — snapshot + configured pre-command.
+
+        ``force_refresh=True`` wakes a suspended env, runs the pre-command, and
+        re-reads STATUS.md (cache fallback on failure — never raises). Returns
+        ``{status, status_refresh_command}``.
+        """
+        response = self._client.get(
+            f"/api/v1/cli/account/agents/{agent_id}/status",
+            params={"force_refresh": "true"} if force_refresh else None,
+        )
+        return self._handle_response(response).json()
+
+    def set_status_refresh_command(self, agent_id: str, command: str | None) -> dict:
+        """POST /account/agents/{id}/status/refresh-command — set the pre-command.
+
+        ``command`` is a raw shell/Python string or a ``/run:<name>`` reference;
+        empty string is a deliberate opt-out. Returns ``{status,
+        status_refresh_command}``.
+        """
+        response = self._client.post(
+            f"/api/v1/cli/account/agents/{agent_id}/status/refresh-command",
+            json={"command": command},
+        )
+        return self._handle_response(response).json()
+
     def api_proxy(
         self,
         method: str,

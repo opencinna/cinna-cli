@@ -1212,6 +1212,349 @@ def run_agent_show(
         _print_agent_api_status(status)
 
 
+# ── Schedules (full CRUD) ────────────────────────────────────────────────────
+
+
+def _resolve_one_agent(client: "AccountClient", agent_ref: str) -> dict:
+    """Resolve ``agent_ref`` against the cached account-agents listing."""
+    return _resolve_account_agent(client.list_account_agents().get("data", []), agent_ref)
+
+
+def _print_schedules(schedules: list[dict]) -> None:
+    """Render a schedule listing as a table (mirrors `cinna account agents`)."""
+    from rich.table import Table
+
+    if not schedules:
+        console.status("No schedules for this agent.")
+        return
+
+    table = Table(title=f"Schedules ({len(schedules)})", title_style="bold", show_lines=True)
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("Name / id")
+    table.add_column("Type")
+    table.add_column("Cron (UTC)")
+    table.add_column("Enabled")
+    table.add_column("Next run (UTC)")
+
+    for i, s in enumerate(schedules, 1):
+        name_cell = f"[bold]{s.get('name', '?')}[/bold]\n[dim]{s.get('id', '?')}[/dim]"
+        type_cell = (
+            "[yellow]script[/yellow]"
+            if s.get("schedule_type") == "script_trigger"
+            else "static"
+        )
+        enabled_cell = (
+            "[green]● on[/green]" if s.get("enabled") else "[dim]○ off[/dim]"
+        )
+        table.add_row(
+            str(i),
+            name_cell,
+            type_cell,
+            s.get("cron_string", "?"),
+            enabled_cell,
+            (s.get("next_execution") or "—"),
+        )
+
+    console.console.print(table)
+
+
+def run_schedule_list(agent_ref: str) -> None:
+    """List an agent's schedules — `cinna agent schedule list`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with console.spinner("Fetching schedules..."):
+        with AccountClient(account_cfg) as client:
+            agent = _resolve_one_agent(client, agent_ref)
+            data = client.list_schedules(agent["id"])
+
+    console.console.print(f"Agent: [bold]{agent['name']}[/bold]")
+    _print_schedules(data.get("data", []))
+
+
+def run_schedule_generate(agent_ref: str, text: str, timezone: str, schedule_type: str) -> None:
+    """NL → cron preview — `cinna agent schedule generate`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with console.spinner("Generating cron from natural language..."):
+        with AccountClient(account_cfg) as client:
+            agent = _resolve_one_agent(client, agent_ref)
+            result = client.generate_schedule(
+                agent["id"], text, timezone, schedule_type=schedule_type
+            )
+
+    if not result.get("success"):
+        raise click.ClickException(result.get("error") or "Could not generate a schedule.")
+
+    console.status("Generated schedule (preview — nothing was saved):")
+    console.console.print(f"  Cron (UTC):     {result.get('cron_string')}")
+    console.console.print(f"  Description:    {result.get('description')}")
+    console.console.print(f"  Next run (UTC): {result.get('next_execution')}")
+    console.console.print()
+    console.console.print(
+        "Create it with: cinna agent schedule create "
+        f"{agent_ref} --name <NAME> --cron '{result.get('cron_string')}' --tz UTC"
+    )
+
+
+def run_schedule_create(
+    agent_ref: str,
+    name: str,
+    cron: str,
+    timezone: str,
+    schedule_type: str,
+    prompt: str | None,
+    command: str | None,
+    description: str | None,
+    enabled: bool,
+) -> None:
+    """Create a schedule — `cinna agent schedule create`."""
+    if schedule_type == "script_trigger" and not (command and command.strip()):
+        raise click.ClickException(
+            "--command is required for a script_trigger schedule."
+        )
+
+    body: dict = {
+        "name": name,
+        "cron_string": cron,
+        "timezone": timezone,
+        # description is a required field server-side; default to the name.
+        "description": description or name,
+        "enabled": enabled,
+        "schedule_type": schedule_type,
+    }
+    if prompt is not None:
+        body["prompt"] = prompt
+    if command is not None:
+        body["command"] = command
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Creating schedule..."):
+            created = client.create_schedule(agent["id"], body)
+
+    console.status(f"Created schedule '{created.get('name')}' for {agent['name']}")
+    console.console.print(f"  Id:             {created.get('id')}")
+    console.console.print(f"  Cron (UTC):     {created.get('cron_string')}")
+    console.console.print(f"  Type:           {created.get('schedule_type')}")
+    console.console.print(f"  Enabled:        {created.get('enabled')}")
+    console.console.print(f"  Next run (UTC): {created.get('next_execution')}")
+
+
+def run_schedule_update(
+    agent_ref: str,
+    schedule_id: str,
+    enabled: bool | None,
+    name: str | None,
+    cron: str | None,
+    timezone: str | None,
+    prompt: str | None,
+    command: str | None,
+    description: str | None,
+) -> None:
+    """Partial-update / toggle a schedule — `cinna agent schedule update`."""
+    body: dict = {}
+    if enabled is not None:
+        body["enabled"] = enabled
+    if name is not None:
+        body["name"] = name
+    if cron is not None:
+        body["cron_string"] = cron
+    if timezone is not None:
+        body["timezone"] = timezone
+    if prompt is not None:
+        body["prompt"] = prompt
+    if command is not None:
+        body["command"] = command
+    if description is not None:
+        body["description"] = description
+
+    if not body:
+        raise click.ClickException(
+            "Nothing to update. Pass --enable/--disable or a field "
+            "(--name / --cron / --tz / --prompt / --command / --description)."
+        )
+    if "cron_string" in body and "timezone" not in body:
+        raise click.ClickException("--tz is required when changing --cron.")
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Updating schedule..."):
+            updated = client.update_schedule(agent["id"], schedule_id, body)
+
+    console.status(f"Updated schedule '{updated.get('name')}'")
+    console.console.print(f"  Enabled:        {updated.get('enabled')}")
+    console.console.print(f"  Cron (UTC):     {updated.get('cron_string')}")
+    console.console.print(f"  Next run (UTC): {updated.get('next_execution')}")
+
+
+def run_schedule_run(agent_ref: str, schedule_id: str) -> None:
+    """Run a schedule now — `cinna agent schedule run`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Triggering schedule..."):
+            result = client.run_schedule(agent["id"], schedule_id)
+
+    console.status(result.get("message", "Schedule triggered."))
+
+
+def _print_schedule_logs(logs: list[dict]) -> None:
+    """Render execution logs as a table."""
+    from rich.table import Table
+
+    if not logs:
+        console.status("No execution logs yet for this schedule.")
+        return
+
+    table = Table(title=f"Execution logs ({len(logs)})", title_style="bold", show_lines=True)
+    table.add_column("When (UTC)")
+    table.add_column("Status")
+    table.add_column("Exit")
+    table.add_column("Detail")
+
+    for log in logs:
+        status = log.get("status", "?")
+        if status == "success":
+            status_cell = "[green]success[/green]"
+        elif status == "session_triggered":
+            status_cell = "[yellow]session_triggered[/yellow]"
+        elif status == "error":
+            status_cell = "[red]error[/red]"
+        else:
+            status_cell = status
+        detail = (
+            log.get("error_message")
+            or log.get("command_executed")
+            or log.get("prompt_used")
+            or ""
+        )
+        if detail and len(detail) > 60:
+            detail = detail[:57] + "..."
+        exit_code = log.get("command_exit_code")
+        table.add_row(
+            log.get("executed_at", "?"),
+            status_cell,
+            "" if exit_code is None else str(exit_code),
+            detail,
+        )
+
+    console.console.print(table)
+
+
+def run_schedule_logs(agent_ref: str, schedule_id: str) -> None:
+    """Show a schedule's execution logs — `cinna agent schedule logs`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with console.spinner("Fetching execution logs..."):
+        with AccountClient(account_cfg) as client:
+            agent = _resolve_one_agent(client, agent_ref)
+            data = client.schedule_logs(agent["id"], schedule_id)
+
+    _print_schedule_logs(data.get("data", []))
+
+
+def run_schedule_delete(agent_ref: str, schedule_id: str, yes: bool) -> None:
+    """Delete a schedule — `cinna agent schedule delete`."""
+    if not yes and not click.confirm(
+        f"Delete schedule {schedule_id}?", default=False
+    ):
+        raise click.Abort()
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Deleting schedule..."):
+            client.delete_schedule(agent["id"], schedule_id)
+
+    console.status("Schedule deleted.")
+
+
+# ── Status (access / refresh / set pre-command) ──────────────────────────────
+
+
+def _print_agent_status(result: dict) -> None:
+    """Render the combined status read (`{status, status_refresh_command}`)."""
+    status = result.get("status") or {}
+    severity = status.get("severity")
+    summary = status.get("summary")
+    sev_color = {
+        "ok": "green",
+        "warning": "yellow",
+        "error": "red",
+        "info": "cyan",
+    }.get(severity or "", "dim")
+
+    if severity is None and not status.get("raw"):
+        console.console.print("  Status:         [dim]no STATUS.md published[/dim]")
+    else:
+        console.console.print(f"  Severity:       [{sev_color}]{severity or 'unknown'}[/{sev_color}]")
+        if summary:
+            console.console.print(f"  Summary:        {summary}")
+        age = _humanize_age(status.get("reported_at"))
+        if age:
+            console.console.print(f"  Reported:       {age} ({status.get('reported_at')})")
+        fetched = _humanize_age(status.get("fetched_at"))
+        if fetched:
+            console.console.print(f"  Fetched:        {fetched}")
+
+    console.console.print(
+        f"  Refresh cmd:    {result.get('status_refresh_command') or '[dim](none)[/dim]'}"
+    )
+    warning = status.get("refresh_command_warning")
+    if warning:
+        console.console.print()
+        console.warn(warning)
+    body = status.get("body")
+    if body:
+        console.console.print()
+        console.console.print("[dim]── STATUS.md ──[/dim]")
+        console.console.print(body)
+
+
+def run_status_show(agent_ref: str, force_refresh: bool = False) -> None:
+    """Show / refresh an agent's status — `cinna agent status show|refresh`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    label = "Refreshing status..." if force_refresh else "Fetching status..."
+    with console.spinner(label):
+        with AccountClient(account_cfg) as client:
+            agent = _resolve_one_agent(client, agent_ref)
+            result = client.get_agent_status(agent["id"], force_refresh=force_refresh)
+
+    console.console.print(f"Agent: [bold]{agent['name']}[/bold]")
+    _print_agent_status(result)
+
+
+def run_status_set_command(agent_ref: str, command: str) -> None:
+    """Set the status-refresh pre-command — `cinna agent status set-command`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Saving status refresh command..."):
+            result = client.set_status_refresh_command(agent["id"], command)
+
+    console.status(f"Status refresh command set for {agent['name']}")
+    console.console.print(
+        f"  Refresh cmd: {result.get('status_refresh_command') or '(none)'}"
+    )
+
+
 def _resolve_discoverable_connector(items: list[dict], producer_ref: str) -> dict:
     """Resolve ``producer_ref`` against the discoverable-MCP listing.
 

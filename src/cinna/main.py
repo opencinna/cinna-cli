@@ -472,6 +472,205 @@ def agent_show(agent_ref: str, prompts_only: bool, full: bool):
     run_agent_show(agent_ref, prompts_only, full)
 
 
+# ─── agent schedule subgroup ───────────────────────────────────────────────
+
+
+@agent.group(name="schedule")
+def agent_schedule():
+    """Manage AGENT_REF's automatic-execution schedules (CRON).
+
+    Full CRUD over an agent's schedules — the CLI equivalent of the agent
+    Config → Schedules card. A schedule is either a ``static_prompt`` (always
+    starts a session) or a ``script_trigger`` (runs a command, only starts a
+    session when the output is not "OK"). On a foreign (bundle) install the
+    definitions are publisher-managed — you can toggle / run / view logs only.
+    Run from the account workspace.
+    """
+
+
+@agent_schedule.command(name="list")
+@click.argument("agent_ref")
+def agent_schedule_list(agent_ref: str):
+    """List AGENT_REF's schedules."""
+    from cinna.account import run_schedule_list
+
+    run_schedule_list(agent_ref)
+
+
+@agent_schedule.command(name="generate")
+@click.argument("agent_ref")
+@click.argument("text")
+@click.option("--tz", "timezone", default="UTC", help="IANA timezone for interpretation (default UTC)")
+@click.option(
+    "--type", "schedule_type",
+    type=click.Choice(["static_prompt", "script_trigger"]),
+    default="static_prompt",
+    help="Which minimum-interval floor applies to the generated cadence",
+)
+def agent_schedule_generate(agent_ref: str, text: str, timezone: str, schedule_type: str):
+    """Preview a CRON string from natural-language TEXT (nothing is saved).
+
+    Example: cinna agent schedule generate crm-agent "every weekday at 7am" --tz Europe/Berlin
+    """
+    from cinna.account import run_schedule_generate
+
+    run_schedule_generate(agent_ref, text, timezone, schedule_type)
+
+
+@agent_schedule.command(name="create")
+@click.argument("agent_ref")
+@click.option("--name", required=True, help="Schedule name")
+@click.option("--cron", required=True, help="CRON expression in --tz local time (5 fields)")
+@click.option("--tz", "timezone", default="UTC", help="IANA timezone for the cron (default UTC)")
+@click.option(
+    "--type", "schedule_type",
+    type=click.Choice(["static_prompt", "script_trigger"]),
+    default="static_prompt",
+    help="static_prompt (always starts a session) or script_trigger (runs a command)",
+)
+@click.option("--prompt", default=None, help="Per-schedule prompt (static_prompt only)")
+@click.option("--command", default=None, help="Shell command (required for script_trigger)")
+@click.option("--description", default=None, help="Human description (defaults to the name)")
+@click.option("--disabled", is_flag=True, help="Create the schedule disabled")
+def agent_schedule_create(
+    agent_ref: str,
+    name: str,
+    cron: str,
+    timezone: str,
+    schedule_type: str,
+    prompt: str | None,
+    command: str | None,
+    description: str | None,
+    disabled: bool,
+):
+    """Create a schedule on AGENT_REF.
+
+    Examples:
+      cinna agent schedule create crm-agent --name "Daily report" \\
+        --cron "0 7 * * 1-5" --tz Europe/Berlin --prompt "Produce the daily report"
+      cinna agent schedule create crm-agent --name "DB check" \\
+        --cron "*/30 * * * *" --tz UTC --type script_trigger \\
+        --command "python scripts/check_db.py"
+    """
+    from cinna.account import run_schedule_create
+
+    run_schedule_create(
+        agent_ref, name, cron, timezone, schedule_type,
+        prompt, command, description, enabled=not disabled,
+    )
+
+
+@agent_schedule.command(name="update")
+@click.argument("agent_ref")
+@click.argument("schedule_id")
+@click.option("--enable/--disable", "enabled", default=None, help="Enable or disable the schedule")
+@click.option("--name", default=None, help="New name")
+@click.option("--cron", default=None, help="New CRON expression (requires --tz)")
+@click.option("--tz", "timezone", default=None, help="IANA timezone (required when --cron changes)")
+@click.option("--prompt", default=None, help="New per-schedule prompt")
+@click.option("--command", default=None, help="New shell command (script_trigger)")
+@click.option("--description", default=None, help="New description")
+def agent_schedule_update(
+    agent_ref: str,
+    schedule_id: str,
+    enabled: bool | None,
+    name: str | None,
+    cron: str | None,
+    timezone: str | None,
+    prompt: str | None,
+    command: str | None,
+    description: str | None,
+):
+    """Update / toggle SCHEDULE_ID on AGENT_REF.
+
+    Only the fields you pass are changed. On a foreign (bundle) install only
+    --enable/--disable is permitted (the definition is publisher-managed).
+    """
+    from cinna.account import run_schedule_update
+
+    run_schedule_update(
+        agent_ref, schedule_id, enabled, name, cron, timezone,
+        prompt, command, description,
+    )
+
+
+@agent_schedule.command(name="run")
+@click.argument("agent_ref")
+@click.argument("schedule_id")
+def agent_schedule_run(agent_ref: str, schedule_id: str):
+    """Trigger SCHEDULE_ID immediately (Run now)."""
+    from cinna.account import run_schedule_run
+
+    run_schedule_run(agent_ref, schedule_id)
+
+
+@agent_schedule.command(name="logs")
+@click.argument("agent_ref")
+@click.argument("schedule_id")
+def agent_schedule_logs(agent_ref: str, schedule_id: str):
+    """Show SCHEDULE_ID's last 50 execution logs."""
+    from cinna.account import run_schedule_logs
+
+    run_schedule_logs(agent_ref, schedule_id)
+
+
+@agent_schedule.command(name="delete")
+@click.argument("agent_ref")
+@click.argument("schedule_id")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+def agent_schedule_delete(agent_ref: str, schedule_id: str, yes: bool):
+    """Delete SCHEDULE_ID from AGENT_REF (403 on a foreign install)."""
+    from cinna.account import run_schedule_delete
+
+    run_schedule_delete(agent_ref, schedule_id, yes)
+
+
+# ─── agent status subgroup ─────────────────────────────────────────────────
+
+
+@agent.group(name="status")
+def agent_status():
+    """Inspect AGENT_REF's self-reported status and refresh command.
+
+    The CLI equivalent of the Integrations → Agent status card: read the
+    agent's STATUS.md snapshot, force a live re-read, and configure the
+    pre-command that regenerates it. Run from the account workspace.
+    """
+
+
+@agent_status.command(name="show")
+@click.argument("agent_ref")
+def agent_status_show(agent_ref: str):
+    """Show AGENT_REF's cached status snapshot + configured refresh command."""
+    from cinna.account import run_status_show
+
+    run_status_show(agent_ref, force_refresh=False)
+
+
+@agent_status.command(name="refresh")
+@click.argument("agent_ref")
+def agent_status_refresh(agent_ref: str):
+    """Force a live STATUS.md re-read (wakes a suspended env; never fails)."""
+    from cinna.account import run_status_show
+
+    run_status_show(agent_ref, force_refresh=True)
+
+
+@agent_status.command(name="set-command")
+@click.argument("agent_ref")
+@click.argument("command")
+def agent_status_set_command(agent_ref: str, command: str):
+    """Set AGENT_REF's status-refresh pre-command.
+
+    COMMAND is a raw shell/Python string or a ``/run:<name>`` reference. Pass
+    an empty string ("") to opt out of running any pre-command. The platform
+    default is ``/run:status``.
+    """
+    from cinna.account import run_status_set_command
+
+    run_status_set_command(agent_ref, command)
+
+
 # ─── connect group ─────────────────────────────────────────────────────────
 
 

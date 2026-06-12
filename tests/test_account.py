@@ -2546,3 +2546,308 @@ def test_account_client_inspect_agent(account_client):
     result = account_client.inspect_agent("agent-123")
     assert result["id"] == "agent-123"
     assert route.called
+
+
+# ─── cinna agent schedule (CRUD) ────────────────────────────────────────────
+
+
+_SCHEDULE_ROW = {
+    "id": "sched-1",
+    "agent_id": "agent-123",
+    "name": "Daily report",
+    "cron_string": "0 7 * * 1-5",
+    "description": "weekday 7am",
+    "enabled": True,
+    "prompt": "Produce the daily report",
+    "schedule_type": "static_prompt",
+    "command": None,
+    "last_execution": None,
+    "next_execution": "2026-06-15T07:00:00+00:00",
+    "created_at": "2026-06-12T00:00:00+00:00",
+    "updated_at": "2026-06-12T00:00:00+00:00",
+}
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_list_renders(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.list_schedules.return_value = {"data": [_SCHEDULE_ROW], "count": 1}
+
+    result = runner.invoke(cli, ["agent", "schedule", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.list_schedules.assert_called_once_with("agent-123")
+    assert "Daily report" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_create_builds_body(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.create_schedule.return_value = _SCHEDULE_ROW
+
+    result = runner.invoke(
+        cli,
+        [
+            "agent", "schedule", "create", "CRM Agent",
+            "--name", "Daily report",
+            "--cron", "0 7 * * 1-5",
+            "--tz", "Europe/Berlin",
+            "--prompt", "Produce the daily report",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    agent_id, body = mock_client.create_schedule.call_args.args
+    assert agent_id == "agent-123"
+    assert body["name"] == "Daily report"
+    assert body["cron_string"] == "0 7 * * 1-5"
+    assert body["timezone"] == "Europe/Berlin"
+    assert body["schedule_type"] == "static_prompt"
+    assert body["prompt"] == "Produce the daily report"
+    assert body["enabled"] is True
+    # description defaults to the name when omitted
+    assert body["description"] == "Daily report"
+    assert "command" not in body
+    assert "sched-1" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_create_script_trigger_requires_command(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(
+        cli,
+        [
+            "agent", "schedule", "create", "CRM Agent",
+            "--name", "DB check", "--cron", "*/30 * * * *", "--tz", "UTC",
+            "--type", "script_trigger",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--command is required" in result.output + result.stderr
+    mock_client.create_schedule.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_update_partial_body(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.update_schedule.return_value = {**_SCHEDULE_ROW, "enabled": False}
+
+    result = runner.invoke(
+        cli, ["agent", "schedule", "update", "CRM Agent", "sched-1", "--disable"]
+    )
+    assert result.exit_code == 0, result.output
+    agent_id, schedule_id, body = mock_client.update_schedule.call_args.args
+    assert (agent_id, schedule_id) == ("agent-123", "sched-1")
+    assert body == {"enabled": False}
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_update_cron_requires_tz(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(
+        cli, ["agent", "schedule", "update", "CRM Agent", "sched-1", "--cron", "0 9 * * *"]
+    )
+    assert result.exit_code != 0
+    assert "--tz is required" in result.output + result.stderr
+    mock_client.update_schedule.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_update_empty_errors(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(cli, ["agent", "schedule", "update", "CRM Agent", "sched-1"])
+    assert result.exit_code != 0
+    assert "Nothing to update" in result.output + result.stderr
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_run_prints_message(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.run_schedule.return_value = {"message": "Schedule triggered successfully"}
+
+    result = runner.invoke(cli, ["agent", "schedule", "run", "CRM Agent", "sched-1"])
+    assert result.exit_code == 0, result.output
+    mock_client.run_schedule.assert_called_once_with("agent-123", "sched-1")
+    assert "triggered successfully" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_delete_confirmed(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.delete_schedule.return_value = {"message": "Schedule deleted successfully"}
+
+    result = runner.invoke(
+        cli, ["agent", "schedule", "delete", "CRM Agent", "sched-1", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.delete_schedule.assert_called_once_with("agent-123", "sched-1")
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_generate_success(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.generate_schedule.return_value = {
+        "success": True,
+        "cron_string": "0 7 * * 1-5",
+        "description": "weekday 7am",
+        "next_execution": "2026-06-15T07:00:00+00:00",
+    }
+
+    result = runner.invoke(
+        cli, ["agent", "schedule", "generate", "CRM Agent", "every weekday at 7am"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "0 7 * * 1-5" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_schedule_generate_failure_raises(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.generate_schedule.return_value = {
+        "success": False,
+        "error": "'sometimes' is too vague",
+    }
+
+    result = runner.invoke(
+        cli, ["agent", "schedule", "generate", "CRM Agent", "sometimes"]
+    )
+    assert result.exit_code != 0
+    assert "too vague" in result.output + result.stderr
+
+
+# ─── cinna agent status ─────────────────────────────────────────────────────
+
+
+@patch("cinna.account.AccountClient")
+def test_status_show_renders(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_status.return_value = {
+        "status": {
+            "agent_id": "agent-123",
+            "severity": "ok",
+            "summary": "All clear",
+            "reported_at": "2026-06-12T00:00:00+00:00",
+            "fetched_at": "2026-06-12T00:00:00+00:00",
+            "body": "All systems nominal.",
+            "refresh_command_warning": None,
+        },
+        "status_refresh_command": "/run:status",
+    }
+
+    result = runner.invoke(cli, ["agent", "status", "show", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.get_agent_status.assert_called_once_with("agent-123", force_refresh=False)
+    assert "All clear" in result.output
+    assert "/run:status" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_status_refresh_forces(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_status.return_value = {
+        "status": {"agent_id": "agent-123", "severity": None, "raw": None},
+        "status_refresh_command": "/run:status",
+    }
+
+    result = runner.invoke(cli, ["agent", "status", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.get_agent_status.assert_called_once_with("agent-123", force_refresh=True)
+
+
+@patch("cinna.account.AccountClient")
+def test_status_set_command(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.set_status_refresh_command.return_value = {
+        "status": {"agent_id": "agent-123"},
+        "status_refresh_command": "/run:custom",
+    }
+
+    result = runner.invoke(
+        cli, ["agent", "status", "set-command", "CRM Agent", "/run:custom"]
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.set_status_refresh_command.assert_called_once_with("agent-123", "/run:custom")
+    assert "/run:custom" in result.output
+
+
+# ─── client-level (respx) coverage for the new endpoints ────────────────────
+
+
+@respx.mock
+def test_account_client_list_schedules(account_client):
+    route = respx.get(
+        "https://platform.example.com/api/v1/cli/account/agents/agent-123/schedules"
+    ).respond(200, json={"data": [_SCHEDULE_ROW], "count": 1})
+    result = account_client.list_schedules("agent-123")
+    assert result["count"] == 1
+    assert route.called
+
+
+@respx.mock
+def test_account_client_create_schedule(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/agents/agent-123/schedules"
+    ).respond(200, json=_SCHEDULE_ROW)
+    result = account_client.create_schedule("agent-123", {"name": "x"})
+    assert result["id"] == "sched-1"
+    assert route.called
+
+
+@respx.mock
+def test_account_client_run_schedule(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/agents/agent-123/schedules/sched-1/run"
+    ).respond(200, json={"message": "Schedule triggered successfully"})
+    result = account_client.run_schedule("agent-123", "sched-1")
+    assert "triggered" in result["message"]
+    assert route.called
+
+
+@respx.mock
+def test_account_client_get_agent_status(account_client):
+    route = respx.get(
+        "https://platform.example.com/api/v1/cli/account/agents/agent-123/status"
+    ).respond(200, json={"status": {"agent_id": "agent-123"}, "status_refresh_command": "/run:status"})
+    result = account_client.get_agent_status("agent-123", force_refresh=True)
+    assert result["status_refresh_command"] == "/run:status"
+    assert route.called
+
+
+@respx.mock
+def test_account_client_set_status_refresh_command(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/agents/agent-123/status/refresh-command"
+    ).respond(200, json={"status": {"agent_id": "agent-123"}, "status_refresh_command": "/run:x"})
+    result = account_client.set_status_refresh_command("agent-123", "/run:x")
+    assert result["status_refresh_command"] == "/run:x"
+    assert route.called

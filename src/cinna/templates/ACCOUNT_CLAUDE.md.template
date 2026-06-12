@@ -73,6 +73,26 @@ Refresh after platform updates with `cinna account refresh-context`.
 | `cinna exec --agent <agent> <cmd…>` | Run a command in a synced agent's remote environment from the account root |
 | `cinna list` | Every agent registered on this machine (synced agents appear here too) |
 
+**Scheduling (automatic execution) — full CRUD:**
+
+| Command | What it does |
+|---------|--------------|
+| `cinna agent schedule list <agent>` | List the agent's schedules (name/id, type, cron, enabled, next run) |
+| `cinna agent schedule generate <agent> "<phrase>" [--tz Z] [--type T]` | Turn natural language ("every weekday at 7am") into a cron preview — nothing is saved |
+| `cinna agent schedule create <agent> --name N --cron C [--tz Z] [--type static_prompt\|script_trigger] [--prompt P\|--command CMD] [--disabled]` | Create a schedule. `static_prompt` always starts a session with `--prompt`; `script_trigger` runs `--command` and only starts a session when the output isn't "OK" |
+| `cinna agent schedule update <agent> <sid> [--enable\|--disable] [--name N] [--cron C --tz Z] [--prompt P] [--command CMD]` | Partial update / toggle (only the flags you pass change) |
+| `cinna agent schedule run <agent> <sid>` | Run a schedule now (Run now) |
+| `cinna agent schedule logs <agent> <sid>` | Last 50 execution logs for a schedule |
+| `cinna agent schedule delete <agent> <sid> [--yes]` | Delete a schedule |
+
+**Status (self-reported health):**
+
+| Command | What it does |
+|---------|--------------|
+| `cinna agent status show <agent>` | The agent's cached `STATUS.md` snapshot (severity / summary / body) + its configured refresh command |
+| `cinna agent status refresh <agent>` | Force a live `STATUS.md` re-read (wakes a suspended env, runs the pre-command first; never fails) |
+| `cinna agent status set-command <agent> "<cmd>"` | Set the pre-command run before each forced status read — a shell string or `/run:<name>` (the agent's `CLI_COMMANDS.yaml`); `""` opts out. Default `/run:status` |
+
 **Agent REST API (producer build + verify) — precedes `connect agent-api`:**
 
 | Command | What it does |
@@ -90,7 +110,7 @@ Refresh after platform updates with `cinna account refresh-context`.
 | `cinna connect mcp --producer P --consumer C` | Wire C to P's agent2agent MCP connector |
 | `cinna api <METHOD> <path>` | Generic platform-API escape hatch (see `context/api_reference/`) |
 
-> **Mapping user intent → command.** "list/show my **workspaces**" → `cinna account user-workspace list` (workspaces are contexts that group agents, not agents themselves). "list/show my **agents**" → `cinna account agents` (scoped to the active workspace; add `--all` for every workspace). "what **credentials** do I have" → `cinna account credentials list`. When unsure which `cinna` verb covers a request, run `cinna --help` and `cinna account --help` rather than guessing or jumping to `cinna api`.
+> **Mapping user intent → command.** "list/show my **workspaces**" → `cinna account user-workspace list` (workspaces are contexts that group agents, not agents themselves). "list/show my **agents**" → `cinna account agents` (scoped to the active workspace; add `--all` for every workspace). "what **credentials** do I have" → `cinna account credentials list`. "**schedule** the agent / run it every … / set up a cron" → `cinna agent schedule` (use `generate` first to turn the phrase into a cron). "is the agent **healthy** / what's its status / why is it failing" → `cinna agent status show` (or `refresh` to force a fresh read). When unsure which `cinna` verb covers a request, run `cinna --help` and `cinna account --help` rather than guessing or jumping to `cinna api`.
 
 ## Workflow
 
@@ -117,6 +137,17 @@ Building a multi-agent network never requires the platform UI:
 ### Building an agentic network
 
 To assemble a full multi-agent network — create the agents, build their logic via sync/exec, wire them with `cinna connect agent-api` / `cinna connect mcp`, and register the delegation topology (which agent may delegate to which) — follow the canonical worked example at **`context/guides/build-an-agentic-network.md`** (a step-by-step meeting-booking network walkthrough). The agentic-team topology itself is created through the `cinna api` escape hatch against the `agentic-teams` endpoints (`cinna api POST agentic-teams …`, see `context/api_reference/`); there are no dedicated `cinna team` verbs by design.
+
+### Scheduling and monitoring an agent
+
+Once an agent's logic works, you give it **schedules** (so it runs on its own) and check its **status** (so you know it's healthy) — both from the account root, no UI:
+
+- **Schedule it.** First preview a cron from plain language: `cinna agent schedule generate crm-agent "every weekday at 7am" --tz Europe/Berlin` (this saves nothing — it just shows the cron + next run). Then create:
+  - For an agentic run that should always start a conversation: `cinna agent schedule create crm-agent --name "Daily report" --cron "0 7 * * 1-5" --tz Europe/Berlin --prompt "Produce the daily report"`.
+  - For a watchdog that should only wake the agent on a problem: `cinna agent schedule create crm-agent --name "DB check" --cron "*/30 * * * *" --tz UTC --type script_trigger --command "python scripts/check_db.py"` — a `script_trigger` runs the command and only starts a session when the output isn't exactly `OK` (so it's cheap and tokenless on the happy path; `static_prompt` schedules must run no more often than every 10 minutes).
+  - Then `cinna agent schedule list crm-agent`, toggle with `cinna agent schedule update crm-agent <sid> --disable`, trigger immediately with `cinna agent schedule run crm-agent <sid>`, and inspect outcomes with `cinna agent schedule logs crm-agent <sid>`.
+- **Monitor it.** `cinna agent status show crm-agent` prints the agent's self-reported `STATUS.md` (severity, summary, last-reported time) plus its configured refresh command; `cinna agent status refresh crm-agent` forces a fresh read (and surfaces any warning from the pre-command). To control how status is regenerated, set the pre-command with `cinna agent status set-command crm-agent "/run:status"` (a `/run:<name>` reference resolves against the agent's `CLI_COMMANDS.yaml`; `""` disables it). A good `script_trigger` health check usually pairs with a `STATUS.md`-updating helper so `status show` reflects the latest check.
+- **Foreign (bundle) installs are read-only here.** On an installed bundle you own, the schedule *definitions* are publisher-managed — you can `list`, toggle (`update --enable/--disable`), `run`, and view `logs`, but `create` / `delete` / editing fields returns an error. Status verbs work normally.
 
 ### Finalizing an agent — author its prompts
 
