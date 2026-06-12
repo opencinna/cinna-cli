@@ -1144,12 +1144,24 @@ def run_agent_restart_env(agent_ref: str) -> None:
         console.console.print(f"  Message: {result['status_message']}")
 
 
-def run_agent_show(agent_ref: str, prompts_only: bool) -> None:
+def _stdout_is_tty() -> bool:
+    """Whether stdout is an interactive terminal (vs. piped/redirected)."""
+    return sys.stdout.isatty()
+
+
+def run_agent_show(
+    agent_ref: str, prompts_only: bool, full: bool = False
+) -> None:
     """Show an agent's effective config — `cinna agent show [--prompts]`.
 
     Prints the prompts the runtime actually reads, enabled features, and
     connected credential names/types (never secrets). Confirms "is what I
     edited actually live?" in one call.
+
+    Long prompts are truncated for terminal readability. Pass ``full=True``
+    (``--full``) to print them whole; truncation is also skipped automatically
+    when stdout is not a TTY (e.g. piped or redirected to a file), so captured
+    output is always complete.
     """
     account_root = find_account_root()
     account_cfg = load_account_config(account_root)
@@ -1161,6 +1173,8 @@ def run_agent_show(agent_ref: str, prompts_only: bool) -> None:
         with console.spinner("Inspecting agent..."):
             info = client.inspect_agent(agent["id"])
 
+    show_full = full or not _stdout_is_tty()
+
     console.status(f"{info.get('name')} ({info.get('id')})")
     prompts = info.get("prompts", {})
     console.console.print()
@@ -1168,7 +1182,10 @@ def run_agent_show(agent_ref: str, prompts_only: bool) -> None:
     for label in ("entrypoint", "workflow", "refiner"):
         value = prompts.get(label)
         if value:
-            preview = value if len(value) <= 2000 else value[:2000] + "\n…(truncated)"
+            if show_full or len(value) <= 2000:
+                preview = value
+            else:
+                preview = value[:2000] + "\n…(truncated, pass --full for all)"
             console.console.print(f"  [{label}]")
             click.echo(preview)
         else:

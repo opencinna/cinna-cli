@@ -2399,6 +2399,81 @@ def test_agent_show_prompts_only(mock_client_cls, runner, account_root, monkeypa
     assert "Features:" not in result.output
 
 
+@patch("cinna.account._stdout_is_tty", return_value=True)
+@patch("cinna.account.AccountClient")
+def test_agent_show_truncates_long_prompt_on_tty(
+    mock_client_cls, _isatty, runner, account_root, monkeypatch
+):
+    """On a TTY, a long prompt is truncated for readability."""
+    monkeypatch.chdir(account_root)
+    long_prompt = "X" * 5000
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.inspect_agent.return_value = {
+        "id": "agent-123",
+        "name": "CRM Agent",
+        "features": {},
+        "prompts": {"entrypoint": long_prompt, "workflow": None, "refiner": None},
+        "credentials": [],
+        "agent_api_status": None,
+    }
+
+    result = runner.invoke(cli, ["agent", "show", "CRM Agent", "--prompts"])
+    assert result.exit_code == 0, result.output
+    assert "…(truncated" in result.output
+    assert result.output.count("X") == 2000
+
+
+@patch("cinna.account._stdout_is_tty", return_value=True)
+@patch("cinna.account.AccountClient")
+def test_agent_show_full_flag_prints_whole_prompt(
+    mock_client_cls, _isatty, runner, account_root, monkeypatch
+):
+    """`--full` prints the entire prompt even on a TTY."""
+    monkeypatch.chdir(account_root)
+    long_prompt = "X" * 5000
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.inspect_agent.return_value = {
+        "id": "agent-123",
+        "name": "CRM Agent",
+        "features": {},
+        "prompts": {"entrypoint": long_prompt, "workflow": None, "refiner": None},
+        "credentials": [],
+        "agent_api_status": None,
+    }
+
+    result = runner.invoke(cli, ["agent", "show", "CRM Agent", "--prompts", "--full"])
+    assert result.exit_code == 0, result.output
+    assert "truncated" not in result.output
+    assert result.output.count("X") == 5000
+
+
+@patch("cinna.account._stdout_is_tty", return_value=False)
+@patch("cinna.account.AccountClient")
+def test_agent_show_non_tty_prints_whole_prompt(
+    mock_client_cls, _isatty, runner, account_root, monkeypatch
+):
+    """When stdout is redirected (not a TTY), prompts are never truncated."""
+    monkeypatch.chdir(account_root)
+    long_prompt = "X" * 5000
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.inspect_agent.return_value = {
+        "id": "agent-123",
+        "name": "CRM Agent",
+        "features": {},
+        "prompts": {"entrypoint": long_prompt, "workflow": None, "refiner": None},
+        "credentials": [],
+        "agent_api_status": None,
+    }
+
+    result = runner.invoke(cli, ["agent", "show", "CRM Agent", "--prompts"])
+    assert result.exit_code == 0, result.output
+    assert "truncated" not in result.output
+    assert result.output.count("X") == 5000
+
+
 # --- AccountClient agent-api request shapes ---
 
 

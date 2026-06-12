@@ -453,16 +453,23 @@ def agent_restart_env(agent_ref: str):
     "--prompts", "prompts_only", is_flag=True,
     help="Show only the effective prompts (skip features + credentials)",
 )
-def agent_show(agent_ref: str, prompts_only: bool):
+@click.option(
+    "--full", "full", is_flag=True,
+    help="Print prompts in full (default truncates long prompts for display)",
+)
+def agent_show(agent_ref: str, prompts_only: bool, full: bool):
     """Show AGENT_REF's effective prompts, features, and connected credentials.
 
     Prints the prompts the runtime actually reads, the enabled features, and
     the names/types of connected credentials (never secrets) — so you can
     confirm "is what I edited actually live?" without opening the browser.
+
+    Long prompts are truncated for readability; pass --full to print them
+    in their entirety (e.g. when redirecting to a file).
     """
     from cinna.account import run_agent_show
 
-    run_agent_show(agent_ref, prompts_only)
+    run_agent_show(agent_ref, prompts_only, full)
 
 
 # ─── connect group ─────────────────────────────────────────────────────────
