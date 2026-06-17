@@ -43,6 +43,8 @@ def test_generate_mcp_json(workspace_root, sample_config):
     server = data["mcpServers"]["agent-knowledge"]
     assert server["command"] == "cinna"
     assert server["args"] == ["mcp-proxy"]
+    # Relative path so the workspace folder stays portable when moved.
+    assert server["env"]["CINNA_CONFIG"] == ".cinna/config.json"
 
 
 def test_generate_opencode_json(workspace_root, sample_config):
@@ -60,6 +62,7 @@ def test_generate_opencode_json(workspace_root, sample_config):
     assert server["type"] == "local"
     assert server["command"] == ["cinna", "mcp-proxy"]
     assert server["enabled"] is True
+    assert server["environment"]["CINNA_CONFIG"] == ".cinna/config.json"
 
 
 def test_generate_gitignore(workspace_root):

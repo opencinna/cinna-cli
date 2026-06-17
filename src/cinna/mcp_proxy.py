@@ -187,28 +187,105 @@ def _setup_mcp_logging(workspace_root: Path) -> None:
     root.addHandler(handler)
 
 
+def _resolve_proxy_context() -> tuple[str | None, Path | None]:
+    """Resolve ``(mode, workspace_root)`` for the proxy, tolerant of a moved folder.
+
+    ``mode`` is ``"account"`` or ``"agent"``; ``workspace_root`` is the directory
+    holding ``.cinna/``. Returns ``(None, None)`` when nothing can be located.
+
+    The ``CINNA_ACCOUNT_CONFIG`` / ``CINNA_CONFIG`` env vars (set by the generated
+    ``.mcp.json`` / ``opencode.json``) primarily **select the mode**; their value
+    is only a hint for locating the config. We resolve the workspace root in order:
+
+    1. The env value taken literally — an absolute path (legacy configs) or a
+       path relative to the launch cwd (the portable form newer configs write).
+    2. A walk up from the launch cwd for the mode's config file. MCP clients
+       launch the proxy with cwd set to the workspace folder, so this heals
+       stale absolute paths after the folder is moved — no regeneration needed.
+
+    When neither env var is set, we auto-detect the nearest ``.cinna/`` from cwd
+    (an agent's ``config.json`` nested under an account wins over the account's
+    ``account.json`` because it is found first).
+    """
+    from cinna.account import ACCOUNT_CONFIG_FILE, find_account_root
+    from cinna.config import CONFIG_DIR, CONFIG_FILE, find_workspace_root
+    from cinna.errors import AccountConfigNotFoundError, ConfigNotFoundError
+
+    cwd = Path.cwd()
+    account_env = os.environ.get("CINNA_ACCOUNT_CONFIG")
+    config_env = os.environ.get("CINNA_CONFIG")
+
+    def _root_from_env(env_value: str | None, filename: str) -> Path | None:
+        """Workspace root if env_value points at an existing .cinna/<filename>."""
+        if not env_value:
+            return None
+        candidates = [Path(env_value)]
+        if not Path(env_value).is_absolute():
+            candidates.append(cwd / env_value)
+        for cand in candidates:
+            if cand.is_file():
+                return cand.resolve().parent.parent
+        return None
+
+    if account_env is not None:
+        root = _root_from_env(account_env, ACCOUNT_CONFIG_FILE)
+        if root is None:
+            try:
+                root = find_account_root(cwd)
+            except AccountConfigNotFoundError:
+                root = None
+        if root is not None:
+            return "account", root
+
+    if config_env is not None:
+        root = _root_from_env(config_env, CONFIG_FILE)
+        if root is None:
+            try:
+                root = find_workspace_root(cwd)
+            except ConfigNotFoundError:
+                root = None
+        if root is not None:
+            return "agent", root
+
+    # No usable env hint — auto-detect the nearest .cinna/ walking up from cwd.
+    if account_env is None and config_env is None:
+        current = cwd.resolve()
+        while True:
+            cinna_dir = current / CONFIG_DIR
+            if (cinna_dir / ACCOUNT_CONFIG_FILE).is_file():
+                return "account", current
+            if (cinna_dir / CONFIG_FILE).is_file():
+                return "agent", current
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
+    return None, None
+
+
 def run_mcp_proxy():
     """Entry point for `cinna mcp-proxy` — run as MCP stdio server.
 
-    Two modes, selected by environment variable:
+    Two modes, selected by environment variable (see ``_resolve_proxy_context``
+    for how the workspace root is located in a move-tolerant way):
 
     * ``CINNA_ACCOUNT_CONFIG`` set → **account mode**: search the account user's
       platform knowledge sources (used by the account workspace's `.mcp.json`).
     * ``CINNA_CONFIG`` set → **per-agent mode**: search a single agent's
       knowledge base (used by a per-agent workspace's `.mcp.json`).
     """
-    account_config_path = os.environ.get("CINNA_ACCOUNT_CONFIG")
-    config_path = os.environ.get("CINNA_CONFIG")
-    if not account_config_path and not config_path:
+    mode, workspace_root = _resolve_proxy_context()
+    if mode is None:
         raise SystemExit(
-            "CINNA_CONFIG or CINNA_ACCOUNT_CONFIG environment variable not set"
+            "Could not locate a cinna workspace. Set CINNA_CONFIG or "
+            "CINNA_ACCOUNT_CONFIG, or run `cinna mcp-proxy` from inside a "
+            "workspace folder (one containing .cinna/)."
         )
 
-    if account_config_path:
-        # Account mode: <root>/.cinna/account.json → workspace root is parent.parent
-        workspace_root = Path(account_config_path).parent.parent
+    if mode == "account":
         _setup_mcp_logging(workspace_root)
-        logger.info("MCP proxy starting in account mode (config=%s)", account_config_path)
+        logger.info("MCP proxy starting in account mode (workspace=%s)", workspace_root)
 
         from cinna.account import load_account_config
 
@@ -224,9 +301,8 @@ def run_mcp_proxy():
             logger.exception("Failed to create account MCP server")
             raise
     else:
-        workspace_root = Path(config_path).parent.parent
         _setup_mcp_logging(workspace_root)
-        logger.info("MCP proxy starting (config=%s)", config_path)
+        logger.info("MCP proxy starting (workspace=%s)", workspace_root)
 
         try:
             config = load_config(workspace_root)

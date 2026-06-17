@@ -119,6 +119,25 @@ def test_parse_account_rejects_per_agent_url():
         parse_account_setup_input("https://h.example/api/cli-setup/tok_abc")
 
 
+# --- default_account_dir_name ---
+
+
+@pytest.mark.parametrize(
+    "platform_url,expected",
+    [
+        ("https://demo-core.opencinna.io", "demo-core_opencinna_io"),
+        ("https://demo-core.opencinna.io/api", "demo-core_opencinna_io"),
+        ("http://localhost:8000/api", "localhost"),
+        ("https://user:pass@app.example.com:443", "app_example_com"),
+        ("", "my-cinna"),
+    ],
+)
+def test_default_account_dir_name(platform_url, expected):
+    from cinna.account import default_account_dir_name
+
+    assert default_account_dir_name(platform_url) == expected
+
+
 # --- account config I/O ---
 
 
@@ -222,7 +241,8 @@ def test_account_setup_creates_workspace(
     )
     assert captured["body"]["machine_name"] == "laptop"
 
-    root = tmp_path / "my-cinna"
+    # No --dir given → folder name defaults to the normalized platform domain.
+    root = tmp_path / "platform_example_com"
     cfg = load_account_config(root)
     assert cfg.account_token == "account-jwt-once"
     assert cfg.platform_url == "https://platform.example.com"
@@ -247,13 +267,11 @@ def test_account_setup_creates_workspace(
     proxy = mcp["mcpServers"]["platform-knowledge"]
     assert proxy["command"] == "cinna"
     assert proxy["args"] == ["mcp-proxy"]
-    assert proxy["env"]["CINNA_ACCOUNT_CONFIG"] == str(account_config_path(root))
+    assert proxy["env"]["CINNA_ACCOUNT_CONFIG"] == ".cinna/account.json"
     opencode = json.loads((root / "opencode.json").read_text())
     oc_proxy = opencode["mcp"]["platform-knowledge"]
     assert oc_proxy["command"] == ["cinna", "mcp-proxy"]
-    assert oc_proxy["environment"]["CINNA_ACCOUNT_CONFIG"] == str(
-        account_config_path(root)
-    )
+    assert oc_proxy["environment"]["CINNA_ACCOUNT_CONFIG"] == ".cinna/account.json"
 
     # Context package extracted under context/.
     mock_client.download_context_package.assert_called_once()
@@ -325,6 +343,8 @@ def test_account_setup_refuses_existing_workspace(
             "https://platform.example.com/api/cli-setup/account/TOK",
             "--name",
             "laptop",
+            "--dir",
+            "my-cinna",
         ],
     )
     assert result.exit_code != 0
@@ -376,12 +396,53 @@ def test_account_setup_continues_on_context_failure(
     assert "Context package download failed" in result.output
     assert "refresh-context" in result.output
 
-    # The workspace itself is fully materialized.
-    root = tmp_path / "my-cinna"
+    # The workspace itself is fully materialized (domain-derived default dir).
+    root = tmp_path / "platform_example_com"
     assert load_account_config(root).account_token == "account-jwt-once"
     assert (root / "agents").is_dir()
     assert (root / "CLAUDE.md").is_file()
     assert not (root / "context").exists()
+
+
+@patch("cinna.account.AccountClient")
+@patch("cinna.account.httpx.post")
+def test_account_setup_explicit_dir_overrides_domain_default(
+    mock_post, mock_client_cls, runner, tmp_path, monkeypatch
+):
+    """An explicit ``--dir`` wins over the domain-derived default."""
+    monkeypatch.chdir(tmp_path)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.download_context_package.return_value = make_context_tarball()
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "account_token": "account-jwt-once",
+                "platform_url": "https://platform.example.com",
+                "frontend_url": "https://ui.example.com",
+                "machine_name": "laptop",
+            }
+
+    mock_post.return_value = FakeResponse()
+
+    result = runner.invoke(
+        cli,
+        [
+            "account",
+            "setup",
+            "https://platform.example.com/api/cli-setup/account/TOK",
+            "--name",
+            "laptop",
+            "--dir",
+            "my-custom-folder",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "my-custom-folder" / ".cinna" / "account.json").is_file()
+    assert not (tmp_path / "platform_example_com").exists()
 
 
 # --- cinna account refresh-context ---
@@ -529,7 +590,8 @@ def test_write_account_mcp_config_wires_account_mode(account_root):
 
     _write_account_mcp_config(account_root)
 
-    expected_cfg = str(account_config_path(account_root))
+    # Relative path (anchored at the workspace folder) so the folder is portable.
+    expected_cfg = ".cinna/account.json"
 
     mcp = json.loads((account_root / ".mcp.json").read_text())
     proxy = mcp["mcpServers"]["platform-knowledge"]
@@ -597,6 +659,52 @@ def test_mcp_proxy_account_mode_builds_account_server(account_root, monkeypatch)
 
 def account_cfg_token(account_root: Path) -> str:
     return load_account_config(account_root).account_token
+
+
+# --- move-tolerant proxy context resolution ---
+
+
+def test_proxy_context_relative_path_resolved_from_cwd(account_root, monkeypatch):
+    """A relative CINNA_ACCOUNT_CONFIG resolves against the launch cwd (the
+    workspace folder MCP clients cd into) — the portable form newer configs write."""
+    from cinna.mcp_proxy import _resolve_proxy_context
+
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("CINNA_ACCOUNT_CONFIG", ".cinna/account.json")
+    monkeypatch.delenv("CINNA_CONFIG", raising=False)
+
+    mode, root = _resolve_proxy_context()
+    assert mode == "account"
+    assert root == account_root.resolve()
+
+
+def test_proxy_context_stale_absolute_path_heals_via_cwd(account_root, monkeypatch):
+    """A stale absolute CINNA_ACCOUNT_CONFIG (folder moved) falls back to walking
+    up from cwd, so an unregenerated legacy config keeps working after a move."""
+    from cinna.mcp_proxy import _resolve_proxy_context
+
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv(
+        "CINNA_ACCOUNT_CONFIG", "/old/location/my-cinna/.cinna/account.json"
+    )
+    monkeypatch.delenv("CINNA_CONFIG", raising=False)
+
+    mode, root = _resolve_proxy_context()
+    assert mode == "account"
+    assert root == account_root.resolve()
+
+
+def test_proxy_context_autodetects_nearest_cinna_without_env(account_root, monkeypatch):
+    """With no env hint, the proxy auto-detects the nearest .cinna/ from cwd."""
+    from cinna.mcp_proxy import _resolve_proxy_context
+
+    monkeypatch.chdir(account_root)
+    monkeypatch.delenv("CINNA_ACCOUNT_CONFIG", raising=False)
+    monkeypatch.delenv("CINNA_CONFIG", raising=False)
+
+    mode, root = _resolve_proxy_context()
+    assert mode == "account"
+    assert root == account_root.resolve()
 
 
 # --- cinna account agents ---

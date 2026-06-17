@@ -114,6 +114,14 @@ def generate_context_files(
     (workspace_root / "CLAUDE.md").write_text(claude_md)
 
 
+# Relative (workspace-root-anchored) path to the per-agent config. Written into
+# the generated MCP configs so the workspace folder can be moved without
+# breaking the proxy: MCP clients launch `cinna mcp-proxy` with cwd set to the
+# workspace root, and the proxy resolves this path against cwd. (`run_mcp_proxy`
+# also falls back to walking up from cwd, healing older absolute-path configs.)
+_REL_CONFIG_PATH = ".cinna/config.json"
+
+
 def generate_mcp_json(config: CinnaConfig, workspace_root: Path) -> None:
     """Generate .mcp.json for Claude Code MCP tool discovery."""
     mcp_config = {
@@ -122,7 +130,7 @@ def generate_mcp_json(config: CinnaConfig, workspace_root: Path) -> None:
                 "command": "cinna",
                 "args": ["mcp-proxy"],
                 "env": {
-                    "CINNA_CONFIG": str(workspace_root / ".cinna" / "config.json"),
+                    "CINNA_CONFIG": _REL_CONFIG_PATH,
                 },
             }
         }
@@ -138,7 +146,7 @@ def generate_opencode_json(config: CinnaConfig, workspace_root: Path) -> None:
                 "type": "local",
                 "command": ["cinna", "mcp-proxy"],
                 "environment": {
-                    "CINNA_CONFIG": str(workspace_root / ".cinna" / "config.json"),
+                    "CINNA_CONFIG": _REL_CONFIG_PATH,
                 },
                 "enabled": True,
             }

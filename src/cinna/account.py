@@ -161,6 +161,44 @@ def parse_account_setup_input(raw_input: str) -> tuple[str, str]:
     return platform_url, text
 
 
+def default_account_dir_name(platform_url: str) -> str:
+    """Derive a default workspace folder name from the platform domain.
+
+    e.g. ``https://demo-core.opencinna.io`` → ``demo-core_opencinna_io``.
+    Hostname only (creds/port stripped); every run of non
+    ``[A-Za-z0-9-]`` characters collapses to a single underscore. Falls back to
+    ``DEFAULT_ACCOUNT_DIR`` when the URL has no usable host.
+    """
+    host = urlparse(platform_url).netloc or platform_url.strip()
+    host = host.split("@")[-1].split(":")[0]  # strip user:pass@ and :port
+    slug = re.sub(r"[^A-Za-z0-9-]+", "_", host).strip("_")
+    return slug or DEFAULT_ACCOUNT_DIR
+
+
+def _prompt_account_dir(default: str) -> str:
+    """Ask for the workspace folder name, offering ``default``.
+
+    Works in the ``curl ... | python3 -`` bootstrap too: there stdin carries the
+    installer script (not keystrokes), so when stdin is not a TTY we talk to the
+    controlling terminal via ``/dev/tty`` as long as stdout is a TTY. With no
+    terminal attached (CI, captured output) we return ``default`` unchanged so
+    non-interactive runs stay non-interactive.
+    """
+    if sys.stdin.isatty():
+        return click.prompt("Workspace folder name", default=default)
+
+    if not sys.stdout.isatty():
+        return default
+    try:
+        with open("/dev/tty", "r+") as tty:
+            tty.write(f"Workspace folder name [{default}]: ")
+            tty.flush()
+            line = tty.readline()
+    except OSError:
+        return default
+    return line.strip() or default
+
+
 def _exchange_account_setup_token(
     platform_url: str, token: str, machine_name: str
 ) -> dict:
@@ -335,8 +373,13 @@ def _write_account_mcp_config(account_root: Path) -> None:
     ``POST /account/knowledge/search`` — the account analogue of the per-agent
     workspace's knowledge tool. Auto-generated infra: overwritten on every
     ``cinna account setup`` / ``cinna account refresh-context``.
+
+    The config path is written **relative** to the account root (anchored at the
+    launch cwd, which MCP clients set to the workspace folder) so the folder can
+    be moved without breaking the proxy. ``run_mcp_proxy`` additionally walks up
+    from cwd, which self-heals older configs that stored an absolute path.
     """
-    account_config = str(account_config_path(account_root))
+    account_config = f"{CONFIG_DIR}/{ACCOUNT_CONFIG_FILE}"
 
     mcp_json = {
         "mcpServers": {
@@ -434,10 +477,22 @@ def _install_context_package(
 
 
 def run_account_setup(
-    setup_input: str, machine_name: str, dir_name: str = DEFAULT_ACCOUNT_DIR
+    setup_input: str, machine_name: str, dir_name: str | None = None
 ) -> None:
-    """Full account setup flow — called by `cinna account setup <token_or_url>`."""
+    """Full account setup flow — called by `cinna account setup <token_or_url>`.
+
+    When ``dir_name`` is not given (no ``--dir``), the folder name defaults to
+    the platform domain normalized (e.g. ``demo-core_opencinna_io``); the user
+    can accept it or type their own at the prompt.
+    """
     total = 3
+
+    # Parse before touching the filesystem / network so we can derive the
+    # default folder name from the platform domain (and fail fast on bad input).
+    platform_url, token = parse_account_setup_input(setup_input)
+
+    if not dir_name:
+        dir_name = _prompt_account_dir(default_account_dir_name(platform_url))
 
     # Guard the target directory before burning the single-use setup token.
     account_root = Path.cwd() / dir_name
@@ -449,7 +504,6 @@ def run_account_setup(
 
     # Step 1: Exchange the account setup token
     console.step(1, total, "Authenticating...")
-    platform_url, token = parse_account_setup_input(setup_input)
     payload = _exchange_account_setup_token(platform_url, token, machine_name)
 
     # Step 2: Materialize the account workspace

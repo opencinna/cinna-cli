@@ -131,11 +131,12 @@ def account():
 @click.option(
     "--dir",
     "dir_name",
-    default="my-cinna",
-    show_default=True,
-    help="Directory to create the account workspace in",
+    default=None,
+    help="Directory to create the account workspace in "
+    "(default: the platform domain, e.g. demo-core_opencinna_io; "
+    "you'll be prompted to accept or change it)",
 )
-def account_setup(setup_input: tuple[str, ...], name: str | None, dir_name: str):
+def account_setup(setup_input: tuple[str, ...], name: str | None, dir_name: str | None):
     """Set up an account workspace from an account setup token.
 
     Accepts any of these formats (paste directly from Settings → Local
