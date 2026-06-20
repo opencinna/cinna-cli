@@ -132,6 +132,13 @@ Key properties:
 - **Probeable** — `cinna list` and `cinna status` call `GET /sync-runtime` as a cheap authenticated probe and label the token `valid` / `expired` / `no connection`.
 - **Refreshable in place** — `cinna set-token <token_or_url>` re-exchanges a fresh setup token through `POST /api/cli-setup/{token}` and rewrites both stores without re-cloning the workspace. The refresh is bound to the agent already in the workspace: if the exchanged token belongs to a different agent, the command aborts.
 
+### Account CLI Token
+
+A second token type (`token_type="cli-account"`) issued to an **account workspace** (`.cinna/account.json`). Scoped only to the `/account/*` routes — it discovers agents and mints per-agent CLI tokens (`cinna agent sync`), but cannot itself sync or exec. Same 7-day rolling expiry as a CLI token.
+
+- **Refreshable without a paste** — `cinna login` runs an RFC 8628 device-authorization flow: the CLI prints a short code + URL, the user clicks **Authorize** in the browser (already signed in), and the CLI swaps the fresh token into `.cinna/account.json` in place. Run from an empty/new folder, the same command instead bootstraps a brand-new account workspace.
+- **Mints child tokens** — per-agent tokens minted from it carry its id as provenance and are re-mintable via `POST /account/agents/{id}/mint` (used by `cinna agent sync` and `cinna doctor`).
+
 ### Knowledge Source
 
 A documentation/data source attached to an agent. Queried via the MCP proxy's `knowledge_query` tool, backed by the platform's vector search.
@@ -190,6 +197,8 @@ An open protocol for connecting AI tools to external data/capabilities. The CLI 
 main.py  (CLI commands — Click)
   │
   ├── bootstrap.py       — setup orchestration
+  ├── account.py         — account workspace; `cinna login` (device auth), `cinna account`, `cinna agent`
+  ├── doctor.py          — `cinna doctor`: reconcile registry ↔ Mutagen, repair stale state, refresh tokens
   ├── config.py          — .cinna/config.json: load/save/find
   ├── auth.py            — JWT storage, Authorization headers
   ├── client.py          — PlatformClient: HTTP + SSE stream_exec
@@ -393,6 +402,10 @@ Backend validates on every request:
 
 When a CLI token expires (or is revoked) the normal remedy is `cinna set-token <token_or_url>` from inside the agent directory. Internally it reuses `_exchange_setup_token()` from `bootstrap.py` — the same helper that backs `cinna setup` — so the server side is a plain re-run of `POST /api/cli-setup/{token}`. The workspace's existing `platform_url` is used as the fallback when a bare token is pasted, which lets agents registered against different platforms each refresh from their own directory without extra flags. The workspace tarball is **not** re-downloaded, and `CLAUDE.md` / `BUILDING_AGENT.md` / `.mcp.json` / `opencode.json` are left in place — only the stored CLI token changes.
 
+**Account tokens** refresh without a paste. `cinna login` (run inside an account workspace) drives the platform's RFC 8628 device-authorization flow: `POST /account/login/start` returns a short code + verification URL, the user clicks **Authorize** in the browser (already signed in), and the CLI polls `POST /account/login/poll` until it receives the fresh token, which it writes back into `.cinna/account.json` in place. The poll endpoint always returns HTTP 200 with a `status` field (`authorization_pending` / `slow_down` / `authorized` / `access_denied` / `expired_token`) — a deliberate divergence from RFC 8628's 400+`error` shape. Run from a fresh folder, the same command bootstraps a new account workspace instead of resuming one.
+
+**Bulk repair** is `cinna doctor`. It reconciles the `~/.cinna/agents.json` registry against the Mutagen daemon and heals the state that drifts as agents come and go — registry entries whose workspace was deleted, sessions halted on a deleted local root or stuck retrying a dead remote env, and orphaned sessions (Mutagen has no "stop after N failures" knob, so these retry forever until terminated). Expired **per-agent** tokens under an account workspace are re-minted automatically through the parent account token; when the **account** token has itself expired, doctor groups the blocked agents into a single "run `cinna login`" finding instead of attempting re-mints that would 401. Standalone agents are reported for a manual `cinna set-token`.
+
 ### Authorization
 
 | Resource | Rule |
@@ -423,6 +436,11 @@ When a CLI token expires (or is revoked) the normal remedy is `cinna set-token <
 | GET  | `/api/v1/cli/agents/{id}/sync-runtime` | CLI JWT | Required Mutagen version + hash (also used by `cinna list` / `cinna status` as a cheap token-validity probe) |
 | POST | `/api/v1/cli/agents/{id}/exec` | CLI JWT | Streaming SSE command execution |
 | WSS  | `/api/v1/cli/agents/{id}/sync-stream` | CLI JWT | Mutagen transport tunnel |
+| POST | `/api/v1/cli/account/login/start` | None | Begin a `cinna login` device-authorization request |
+| POST | `/api/v1/cli/account/login/poll` | None | Poll a `cinna login` request — always HTTP 200 + `status` |
+| POST | `/api/v1/cli/account/agents/{id}/mint` | Account token | Mint a per-agent CLI token (`cinna agent sync`, `cinna doctor` re-mint) |
+
+The account-workspace surface adds the broader `/api/v1/cli/account/*` route group (login, agents, credentials, connect, schedules, status, api-proxy); only the routes the sync / login / doctor paths use are listed here.
 
 Endpoints that were part of the old Docker-replica model (`build-context`, `workspace` POST, `workspace/manifest`, `credentials`) have been removed from the backend and from this CLI.
 

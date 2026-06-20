@@ -2959,3 +2959,185 @@ def test_account_client_set_status_refresh_command(account_client):
     result = account_client.set_status_refresh_command("agent-123", "/run:x")
     assert result["status_refresh_command"] == "/run:x"
     assert route.called
+
+
+# ── cinna login (device authorization flow) ─────────────────────────────────
+
+
+@patch("cinna.account.webbrowser.open")
+@patch("cinna.account.time.sleep", lambda _s: None)
+@patch("cinna.account._login_poll")
+@patch("cinna.account._login_start")
+def test_login_refreshes_token_in_place(
+    mock_start, mock_poll, _browser, runner, account_root, account_cfg, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_start.return_value = {
+        "device_code": "dev-1",
+        "user_code": "WX7K-9Q2P",
+        "verification_uri_complete": "https://ui.example.com/device?code=WX7K-9Q2P",
+        "interval": 1,
+        "expires_in": 60,
+    }
+    mock_poll.side_effect = [
+        {"status": "authorization_pending"},
+        {"status": "authorized", "account_token": "fresh-account-token"},
+    ]
+
+    result = runner.invoke(cli, ["login"])
+    assert result.exit_code == 0, result.output
+
+    refreshed = load_account_config(account_root)
+    assert refreshed.account_token == "fresh-account-token"
+    # Other fields preserved.
+    assert refreshed.platform_url == account_cfg.platform_url
+    assert refreshed.machine_name == account_cfg.machine_name
+    # The browser code is surfaced for manual fallback.
+    assert "WX7K-9Q2P" in result.output
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("app.example.com", "https://app.example.com"),
+        ("https://app.example.com/", "https://app.example.com"),
+        ("https://app.example.com/some/path", "https://app.example.com"),
+        ("HTTP://App.Example.com:9000", "http://App.Example.com:9000"),
+        ("localhost:8000", "http://localhost:8000"),
+        ("127.0.0.1:8000", "http://127.0.0.1:8000"),
+        ("'  app.example.com  '", "https://app.example.com"),
+    ],
+)
+def test_normalize_platform_url(raw, expected):
+    from cinna.account import _normalize_platform_url
+
+    assert _normalize_platform_url(raw) == expected
+
+
+def test_normalize_platform_url_rejects_empty():
+    import click
+
+    from cinna.account import _normalize_platform_url
+
+    with pytest.raises(click.ClickException):
+        _normalize_platform_url("   ")
+
+
+@patch("cinna.account.webbrowser.open")
+@patch("cinna.account.time.sleep", lambda _s: None)
+@patch("cinna.account._install_context_package", return_value=True)
+@patch("cinna.account._login_poll")
+@patch("cinna.account._login_start")
+def test_login_new_account_in_empty_dir(
+    mock_start, mock_poll, _ctx, _browser, runner, tmp_path, monkeypatch
+):
+    empty = tmp_path / "fresh"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    mock_start.return_value = {
+        "device_code": "dev-1",
+        "user_code": "AB12-CD34",
+        "verification_uri_complete": "https://app.example.com/device?code=AB12-CD34",
+    }
+    mock_poll.return_value = {"status": "authorized", "account_token": "new-tok"}
+
+    result = runner.invoke(cli, ["login", "app.example.com"])
+    assert result.exit_code == 0, result.output
+
+    # Account workspace materialized in the (empty) cwd.
+    cfg = load_account_config(empty)
+    assert cfg.account_token == "new-tok"
+    assert cfg.platform_url == "https://app.example.com"
+    assert (empty / "agents").is_dir()
+
+
+@patch("cinna.account.webbrowser.open")
+@patch("cinna.account.time.sleep", lambda _s: None)
+@patch("cinna.account._install_context_package", return_value=True)
+@patch("cinna.account._login_poll")
+@patch("cinna.account._login_start")
+def test_login_new_account_prompts_subfolder_when_not_empty(
+    mock_start, mock_poll, _ctx, _browser, runner, tmp_path, monkeypatch
+):
+    busy = tmp_path / "busy"
+    busy.mkdir()
+    (busy / "README.md").write_text("not empty\n")
+    monkeypatch.chdir(busy)
+    mock_start.return_value = {
+        "device_code": "dev-1",
+        "verification_uri": "https://app.example.com/device",
+    }
+    mock_poll.return_value = {"status": "authorized", "account_token": "sub-tok"}
+
+    # Provide the subfolder name at the prompt.
+    result = runner.invoke(cli, ["login", "app.example.com"], input="team-cinna\n")
+    assert result.exit_code == 0, result.output
+
+    cfg = load_account_config(busy / "team-cinna")
+    assert cfg.account_token == "sub-tok"
+    # Original folder contents untouched.
+    assert (busy / "README.md").exists()
+
+
+@patch("cinna.account.webbrowser.open")
+@patch("cinna.account.time.sleep", lambda _s: None)
+@patch("cinna.account._install_context_package", return_value=True)
+@patch("cinna.account._login_poll")
+@patch("cinna.account._login_start")
+def test_login_new_account_prompts_for_domain(
+    mock_start, mock_poll, _ctx, _browser, runner, tmp_path, monkeypatch
+):
+    empty = tmp_path / "fresh2"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    mock_start.return_value = {
+        "device_code": "dev-1",
+        "verification_uri": "https://app.example.com/device",
+    }
+    mock_poll.return_value = {"status": "authorized", "account_token": "tok"}
+
+    # No domain arg → prompted; type it in.
+    result = runner.invoke(cli, ["login"], input="app.example.com\n")
+    assert result.exit_code == 0, result.output
+    assert load_account_config(empty).platform_url == "https://app.example.com"
+
+
+@patch("cinna.account.httpx.post")
+def test_login_unsupported_backend_is_explained(
+    mock_post, runner, account_root, monkeypatch
+):
+    import httpx
+
+    monkeypatch.chdir(account_root)
+    mock_post.return_value = httpx.Response(404, json={"detail": "not found"})
+    result = runner.invoke(cli, ["login"])
+    assert result.exit_code != 0
+    assert "does not support 'cinna login'" in result.output
+    assert "cinna account setup" in result.output
+
+
+@patch("cinna.account.time.sleep", lambda _s: None)
+@patch("cinna.account._login_poll")
+def test_poll_until_authorized_waits_then_returns(mock_poll):
+    from cinna.account import _poll_until_authorized
+
+    mock_poll.side_effect = [
+        {"status": "authorization_pending"},
+        {"status": "slow_down"},
+        {"status": "authorized", "account_token": "tok"},
+    ]
+    result = _poll_until_authorized("https://p", "dev-1", interval=1, expires_in=60)
+    assert result["account_token"] == "tok"
+    assert mock_poll.call_count == 3
+
+
+@patch("cinna.account.time.sleep", lambda _s: None)
+@patch("cinna.account._login_poll")
+def test_poll_until_authorized_raises_on_denied(mock_poll):
+    import click
+
+    from cinna.account import _poll_until_authorized
+
+    mock_poll.return_value = {"status": "access_denied"}
+    with pytest.raises(click.ClickException, match="denied"):
+        _poll_until_authorized("https://p", "dev-1", interval=1, expires_in=60)

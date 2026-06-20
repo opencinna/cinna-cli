@@ -23,6 +23,8 @@ import os
 import platform
 import re
 import sys
+import time
+import webbrowser
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -324,6 +326,311 @@ def probe_account_token(config: AccountConfig) -> str:
     return "unreachable"
 
 
+# ── Browser re-auth (device authorization flow) ─────────────────────────────
+#
+# `cinna login` refreshes the account token in place without a pasted setup
+# token. It is an OAuth 2.0 Device Authorization Grant (RFC 8628): the CLL
+# starts a request, the user authorizes it in a browser already signed in to the
+# platform, and the CLI polls until the backend hands back a fresh account token.
+#
+# Backend contract (both unauthenticated — the point is the old token is dead):
+#   POST {platform}/api/v1/cli/account/login/start
+#        body: {machine_name, machine_info}
+#        200 : {device_code, user_code, verification_uri,
+#               verification_uri_complete?, interval?, expires_in?}
+#   POST {platform}/api/v1/cli/account/login/poll
+#        body: {device_code}
+#        200 : {status: "authorization_pending"|"slow_down"|"authorized"
+#                       |"access_denied"|"expired_token",
+#               account_token?, platform_url?, frontend_url?, machine_name?}
+
+_LOGIN_DEFAULT_INTERVAL = 5  # seconds between polls when the server omits one
+_LOGIN_DEFAULT_EXPIRY = 900  # safety cap when the server omits expires_in
+_LOGIN_START_PATH = "/api/v1/cli/account/login/start"
+_LOGIN_POLL_PATH = "/api/v1/cli/account/login/poll"
+
+
+def _login_start(platform_url: str, machine_name: str) -> dict:
+    """Begin a device-login request; returns the authorize URL + device code."""
+    url = f"{platform_url.rstrip('/')}{_LOGIN_START_PATH}"
+    machine_info = f"{platform.system()}/{platform.machine()}"
+    logger.info("Starting device login at %s", url)
+    try:
+        response = httpx.post(
+            url,
+            json={"machine_name": machine_name, "machine_info": machine_info},
+            timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        raise click.ClickException(f"Could not reach {platform_url}: {exc}")
+    if response.status_code == 404:
+        raise click.ClickException(
+            "This platform does not support 'cinna login' yet.\n"
+            "Refresh from the UI instead: open Settings → Local Development to "
+            "mint a new account setup token, then run\n"
+            "  cinna account setup <token>   (in the parent directory)."
+        )
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("detail", response.text)
+        except Exception:
+            detail = response.text
+        raise click.ClickException(f"Login could not be started: {detail}")
+    return response.json()
+
+
+def _login_poll(platform_url: str, device_code: str) -> dict:
+    """Poll a pending device-login request once."""
+    url = f"{platform_url.rstrip('/')}{_LOGIN_POLL_PATH}"
+    response = httpx.post(url, json={"device_code": device_code}, timeout=30.0)
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("detail", response.text)
+        except Exception:
+            detail = response.text
+        raise click.ClickException(f"Login polling failed: {detail}")
+    return response.json()
+
+
+def _poll_until_authorized(
+    platform_url: str, device_code: str, interval: int, expires_in: int
+) -> dict:
+    """Block until the user authorizes (or the request is denied / expires).
+
+    Honors the RFC 8628 ``slow_down`` backoff and the ``expires_in`` deadline.
+    Returns the authorized payload (carrying ``account_token``).
+    """
+    deadline = time.monotonic() + expires_in
+    while time.monotonic() < deadline:
+        time.sleep(max(1, interval))
+        data = _login_poll(platform_url, device_code)
+        status = (data.get("status") or "").lower()
+        if status in ("authorized", "complete", "success"):
+            if not data.get("account_token"):
+                raise click.ClickException(
+                    "Authorization succeeded but the server returned no token."
+                )
+            return data
+        if status in ("authorization_pending", "pending", ""):
+            continue
+        if status == "slow_down":
+            interval += 5
+            continue
+        if status in ("access_denied", "denied"):
+            raise click.ClickException("Authorization was denied in the browser.")
+        if status in ("expired_token", "expired"):
+            raise click.ClickException(
+                "The login request expired before you authorized it. "
+                "Run 'cinna login' again."
+            )
+        raise click.ClickException(f"Unexpected login status: {status!r}")
+    raise click.ClickException(
+        "Timed out waiting for authorization. Run 'cinna login' again."
+    )
+
+
+def _device_login(platform_url: str, machine_name: str, frontend_url: str | None = None) -> dict:
+    """Drive the full device-authorization handshake; return the authorized
+    payload.
+
+    Starts the request, surfaces the verification URL + user code (and opens a
+    browser), then polls until the user authorizes. The returned dict carries
+    ``account_token`` plus any server-refreshed ``platform_url`` /
+    ``frontend_url`` / ``machine_name``.
+    """
+    console.status(f"Signing in to {frontend_url or platform_url} as {machine_name}…")
+    start = _login_start(platform_url, machine_name)
+
+    device_code = start.get("device_code")
+    if not device_code:
+        raise click.ClickException("Server did not return a device code.")
+    user_code = start.get("user_code") or ""
+    verify_url = (
+        start.get("verification_uri_complete")
+        or start.get("verification_url_complete")
+        or start.get("verification_uri")
+        or start.get("verification_url")
+        or start.get("verify_url")
+    )
+    if not verify_url:
+        raise click.ClickException("Server did not return an authorization URL.")
+    interval = int(start.get("interval") or _LOGIN_DEFAULT_INTERVAL)
+    expires_in = int(start.get("expires_in") or _LOGIN_DEFAULT_EXPIRY)
+
+    console.console.print()
+    if user_code:
+        console.console.print(f"  Your verification code: [bold]{user_code}[/bold]")
+    console.console.print("  Open this URL and click Authorize:")
+    console.console.print(f"    [bold]{verify_url}[/bold]")
+    console.console.print()
+    try:
+        webbrowser.open(verify_url)
+    except Exception:
+        pass  # headless / no browser — the printed URL is the fallback.
+
+    with console.spinner("Waiting for authorization…"):
+        return _poll_until_authorized(platform_url, device_code, interval, expires_in)
+
+
+def _is_local_host(host: str) -> bool:
+    h = host.split(":")[0].lower()
+    return h in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or h.endswith(".local")
+
+
+def _normalize_platform_url(raw: str) -> str:
+    """Turn a user-typed domain into a ``scheme://netloc`` platform URL.
+
+    Accepts ``app.example.com``, ``https://app.example.com/``,
+    ``http://localhost:8000``, etc. A missing scheme defaults to ``https`` —
+    except for local hosts (``localhost`` / loopback / ``.local``), which get
+    ``http``. Any path/query the user pasted is dropped.
+    """
+    text = (raw or "").strip().strip("'\"").strip()
+    if not text:
+        raise click.ClickException("No domain provided.")
+    if "://" not in text:
+        host_part = text.split("/")[0]
+        scheme = "http" if _is_local_host(host_part) else "https"
+        text = f"{scheme}://{text}"
+    parsed = urlparse(text)
+    if not parsed.netloc:
+        raise click.ClickException(f"Could not parse a domain from {raw!r}.")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+# ``cinna.log`` is written into cwd by the CLI's own logging setup before this
+# check runs, so a genuinely fresh folder still "contains" it — treat it (and
+# OS cruft) as not counting toward emptiness.
+_IGNORABLE_DIR_ENTRIES = {".DS_Store", "cinna.log"}
+
+
+def _dir_is_empty(path: Path) -> bool:
+    """True if ``path`` doesn't exist or holds nothing but ignorable cruft."""
+    if not path.exists():
+        return True
+    return all(child.name in _IGNORABLE_DIR_ENTRIES for child in path.iterdir())
+
+
+def _refresh_account_token_in_place(account_root: Path) -> None:
+    """Resume path: swap a fresh token into an existing account workspace."""
+    account_cfg = load_account_config(account_root)
+    result = _device_login(
+        account_cfg.platform_url, account_cfg.machine_name, account_cfg.frontend_url
+    )
+
+    account_cfg.account_token = result["account_token"]
+    if result.get("platform_url"):
+        account_cfg.platform_url = result["platform_url"]
+    if result.get("frontend_url"):
+        account_cfg.frontend_url = result["frontend_url"]
+    if result.get("machine_name"):
+        account_cfg.machine_name = result["machine_name"]
+    save_account_config(account_cfg, account_root)
+
+    console.status(
+        f"Signed in — account token refreshed for {account_cfg.machine_name}."
+    )
+    console.console.print(
+        "  Re-mint expired sub-agent tokens with [bold]cinna doctor[/bold]."
+    )
+
+
+def _login_new_account(
+    domain: str | None, machine_name: str, dir_name: str | None
+) -> None:
+    """Bootstrap path: connect a brand-new account workspace via the browser.
+
+    Prompts for the platform domain when not given, picks where to create the
+    workspace (the current folder when it's empty, otherwise a subfolder the
+    user names), runs the device-login flow against that domain, and
+    materializes a standard account workspace with the returned token.
+    """
+    console.status("No cinna account workspace here — let's connect a new one.")
+    if not domain:
+        domain = click.prompt("Platform domain to log in to (e.g. app.example.com)")
+    platform_url = _normalize_platform_url(domain)
+
+    cwd = Path.cwd()
+    if dir_name:
+        account_root = cwd / dir_name
+    elif _dir_is_empty(cwd):
+        account_root = cwd
+    else:
+        default_sub = default_account_dir_name(platform_url)
+        sub = click.prompt(
+            "This folder isn't empty — name a subfolder to create the account "
+            "workspace in",
+            default=default_sub,
+        )
+        account_root = cwd / sub
+
+    if account_config_path(account_root).exists():
+        raise click.ClickException(
+            f"'{account_root}' already contains an account workspace.\n"
+            f"Run 'cinna login' from inside it to refresh its token."
+        )
+
+    result = _device_login(platform_url, machine_name)
+
+    config = AccountConfig(
+        platform_url=result.get("platform_url") or platform_url,
+        frontend_url=result.get("frontend_url") or platform_url,
+        account_token=result["account_token"],
+        machine_name=result.get("machine_name") or machine_name,
+    )
+    _write_account_files(config, account_root)
+    with console.spinner("Downloading context package…"):
+        _install_context_package(config, account_root)
+
+    rel = account_root if account_root == cwd else account_root.relative_to(cwd)
+    console.status(f"Account workspace ready at {account_root}")
+    console.console.print()
+    if account_root != cwd:
+        console.console.print(f"  cd {rel}/")
+    console.console.print(
+        "  cinna account agents              # list agents you can build"
+    )
+    console.console.print(
+        "  cinna agent sync <agent>          # attach an agent workspace under agents/"
+    )
+    console.console.print()
+
+
+def run_login(
+    domain: str | None = None,
+    machine_name: str | None = None,
+    dir_name: str | None = None,
+) -> None:
+    """`cinna login` — resume an account workspace, or connect a new one.
+
+    Inside an existing account workspace it refreshes the stored token in place
+    (the ``domain`` / ``dir_name`` hints are ignored). Otherwise it bootstraps a
+    new account workspace: it asks for the platform domain (unless given),
+    creates the workspace in the current folder when empty — or in a named
+    subfolder when not — and signs in via the browser device flow. Either way no
+    setup token is pasted.
+    """
+    try:
+        account_root = find_account_root()
+    except AccountConfigNotFoundError:
+        account_root = None
+
+    if account_root is not None:
+        if domain or dir_name:
+            console.warn(
+                "Already inside an account workspace — refreshing it in place "
+                "(domain / --dir ignored)."
+            )
+        _refresh_account_token_in_place(account_root)
+        return
+
+    _login_new_account(domain, machine_name or _fallback_machine_name(), dir_name)
+
+
+def _fallback_machine_name() -> str:
+    return f"{os.environ.get('USER', 'dev')}'s {platform.node()}"
+
+
 # ── Command bodies ──────────────────────────────────────────────────────────
 
 
@@ -476,6 +783,22 @@ def _install_context_package(
     return True
 
 
+def _write_account_files(config: AccountConfig, account_root: Path) -> None:
+    """Create the account workspace dir + config + generated files (no context).
+
+    The filesystem half of materializing an account workspace, shared by
+    ``cinna account setup`` (paste a setup token) and ``cinna login`` (browser
+    device flow). The caller downloads the context package separately so each
+    can frame that slow, best-effort step in its own UI.
+    """
+    account_root.mkdir(parents=True, exist_ok=True)
+    save_account_config(config, account_root)
+    agents_dir(account_root).mkdir(exist_ok=True)
+    _write_account_claude_md(account_root, config)
+    _write_account_claude_settings(account_root)
+    _write_account_mcp_config(account_root)
+
+
 def run_account_setup(
     setup_input: str, machine_name: str, dir_name: str | None = None
 ) -> None:
@@ -508,20 +831,13 @@ def run_account_setup(
 
     # Step 2: Materialize the account workspace
     console.step(2, total, "Creating account workspace...")
-    account_root.mkdir(exist_ok=True)
-
     config = AccountConfig(
         platform_url=payload["platform_url"],
         frontend_url=payload.get("frontend_url") or payload["platform_url"],
         account_token=payload["account_token"],
         machine_name=payload.get("machine_name") or machine_name,
     )
-    save_account_config(config, account_root)
-    agents_dir(account_root).mkdir(exist_ok=True)
-
-    _write_account_claude_md(account_root, config)
-    _write_account_claude_settings(account_root)
-    _write_account_mcp_config(account_root)
+    _write_account_files(config, account_root)
 
     # Step 3: Context package (best-effort — setup succeeds without it)
     console.step(3, total, "Downloading context package...")

@@ -107,6 +107,42 @@ def set_token(setup_input: tuple[str, ...], name: str | None):
     run_set_token(" ".join(setup_input), name)
 
 
+# ─── login ─────────────────────────────────────────────────────────────────
+
+
+@cli.command()
+@click.argument("domain", required=False)
+@click.option("--name", default=None, help="Machine name for a new account session")
+@click.option(
+    "--dir",
+    "dir_name",
+    default=None,
+    help="Subfolder to create the new account workspace in",
+)
+def login(domain: str | None, name: str | None, dir_name: str | None):
+    """Sign in to an account workspace in the browser — resume or connect new.
+
+    Run inside an existing account workspace and it refreshes the stored token
+    in place. Run it anywhere else and it connects a *new* account: it asks for
+    the platform DOMAIN (or pass it as an argument — protocol optional), then
+    creates the workspace in the current folder if empty, or in a subfolder you
+    name. Either way it opens an authorization URL; once you click Authorize the
+    CLI receives a fresh account token — no setup token to copy/paste.
+
+    \b
+      cinna login                       # resume here, or prompt for a domain
+      cinna login app.example.com       # connect a new account to that platform
+      cinna login app.example.com --dir my-cinna
+
+    Use it when ``cinna account status`` or ``cinna doctor`` reports the account
+    token has expired; afterwards ``cinna doctor`` re-mints the dependent
+    per-agent tokens.
+    """
+    from cinna.account import run_login
+
+    run_login(domain=domain, machine_name=name, dir_name=dir_name)
+
+
 # ─── account group ─────────────────────────────────────────────────────────
 
 
@@ -1079,8 +1115,8 @@ def list_cmd():
     resolve per-agent credentials. For each agent the table shows agent ID,
     the web UI link, workspace path, current sync state, and whether the
     stored CLI token is still accepted by the backend. Workspace directories
-    that no longer exist are flagged as missing (they can be cleaned up with
-    ``cinna disconnect`` from the parent directory).
+    that no longer exist are flagged as missing; clean them up — together with
+    halted/orphaned sessions and expired tokens — with ``cinna doctor``.
     """
     from rich.table import Table
 
@@ -1251,6 +1287,44 @@ def _format_token_label(status: str) -> str:
     if status == "unreachable":
         return "[yellow]no connection[/yellow]"
     return "[dim]–[/dim]"
+
+
+# ─── doctor ──────────────────────────────────────────────────────────────────
+
+
+@cli.command()
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Report problems but make no changes.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Apply every fix without prompting per category.",
+)
+def doctor(dry_run: bool, yes: bool):
+    """Diagnose and repair stale sync state on this machine.
+
+    Reconciles the per-user registry (``~/.cinna/agents.json``) against the
+    Mutagen daemon and heals the leftovers that pile up as agents come and go:
+    registry entries whose workspace was deleted, sessions halted on a deleted
+    local root, sessions stuck retrying a remote env that is gone, and orphaned
+    sessions with no registry entry. Expired CLI tokens are re-minted
+    automatically for account-managed workspaces (no pasted token); standalone
+    workspaces are reported for a manual ``cinna set-token``.
+
+    Mutagen has no "stop retrying after N failures" option — a session retries a
+    dead remote forever — so this is the cleanup path for those sessions.
+    Findings split into what doctor can fix (shown as "Will fix") and what needs
+    you (standalone expired tokens, shown as "manual action needed" and never
+    touched). Bare ``cinna doctor`` applies every actionable fix behind a single
+    confirmation; ``--yes`` skips the prompt, ``--dry-run`` only reports.
+    """
+    from cinna.doctor import run_doctor
+
+    run_doctor(dry_run=dry_run, yes=yes)
 
 
 @cli.command()

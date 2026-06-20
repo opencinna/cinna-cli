@@ -426,6 +426,36 @@ def stop(config: CinnaConfig) -> None:
     _run_mutagen(["sync", "terminate", session_name(config.agent_id)], config)
 
 
+def list_all_sessions(config: CinnaConfig) -> list[dict]:
+    """Every Mutagen session the daemon knows about (public wrapper).
+
+    Unlike ``status``/``_find_session`` (scoped to one agent), this returns the
+    full session list so callers like ``cinna doctor`` can reconcile the daemon
+    against the registry and spot orphaned ``cinna-*`` sessions. ``config`` only
+    supplies the daemon env (``MUTAGEN_SSH_PATH``), which is identical for every
+    agent — any throwaway config works.
+    """
+    return _list_sessions(config)
+
+
+def terminate_named(name: str, config: CinnaConfig) -> bool:
+    """Terminate a Mutagen session by its literal session name.
+
+    The agent-agnostic counterpart of ``stop()``: used by ``cinna doctor`` to
+    tear down sessions whose workspace or registry entry is already gone (so no
+    per-agent ``CinnaConfig`` is available). Returns True if Mutagen reported
+    success. A "session not found" exit is treated as already-gone (True).
+    """
+    result = _run_mutagen(["sync", "terminate", name], config)
+    if result.returncode == 0:
+        return True
+    stderr = (result.stderr or "").lower()
+    if "did not match" in stderr or "no sessions" in stderr or "not found" in stderr:
+        return True
+    logger.warning("terminate %s failed: %s", name, result.stderr)
+    return False
+
+
 def run_foreground(config: CinnaConfig, workspace_root: Path) -> int:
     """Attach the terminal to the Mutagen sync session via a live TUI.
 

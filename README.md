@@ -75,6 +75,31 @@ cd hr-manager-agent/
 cinna set-token yWo36tbkdAOzrALxOEKq31_OA2iMelEg
 ```
 
+### `cinna login [domain]`
+
+Sign in to an account workspace in the browser — **no setup token to paste**. One command serves two cases:
+
+- **Resume** — run it from inside an existing account workspace and it refreshes the stored account CLI token **in place** (reusing the platform URL + machine name; other settings like the active user workspace are preserved).
+- **Connect new** — run it anywhere else and it bootstraps a fresh account workspace. It asks for the platform **domain** (or pass it as an argument — protocol optional, `localhost` recognized), then creates the workspace **in the current folder if it's empty**, or **in a subfolder you name** if it isn't. So you can `mkdir my-cinna && cd my-cinna && cinna login`, or just `cinna login app.example.com` straight into the current directory.
+
+Either way it opens a browser authorization URL (OAuth 2.0 device flow); once you click **Authorize** (already signed in to the platform) the CLI receives a fresh token and writes `.cinna/account.json`.
+
+```bash
+# Resume the account workspace you're in:
+cd my-cinna/ && cinna login
+
+# Connect a new account from a fresh folder:
+mkdir my-cinna && cd my-cinna && cinna login          # prompts for the domain
+cinna login app.example.com                            # or pass it directly
+cinna login app.example.com --dir my-cinna             # always into a named subfolder
+#   Your verification code: WX7K-9Q2P
+#   Open this URL and click Authorize:
+#     https://app.example.com/device?code=WX7K-9Q2P
+#   ✓ Account workspace ready.
+```
+
+Use it when `cinna account status` or `cinna doctor` reports the account token has expired. Because the per-agent tokens minted from an account (`cinna agent sync`) can only be re-minted while the account token is valid, the flow is: `cinna login` (refresh the account), then `cinna doctor` (re-mint the dependent sub-agent tokens). If the platform doesn't expose the device-login endpoints yet, `cinna login` says so and points you at the `cinna account setup` paste fallback.
+
 ### `cinna account setup <token_or_url>`
 
 Initialize an **account workspace** — a multi-agent root from which you can discover your agents and attach per-agent workspaces without going back to the UI. Setup is initiated from **Settings → Channels → Local Development** on the platform, which emits a `curl | python3` one-liner (same pattern as the per-agent flow):
@@ -247,6 +272,27 @@ List every agent registered on this machine (from `~/.cinna/agents.json`). Three
 1. **Agent** — display name on top, full agent ID below.
 2. **Location** — workspace path on top, platform UI link below. Missing directories are flagged in red.
 3. **Sync** — Mutagen session state on top (`active` / `paused` / `connecting` / `error`), plus a per-agent backend probe (`valid token` / `expired token` / `no connection`) on the bottom. The probes run in parallel with a short timeout so the view stays snappy even with many registered agents.
+
+### `cinna doctor`
+
+Diagnose and repair stale sync state across the whole machine. Over time the per-user registry (`~/.cinna/agents.json`) and the Mutagen daemon drift out of sync as agents are deleted, environments are spun down, and tokens expire — `cinna doctor` reconciles the two and heals the leftovers in one pass. Run it from anywhere; it is not workspace-scoped.
+
+It detects and fixes:
+
+- **Deleted workspaces** — registry entries whose workspace folder (or its `.cinna/config.json`) is gone. The entry is removed, along with any leftover Mutagen session.
+- **Halted sessions** — sessions stopped on `halted-on-root-deletion` (the local `workspace/` root was deleted) while the agent dir is otherwise intact. Terminated; `cinna dev` recreates a clean one.
+- **Dead-remote sessions** — sessions stuck retrying a remote env that no longer exists (`connecting-beta` / beta polling error). Mutagen has **no** "give up after N failures" option — a session retries forever until paused or terminated — so `doctor` is the cleanup path for these. Terminated.
+- **Orphaned sessions** — `cinna-*` sessions with no registry entry at all. Terminated.
+- **Expired tokens** — for **account-managed** workspaces (those under an account root), the CLI token is re-minted automatically through the parent account token, no pasting required. **Standalone** workspaces (set up via `cinna setup`) can only be refreshed with a pasted setup token, so they are reported with a `cinna set-token` hint rather than changed.
+- **Expired account token** — a sub-agent token can only be re-minted while the **account** token that mints it is still valid. When the account token has itself expired, doctor probes it once and surfaces a single _"renew the account token — run `cinna login`"_ finding (listing the blocked sub-agents) instead of a pile of re-mints that would all fail with 401. Run `cinna login`, then re-run `cinna doctor` to re-mint the dependents.
+
+```bash
+cinna doctor              # diagnose, then apply all fixes behind one confirmation
+cinna doctor --dry-run    # report problems only; change nothing
+cinna doctor --yes        # apply every fix non-interactively
+```
+
+The diagnosis is split into two tables: **Will fix** (everything doctor can repair — deleted-workspace cleanup, halted/dead/orphaned session termination, account token re-mints) and **No automatic fix — manual action needed** (standalone expired tokens, which need a pasted setup token and are never touched). Everything actionable is applied together behind a single `Apply N fix(es)?` confirmation, so the count always matches the "Will fix" table.
 
 ### `cinna disconnect`
 
