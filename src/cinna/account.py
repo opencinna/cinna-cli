@@ -732,6 +732,12 @@ def _write_account_claude_md(account_root: Path, config: AccountConfig) -> None:
     )
     (account_root / "CLAUDE.md").write_text(claude_md)
 
+    # Companion testing guide (loaded by the orchestrator only when it tests an
+    # agent via `cinna chat`). Bundled + overwritten, like the orchestrator guide.
+    from cinna.context import write_chat_testing_guide
+
+    write_chat_testing_guide(account_root)
+
 
 def _install_context_package(
     account_cfg: AccountConfig, account_root: Path, *, replace: bool = False

@@ -243,6 +243,7 @@ def provision_workspace(
 # `cinna agent unsync`; user workspace files are preserved.
 GENERATED_WORKSPACE_FILES = [
     "CLAUDE.md",
+    "CHAT_TESTING.md",
     "BUILDING_AGENT.md",
     ".mcp.json",
     "opencode.json",

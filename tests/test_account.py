@@ -507,6 +507,11 @@ def test_refresh_context_regenerates_child_agent_claude_md(
     # The freshly-shipped guidance (talking to the agent to test it) is present.
     assert "cinna chat" in regenerated
 
+    # The companion human-testing guide reaches both the account root and every
+    # synced child workspace.
+    assert (account_root / "CHAT_TESTING.md").is_file()
+    assert (child / "CHAT_TESTING.md").is_file()
+
 
 @patch("cinna.account.AccountClient")
 def test_refresh_context_failure_preserves_old_tree(

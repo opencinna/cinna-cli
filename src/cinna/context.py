@@ -125,6 +125,19 @@ def regenerate_claude_md(config: CinnaConfig, workspace_root: Path) -> None:
         .replace("{mcp_tools_section}", mcp_tools)
     )
     (workspace_root / "CLAUDE.md").write_text(claude_md)
+    write_chat_testing_guide(workspace_root)
+
+
+def write_chat_testing_guide(workspace_root: Path) -> None:
+    """Write the companion ``CHAT_TESTING.md`` guide next to ``CLAUDE.md``.
+
+    A static, bundled guide referenced by ``CLAUDE.md`` and loaded by the coding
+    agent only when it reaches the testing phase. It teaches phrasing `cinna
+    chat` test messages like a real, hurried user (terse, missing details)
+    rather than a precise agent prompt. Overwritten on every regenerate so a CLI
+    upgrade ships the latest guidance.
+    """
+    (workspace_root / "CHAT_TESTING.md").write_text(_load_template("CHAT_TESTING.md"))
 
 
 # Relative (workspace-root-anchored) path to the per-agent config. Written into
@@ -209,6 +222,7 @@ def generate_gitignore(workspace_root: Path) -> None:
 .cinna/
 .claude/settings.local.json
 CLAUDE.md
+CHAT_TESTING.md
 BUILDING_AGENT.md
 WEBAPP_BUILDING.md
 COMPLEX_AGENT_DESIGN.md
