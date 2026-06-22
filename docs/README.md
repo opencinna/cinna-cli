@@ -199,6 +199,7 @@ main.py  (CLI commands — Click)
   ├── bootstrap.py       — setup orchestration
   ├── account.py         — account workspace; `cinna login` (device auth), `cinna account`, `cinna agent`
   ├── doctor.py          — `cinna doctor`: reconcile registry ↔ Mutagen, repair stale state, refresh tokens
+  ├── chat.py            — `cinna chat`: session-backed conversation testing (poll + NDJSON) over the api-proxy
   ├── config.py          — .cinna/config.json: load/save/find
   ├── auth.py            — JWT storage, Authorization headers
   ├── client.py          — PlatformClient: HTTP + SSE stream_exec
@@ -356,6 +357,31 @@ To run an actual remote shell snippet (pipes, redirects, `&&`), pass it explicit
 
 ---
 
+## Remote Chat (`cinna chat`)
+
+`cinna chat` lets a local coding agent **test the agent it is building** by driving a real platform conversation session — exercising the production path (permission checks, agent-env calls, the model/SDK the platform selects) rather than a local mock. It lives in `chat.py` and runs entirely through the **account workspace's api-proxy** (`AccountClient`), so it needs an account workspace (`.cinna/account.json`) — found by walking up from the cwd, exactly like the other account verbs, so it works from a synced `agents/<slug>/` folder too.
+
+### Why polling, not streaming
+
+The platform's send-message route (`POST /sessions/{id}/messages/stream`) returns a **JSON ack immediately** and runs the agent turn asynchronously; the live events go out over a Socket.IO room *and* are persisted onto each message's `message_metadata.streaming_events`. The api-proxy is a buffered JSON hatch (it rejects `text/event-stream`), so `cinna chat` never reads the stream. Instead it:
+
+1. Creates the session (`POST /sessions/`, mode `conversation` by default) — or resumes the one passed to `--resume`.
+2. Uploads each `--file` and collects the returned file ids.
+3. Records the current message count as a cursor, then sends the message (`file_ids` carry the attachments).
+4. **Polls** `GET /sessions/{id}/messages?offset=<cursor>` (messages are ordered ascending by `sequence_number`, so `offset` is the cursor) and `GET …/messages/streaming-status` (`{is_streaming}`) until the turn settles — `is_streaming` false with no message flagged `streaming_in_progress`. A start-grace window covers env wake / queueing before the turn begins; an overall `--timeout` bounds the wait.
+
+Each finalized message is emitted as one NDJSON line (`session` / `upload` / `message` / `status` / `done`); the in-progress assistant message is held back (its content is still growing) and emitted once final. `--pretty` swaps NDJSON for a Rich transcript. Ctrl-C calls `POST …/messages/interrupt` and exits 130.
+
+### Attachments
+
+Agents attach workspace files to replies via `<cinna_attach>` tags; the backend materializes them and both injects an `attachment` streaming event (`metadata.file_id` / `filename` / `mime_type` / `size`) and lists them under the message's `files[]` with `source == "agent_attachment"`. `chat.py` collects attachments from the streaming events (preferred) with the `files[]` list as a replay fallback, dedups by file id, and downloads each via the proxy (`GET /files/{id}/download`) into `./cinna-chat-files/<session_id>/`. Because the proxy buffers the response, downloads are bounded by its **8 MiB** response cap; larger files surface a clear `PlatformError` instead of a partial write.
+
+### File upload — the one dedicated route
+
+The api-proxy is JSON-only and cannot carry a multipart body, and neither the account token nor a per-agent token may call `/files/upload` directly. So uploading a local attachment uses a dedicated account-CLI route, **`POST /api/v1/cli/account/files/upload`** (multipart, account-token auth), added alongside the other `/cli/account/*` routes; it creates a `File` owned by the account user and returns `FileUploadPublic` whose `id` goes into the message's `file_ids`. This is the only part of `cinna chat` that does not ride the api-proxy.
+
+---
+
 ## Bootstrap Flow
 
 ```
@@ -439,8 +465,12 @@ When a CLI token expires (or is revoked) the normal remedy is `cinna set-token <
 | POST | `/api/v1/cli/account/login/start` | None | Begin a `cinna login` device-authorization request |
 | POST | `/api/v1/cli/account/login/poll` | None | Poll a `cinna login` request — always HTTP 200 + `status` |
 | POST | `/api/v1/cli/account/agents/{id}/mint` | Account token | Mint a per-agent CLI token (`cinna agent sync`, `cinna doctor` re-mint) |
+| POST | `/api/v1/cli/account/api-proxy` | Account token | Buffered JSON escape hatch — `cinna api`, and the transport for every `cinna chat` session/message call |
+| POST | `/api/v1/cli/account/files/upload` | Account token | Multipart upload for `cinna chat --file` (the proxy can't carry multipart) |
 
-The account-workspace surface adds the broader `/api/v1/cli/account/*` route group (login, agents, credentials, connect, schedules, status, api-proxy); only the routes the sync / login / doctor paths use are listed here.
+`cinna chat` reaches the conversation API **through** the api-proxy (so these are inner routes, not CLI routes): `POST /sessions/`, `GET /sessions/{id}`, `GET /sessions/{id}/messages`, `POST /sessions/{id}/messages/stream`, `GET /sessions/{id}/messages/streaming-status`, `POST /sessions/{id}/messages/interrupt`, and `GET /files/{id}/download`.
+
+The account-workspace surface adds the broader `/api/v1/cli/account/*` route group (login, agents, credentials, connect, schedules, status, api-proxy, files/upload); only the routes the sync / login / doctor / chat paths use are listed here.
 
 Endpoints that were part of the old Docker-replica model (`build-context`, `workspace` POST, `workspace/manifest`, `credentials`) have been removed from the backend and from this CLI.
 

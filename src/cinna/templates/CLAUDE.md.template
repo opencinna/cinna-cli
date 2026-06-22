@@ -194,9 +194,12 @@ After installing, **persist the dependency** by adding it to `workspace_requirem
 | Install a Python package | `cinna exec uv pip install <pkg>` then add to `workspace_requirements.txt` |
 | Sync status from another terminal | `cinna sync status` |
 | List conflict copies | `cinna sync conflicts` |
+| Talk to the agent to test it (conversation) | `cinna chat "<message>"` |
 | Refresh expired CLI token | `cinna set-token <token_or_url>` |
 
 Iteration: edit files locally → Mutagen syncs them remotely within seconds → `cinna exec <cmd>` runs the script; stdout/stderr stream back live; exit code matches → inspect `app-data/storage/` for output.
+
+> **Test it end-to-end by talking to it.** `cinna exec` proves a script runs; a **conversation** proves the *agent* works — same permission checks, agent-env calls, and model/SDK as production. From inside this workspace run `cinna chat "<message>"` (the agent is inferred; no `--agent` needed). Output is **NDJSON** — one JSON event per line; read the `content` of `message` events with `"role":"agent"` for the reply, capture the `session_id` from the first `session` event, and continue with `cinna chat --resume <session_id> "<follow-up>"`. Attach a fixture with `--file path/to/input.csv`; files the agent attaches back land in `./cinna-chat-files/<session_id>/`. Sync edited prompts/scripts first (`cinna dev`, or `cinna sync push`) so you're chatting against the new behavior. **Requires** this agent to be synced under an account workspace (i.e. via `cinna agent sync`) — `cinna chat` uses the account session API; in a standalone `cinna setup` workspace it has no account context.
 
 Conflicts: Mutagen writes `<file>.conflict.<side>.<timestamp>` instead of picking a winner. Open in the editor, pick a winner, delete the conflict copy.
 
@@ -523,7 +526,7 @@ All four steps can be one script that calls helpers, or chained as separate `scr
 - [ ] No runtime output committed under bundle-owned folders — only under `app-data/`.
 - [ ] Caches rebuild cleanly from empty: `rm -rf workspace/app-data/cache/*` then re-run cache-update.
 - [ ] `knowledge_query` returns expected hits for representative questions.
-- [ ] Prompts reviewed end-to-end on a fresh conversation.
+- [ ] Prompts reviewed end-to-end on a fresh conversation — verified by actually talking to the agent (`cinna chat "<representative request>"`) and confirming the reply, not just by reading the prompt.
 - [ ] For each scheduled `script_trigger`: healthy path prints exactly `OK` (verified via `cinna exec`).
 - [ ] For each email notification: SMTP creds resolved from platform; templates render; `sent.db` row written; idempotency check skips re-sends.
 - [ ] `cinna sync status` clean.

@@ -218,6 +218,29 @@ cinna api PATCH agents/3fa85f64-5717-4562-b3fc-2c963f66afa6 --json '{"descriptio
 cinna api POST tasks --data @task.json
 ```
 
+### `cinna chat [--agent <ref>] [--resume <session_id>] [--file PATH ...] [MESSAGE...]`
+
+Talk to an agent through a **real platform session** — the same conversation pipeline production uses (permission checks, agent-env calls, the model/SDK the platform selects), not a local mock. Built for a local coding agent to test the agent it is building: it can prepare a prompt, attach files, and read the reply back as structured data.
+
+Run it from the account workspace (or any synced agent folder under it). The reply is observed by **polling** the backend rather than reading a live stream, so it is robust to streaming/transport quirks.
+
+- `--agent <name|slug|id>` picks the agent; omit it inside a synced agent workspace to infer it. `--resume <session_id>` continues an existing conversation instead of opening a new one (default mode for a new session is `conversation`; `--mode building` opens a building session).
+- The message is the positional argument; if omitted it is read from stdin, or you are prompted for it interactively in a TTY.
+- `--file PATH` (repeatable) uploads a local file and attaches it to the message.
+- Output is **NDJSON** by default — one JSON event per line (`session`, `upload`, `message`, `status`, `done`), trivially parseable by another agent. `--pretty` switches to a human-readable transcript.
+- Files the agent attaches to its replies are downloaded under `./cinna-chat-files/<session_id>/` (override with `--download-dir`, or skip with `--no-download` to just report the file ids). Downloads are bounded by the api-proxy's 8 MiB response cap.
+- `--interval` / `--timeout` tune the poll cadence and the maximum wait for a turn. Ctrl-C interrupts the agent's turn and exits.
+
+```bash
+cinna chat --agent crm-agent "Summarize today's leads"
+cinna chat --agent crm-agent --file report.csv "Validate this export"
+cinna chat --resume 3fa85f64-5717-4562-b3fc-2c963f66afa6 "Now break it down by region"
+echo "ping" | cinna chat --agent crm-agent          # message from stdin
+cinna chat --agent crm-agent "hi" | jq -c 'select(.event=="message")'
+```
+
+The session id is printed in the first `session` event — capture it to drive a multi-turn conversation with `--resume`.
+
 ### `cinna dev`
 
 Start a foreground dev session — creates / resumes the Mutagen sync session for this workspace and attaches the terminal to a two-tab TUI (status + raw Mutagen details). Ctrl-C terminates the session; sync does not outlive the TUI. To observe sync from another terminal without affecting it, use `cinna sync status`.

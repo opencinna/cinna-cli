@@ -71,6 +71,7 @@ Refresh after platform updates with `cinna account refresh-context`.
 | `cinna agent show <agent> [--prompts]` | Show the agent's effective prompts / features / connected credentials as the runtime sees them — confirm "is what I edited actually live?" |
 | `cinna agent restart-env <agent>` | Restart the agent's environment — the recovery path for a wedged env or a stuck producer REST API (no raw API needed) |
 | `cinna exec --agent <agent> <cmd…>` | Run a command in a synced agent's remote environment from the account root |
+| `cinna chat --agent <agent> [--file PATH] [--resume SID] "<msg>"` | **Talk to the agent** through a real conversation session (the production pipeline) and read the reply — how you *test* the agent you built |
 | `cinna list` | Every agent registered on this machine (synced agents appear here too) |
 
 **Scheduling (automatic execution) — full CRUD:**
@@ -110,7 +111,7 @@ Refresh after platform updates with `cinna account refresh-context`.
 | `cinna connect mcp --producer P --consumer C` | Wire C to P's agent2agent MCP connector |
 | `cinna api <METHOD> <path>` | Generic platform-API escape hatch (see `context/api_reference/`) |
 
-> **Mapping user intent → command.** "list/show my **workspaces**" → `cinna account user-workspace list` (workspaces are contexts that group agents, not agents themselves). "list/show my **agents**" → `cinna account agents` (scoped to the active workspace; add `--all` for every workspace). "what **credentials** do I have" → `cinna account credentials list`. "**schedule** the agent / run it every … / set up a cron" → `cinna agent schedule` (use `generate` first to turn the phrase into a cron). "is the agent **healthy** / what's its status / why is it failing" → `cinna agent status show` (or `refresh` to force a fresh read). When unsure which `cinna` verb covers a request, run `cinna --help` and `cinna account --help` rather than guessing or jumping to `cinna api`.
+> **Mapping user intent → command.** "list/show my **workspaces**" → `cinna account user-workspace list` (workspaces are contexts that group agents, not agents themselves). "list/show my **agents**" → `cinna account agents` (scoped to the active workspace; add `--all` for every workspace). "what **credentials** do I have" → `cinna account credentials list`. "**schedule** the agent / run it every … / set up a cron" → `cinna agent schedule` (use `generate` first to turn the phrase into a cron). "is the agent **healthy** / what's its status / why is it failing" → `cinna agent status show` (or `refresh` to force a fresh read). "**test / try / talk to / chat with** the agent", "see what it replies", "does it actually work" → `cinna chat --agent <agent> "…"`. When unsure which `cinna` verb covers a request, run `cinna --help` and `cinna account --help` rather than guessing or jumping to `cinna api`.
 
 ## When a command fails with an auth error
 
@@ -131,6 +132,8 @@ This keeps the whole refresh in the browser — no setup-token paste, no leaving
 5. When done with an agent, `cinna agent unsync <agent>` from the account root.
 
 > **Headless sync (no TUI).** `cinna dev` is an interactive TUI; as a coding agent, drive sync non-interactively instead: after editing files in `agents/<slug>/workspace/`, run `cinna sync push --agent <slug>` to flush them to the remote and block until settled (it leaves a detached sync session running). If a flush reports conflicts, `cinna sync resolve --prefer local --agent <slug>` makes your local edits win (or `--prefer remote` to take the container's version). `cinna sync status --agent <slug>` / `cinna sync conflicts --agent <slug>` inspect state from the account root. Confirm an edit landed with `cinna agent show <slug> --prompts` or `cinna exec --agent <slug> cat <path>`.
+
+> **Test the agent by talking to it.** The real proof an agent works is a conversation, not just `cinna exec`. `cinna chat --agent <slug> "<message>"` opens a real session and runs your message through the **production pipeline** — the same permission checks, agent-env calls, and model/SDK the live agent uses — then prints the reply. By default output is **NDJSON** (one JSON event per line: `session`, `message`, `done`), so parse it directly: the first `session` event carries the `session_id` (capture it), and `message` events with `"role":"agent"` hold the reply `content`. Continue the thread with `cinna chat --resume <session_id> "<follow-up>"`; attach a fixture with `--file path/to/input.csv` (uploaded and sent with the message). Files the agent attaches back are downloaded under `./cinna-chat-files/<session_id>/`. After editing prompts/scripts, `cinna sync push --agent <slug>` first, then `cinna chat` to verify the behavior actually changed. (Runs from the account root or from inside `agents/<slug>/` — where `--agent` can be omitted.)
 
 ## Creating agents and wiring connections
 

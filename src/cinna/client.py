@@ -17,6 +17,11 @@ DOWNLOAD_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
 # Exec streams can be long-running — disable read timeout so idle output doesn't abort.
 EXEC_STREAM_TIMEOUT = httpx.Timeout(None, connect=10.0)
 
+# Marker header the account api-proxy sets ONLY on a mirrored inner-API
+# response. Its absence means the escape hatch itself refused the call (policy
+# denial / rate limit / size cap) rather than the target route answering.
+PROXY_MARKER_HEADER = "x-cinna-proxied"
+
 
 class PlatformClient:
     """HTTP client wrapping httpx with CLI token authentication."""
@@ -164,7 +169,9 @@ class PlatformClient:
                 return
 
             logger.debug(
-                "stream_exec connected: agent=%s status=%s", agent_id, response.status_code
+                "stream_exec connected: agent=%s status=%s",
+                agent_id,
+                response.status_code,
             )
             event_count = 0
             for line in response.iter_lines():
@@ -304,9 +311,7 @@ class AccountClient:
             if user_workspace_id is None
             else {"user_workspace_id": user_workspace_id}
         )
-        response = self._client.get(
-            "/api/v1/cli/account/credentials", params=params
-        )
+        response = self._client.get("/api/v1/cli/account/credentials", params=params)
         return self._handle_response(response).json()
 
     def create_credential(
@@ -353,9 +358,7 @@ class AccountClient:
         )
         return self._handle_response(response).json()
 
-    def share_credential_with_agent(
-        self, credential_id: str, agent_id: str
-    ) -> dict:
+    def share_credential_with_agent(self, credential_id: str, agent_id: str) -> dict:
         """POST /api/v1/cli/account/credentials/{id}/share-with-agent — attach."""
         response = self._client.post(
             f"/api/v1/cli/account/credentials/{credential_id}/share-with-agent",
@@ -379,16 +382,12 @@ class AccountClient:
             body["credential_label"] = credential_label
         if read_only_override:
             body["read_only_override"] = True
-        response = self._client.post(
-            "/api/v1/cli/account/connect/agent-api", json=body
-        )
+        response = self._client.post("/api/v1/cli/account/connect/agent-api", json=body)
         return self._handle_response(response).json()
 
     def list_discoverable_mcp(self, consumer_agent_id: str | None = None) -> dict:
         """GET /api/v1/cli/account/connect/mcp/discoverable — a2a connector picker."""
-        params = (
-            {"consumer_agent_id": consumer_agent_id} if consumer_agent_id else None
-        )
+        params = {"consumer_agent_id": consumer_agent_id} if consumer_agent_id else None
         response = self._client.get(
             "/api/v1/cli/account/connect/mcp/discoverable", params=params
         )
@@ -471,9 +470,7 @@ class AccountClient:
             body["query"] = query
         if json_body is not None:
             body["json_body"] = json_body
-        response = self._client.post(
-            "/api/v1/cli/account/agent-api/call", json=body
-        )
+        response = self._client.post("/api/v1/cli/account/agent-api/call", json=body)
         return self._handle_response(response).json()
 
     def restart_agent_env(self, agent_id: str) -> dict:
@@ -493,18 +490,14 @@ class AccountClient:
         Returns the agent's prompts, enabled features, connected credential
         metadata (name + type only), and live agent-api status when enabled.
         """
-        response = self._client.get(
-            f"/api/v1/cli/account/agents/{agent_id}/inspect"
-        )
+        response = self._client.get(f"/api/v1/cli/account/agents/{agent_id}/inspect")
         return self._handle_response(response).json()
 
     # --- Schedules (full CRUD via dedicated account verbs) ---
 
     def list_schedules(self, agent_id: str) -> dict:
         """GET /account/agents/{id}/schedules — the agent's schedules."""
-        response = self._client.get(
-            f"/api/v1/cli/account/agents/{agent_id}/schedules"
-        )
+        response = self._client.get(f"/api/v1/cli/account/agents/{agent_id}/schedules")
         return self._handle_response(response).json()
 
     def generate_schedule(
@@ -639,6 +632,157 @@ class AccountClient:
             len(response.content),
         )
         return response
+
+    # --- Conversation sessions (routed through the api-proxy) ---
+    #
+    # `cinna chat` drives a real platform session so the message runs through
+    # the exact production path (permission checks, agent-env calls, model/SDK
+    # selection). All of these are plain JSON control-plane calls, so they ride
+    # the buffered api-proxy. Streaming is replaced by polling: send the message
+    # (the /stream route returns a JSON ack immediately, the agent turn runs
+    # asynchronously), then poll `get_messages` + `get_streaming_status`.
+
+    def _proxy_json(
+        self,
+        method: str,
+        path: str,
+        query: dict | None = None,
+        json_body=None,
+    ) -> dict:
+        """Call ``api_proxy`` and return parsed JSON, raising on any failure.
+
+        Distinguishes a hatch refusal (marker header absent → policy / rate
+        limit / size cap) from a mirrored inner-route error, and raises a typed
+        ``PlatformError`` either way so callers get a clean exception instead of
+        a raw response to interpret.
+        """
+        response = self.api_proxy(method, path, query=query, json_body=json_body)
+
+        def _detail() -> str:
+            try:
+                parsed = response.json()
+                if isinstance(parsed, dict):
+                    return str(parsed.get("detail", response.text))
+            except Exception:
+                pass
+            return response.text
+
+        if PROXY_MARKER_HEADER not in response.headers:
+            raise PlatformError(
+                response.status_code,
+                f"escape hatch refused {method} {path}: {_detail()}",
+            )
+        if response.status_code >= 400:
+            raise PlatformError(response.status_code, _detail())
+        if not response.content:
+            return {}
+        return response.json()
+
+    def create_session(
+        self, agent_id: str, mode: str = "conversation", title: str | None = None
+    ) -> dict:
+        """POST /api/v1/sessions/ — create a session, return the SessionPublic."""
+        body: dict = {"agent_id": agent_id, "mode": mode}
+        if title:
+            body["title"] = title
+        return self._proxy_json("POST", "sessions/", json_body=body)
+
+    def get_session(self, session_id: str) -> dict:
+        """GET /api/v1/sessions/{id} — fetch a session (SessionPublicExtended)."""
+        return self._proxy_json("GET", f"sessions/{session_id}")
+
+    def get_messages(self, session_id: str, limit: int = 100, offset: int = 0) -> dict:
+        """GET /api/v1/sessions/{id}/messages — ``{data: [...], count: N}``.
+
+        Messages are ordered ascending by ``sequence_number``; ``offset`` is the
+        natural polling cursor (number already consumed). The in-progress
+        assistant message carries ``message_metadata.streaming_in_progress``.
+        """
+        return self._proxy_json(
+            "GET",
+            f"sessions/{session_id}/messages",
+            query={"limit": str(limit), "offset": str(offset)},
+        )
+
+    def send_message(
+        self,
+        session_id: str,
+        content: str,
+        file_ids: list[str] | None = None,
+        answers_to_message_id: str | None = None,
+        page_context: str | None = None,
+    ) -> dict:
+        """POST /api/v1/sessions/{id}/messages/stream — enqueue a user message.
+
+        Returns the JSON ack (``{status, session_id, streaming|pending|...}``);
+        the agent turn runs asynchronously and is observed by polling.
+        """
+        body: dict = {"content": content}
+        if file_ids:
+            body["file_ids"] = file_ids
+        if answers_to_message_id:
+            body["answers_to_message_id"] = answers_to_message_id
+        if page_context:
+            body["page_context"] = page_context
+        return self._proxy_json(
+            "POST", f"sessions/{session_id}/messages/stream", json_body=body
+        )
+
+    def get_streaming_status(self, session_id: str) -> dict:
+        """GET /api/v1/sessions/{id}/messages/streaming-status — ``{is_streaming}``."""
+        return self._proxy_json(
+            "GET", f"sessions/{session_id}/messages/streaming-status"
+        )
+
+    def interrupt_message(self, session_id: str) -> dict:
+        """POST /api/v1/sessions/{id}/messages/interrupt — stop the current turn."""
+        return self._proxy_json("POST", f"sessions/{session_id}/messages/interrupt")
+
+    def download_file(self, file_id: str) -> httpx.Response:
+        """GET /api/v1/files/{id}/download — raw bytes via the api-proxy.
+
+        The proxy buffers the response, so this is bounded by the hatch's
+        response size cap (8 MiB). Returns the raw httpx response; the caller
+        reads ``.content``. Raises ``PlatformError`` on a hatch refusal or a
+        non-2xx inner status.
+        """
+        response = self.api_proxy("GET", f"files/{file_id}/download")
+        if PROXY_MARKER_HEADER not in response.headers:
+            detail = response.text
+            try:
+                detail = response.json().get("detail", detail)
+            except Exception:
+                pass
+            raise PlatformError(
+                response.status_code,
+                f"escape hatch refused file download: {detail} "
+                "(files larger than the 8 MiB proxy cap cannot be fetched this way)",
+            )
+        if response.status_code >= 400:
+            raise PlatformError(
+                response.status_code, f"file download failed: {file_id}"
+            )
+        return response
+
+    def upload_file(self, path) -> dict:
+        """POST /api/v1/cli/account/files/upload — multipart upload, returns File.
+
+        A dedicated account route (not the api-proxy, which is JSON-only): the
+        account token authenticates it directly. Returns ``FileUploadPublic``
+        whose ``id`` is referenced in a message's ``file_ids``.
+        """
+        import mimetypes
+        from pathlib import Path
+
+        p = Path(path)
+        mime = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+        with open(p, "rb") as fh:
+            response = self._client.post(
+                "/api/v1/cli/account/files/upload",
+                files={"file": (p.name, fh, mime)},
+                timeout=DOWNLOAD_TIMEOUT,
+            )
+        return self._handle_response(response).json()
 
     def search_knowledge(self, query: str, topic: str | None = None) -> dict:
         """POST /api/v1/cli/account/knowledge/search — user-scoped knowledge search.

@@ -197,7 +197,9 @@ def account_setup(setup_input: tuple[str, ...], name: str | None, dir_name: str 
 
 @account.command(name="agents")
 @click.option(
-    "--all", "show_all", is_flag=True,
+    "--all",
+    "show_all",
+    is_flag=True,
     help="List agents across all workspaces (default: the active workspace only)",
 )
 def account_agents(show_all: bool):
@@ -370,7 +372,9 @@ def account_credentials_create(
 @click.argument("credential_id")
 @click.option("--name", default=None, help="New display name")
 @click.option("--notes", default=None, help="New notes")
-@click.option("--service-uri", default=None, help="New non-secret audience / target URL")
+@click.option(
+    "--service-uri", default=None, help="New non-secret audience / target URL"
+)
 @click.option("--share/--no-share", "share", default=None, help="Toggle sharing")
 def account_credentials_update(
     credential_id: str,
@@ -487,11 +491,15 @@ def agent_restart_env(agent_ref: str):
 @agent.command(name="show")
 @click.argument("agent_ref")
 @click.option(
-    "--prompts", "prompts_only", is_flag=True,
+    "--prompts",
+    "prompts_only",
+    is_flag=True,
     help="Show only the effective prompts (skip features + credentials)",
 )
 @click.option(
-    "--full", "full", is_flag=True,
+    "--full",
+    "full",
+    is_flag=True,
     help="Print prompts in full (default truncates long prompts for display)",
 )
 def agent_show(agent_ref: str, prompts_only: bool, full: bool):
@@ -537,14 +545,22 @@ def agent_schedule_list(agent_ref: str):
 @agent_schedule.command(name="generate")
 @click.argument("agent_ref")
 @click.argument("text")
-@click.option("--tz", "timezone", default="UTC", help="IANA timezone for interpretation (default UTC)")
 @click.option(
-    "--type", "schedule_type",
+    "--tz",
+    "timezone",
+    default="UTC",
+    help="IANA timezone for interpretation (default UTC)",
+)
+@click.option(
+    "--type",
+    "schedule_type",
     type=click.Choice(["static_prompt", "script_trigger"]),
     default="static_prompt",
     help="Which minimum-interval floor applies to the generated cadence",
 )
-def agent_schedule_generate(agent_ref: str, text: str, timezone: str, schedule_type: str):
+def agent_schedule_generate(
+    agent_ref: str, text: str, timezone: str, schedule_type: str
+):
     """Preview a CRON string from natural-language TEXT (nothing is saved).
 
     Example: cinna agent schedule generate crm-agent "every weekday at 7am" --tz Europe/Berlin
@@ -557,17 +573,26 @@ def agent_schedule_generate(agent_ref: str, text: str, timezone: str, schedule_t
 @agent_schedule.command(name="create")
 @click.argument("agent_ref")
 @click.option("--name", required=True, help="Schedule name")
-@click.option("--cron", required=True, help="CRON expression in --tz local time (5 fields)")
-@click.option("--tz", "timezone", default="UTC", help="IANA timezone for the cron (default UTC)")
 @click.option(
-    "--type", "schedule_type",
+    "--cron", required=True, help="CRON expression in --tz local time (5 fields)"
+)
+@click.option(
+    "--tz", "timezone", default="UTC", help="IANA timezone for the cron (default UTC)"
+)
+@click.option(
+    "--type",
+    "schedule_type",
     type=click.Choice(["static_prompt", "script_trigger"]),
     default="static_prompt",
     help="static_prompt (always starts a session) or script_trigger (runs a command)",
 )
 @click.option("--prompt", default=None, help="Per-schedule prompt (static_prompt only)")
-@click.option("--command", default=None, help="Shell command (required for script_trigger)")
-@click.option("--description", default=None, help="Human description (defaults to the name)")
+@click.option(
+    "--command", default=None, help="Shell command (required for script_trigger)"
+)
+@click.option(
+    "--description", default=None, help="Human description (defaults to the name)"
+)
 @click.option("--disabled", is_flag=True, help="Create the schedule disabled")
 def agent_schedule_create(
     agent_ref: str,
@@ -592,18 +617,32 @@ def agent_schedule_create(
     from cinna.account import run_schedule_create
 
     run_schedule_create(
-        agent_ref, name, cron, timezone, schedule_type,
-        prompt, command, description, enabled=not disabled,
+        agent_ref,
+        name,
+        cron,
+        timezone,
+        schedule_type,
+        prompt,
+        command,
+        description,
+        enabled=not disabled,
     )
 
 
 @agent_schedule.command(name="update")
 @click.argument("agent_ref")
 @click.argument("schedule_id")
-@click.option("--enable/--disable", "enabled", default=None, help="Enable or disable the schedule")
+@click.option(
+    "--enable/--disable", "enabled", default=None, help="Enable or disable the schedule"
+)
 @click.option("--name", default=None, help="New name")
 @click.option("--cron", default=None, help="New CRON expression (requires --tz)")
-@click.option("--tz", "timezone", default=None, help="IANA timezone (required when --cron changes)")
+@click.option(
+    "--tz",
+    "timezone",
+    default=None,
+    help="IANA timezone (required when --cron changes)",
+)
 @click.option("--prompt", default=None, help="New per-schedule prompt")
 @click.option("--command", default=None, help="New shell command (script_trigger)")
 @click.option("--description", default=None, help="New description")
@@ -626,8 +665,15 @@ def agent_schedule_update(
     from cinna.account import run_schedule_update
 
     run_schedule_update(
-        agent_ref, schedule_id, enabled, name, cron, timezone,
-        prompt, command, description,
+        agent_ref,
+        schedule_id,
+        enabled,
+        name,
+        cron,
+        timezone,
+        prompt,
+        command,
+        description,
     )
 
 
@@ -722,10 +768,22 @@ def connect():
 
 
 @connect.command(name="agent-api")
-@click.option("--producer", "producer_ref", required=True, help="Agent exposing the REST API (name, slug, or id)")
-@click.option("--consumer", "consumer_ref", required=True, help="Agent that will call it (name, slug, or id)")
+@click.option(
+    "--producer",
+    "producer_ref",
+    required=True,
+    help="Agent exposing the REST API (name, slug, or id)",
+)
+@click.option(
+    "--consumer",
+    "consumer_ref",
+    required=True,
+    help="Agent that will call it (name, slug, or id)",
+)
 @click.option("--label", default=None, help="Label for the created credential")
-@click.option("--read-only", is_flag=True, help="Restrict the consumer to read-only API access")
+@click.option(
+    "--read-only", is_flag=True, help="Restrict the consumer to read-only API access"
+)
 def connect_agent_api(
     producer_ref: str, consumer_ref: str, label: str | None, read_only: bool
 ):
@@ -741,11 +799,27 @@ def connect_agent_api(
 
 
 @connect.command(name="mcp")
-@click.option("--producer", "producer_ref", required=True, help="Agent exposing an agent2agent MCP connector (name, slug, or id)")
-@click.option("--consumer", "consumer_ref", required=True, help="Agent that will consume it (name, slug, or id)")
+@click.option(
+    "--producer",
+    "producer_ref",
+    required=True,
+    help="Agent exposing an agent2agent MCP connector (name, slug, or id)",
+)
+@click.option(
+    "--consumer",
+    "consumer_ref",
+    required=True,
+    help="Agent that will consume it (name, slug, or id)",
+)
 @click.option("--label", default=None, help="Label for the created credential")
-@click.option("--conversation-only", is_flag=True, help="Enable the connection in conversation mode only")
-@click.option("--building-only", is_flag=True, help="Enable the connection in building mode only")
+@click.option(
+    "--conversation-only",
+    is_flag=True,
+    help="Enable the connection in conversation mode only",
+)
+@click.option(
+    "--building-only", is_flag=True, help="Enable the connection in building mode only"
+)
 def connect_mcp(
     producer_ref: str,
     consumer_ref: str,
@@ -788,7 +862,9 @@ def agent_api():
 
 @agent_api.command(name="enable")
 @click.argument("agent_ref")
-@click.option("--disable", is_flag=True, help="Disable the REST API instead of enabling it")
+@click.option(
+    "--disable", is_flag=True, help="Disable the REST API instead of enabling it"
+)
 def agent_api_enable(agent_ref: str, disable: bool):
     """Enable (or --disable) the REST API on producer AGENT_REF.
 
@@ -818,7 +894,9 @@ def agent_api_refresh(agent_ref: str):
 @agent_api.command(name="spec")
 @click.argument("agent_ref")
 @click.option(
-    "--output", "-o", default=None,
+    "--output",
+    "-o",
+    default=None,
     help="Write the spec JSON to this file instead of stdout",
 )
 def agent_api_spec(agent_ref: str, output: str | None):
@@ -836,14 +914,18 @@ def agent_api_spec(agent_ref: str, output: str | None):
 @click.argument("agent_ref")
 @click.argument("path")
 @click.option(
-    "--method", "-X", default="GET",
+    "--method",
+    "-X",
+    default="GET",
     type=click.Choice(
         ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
         case_sensitive=False,
     ),
     help="HTTP method (default GET)",
 )
-@click.option("--query", "query_pairs", multiple=True, help="Query param key=value (repeatable)")
+@click.option(
+    "--query", "query_pairs", multiple=True, help="Query param key=value (repeatable)"
+)
 @click.option("--json", "json_text", default=None, help="Inline JSON request body")
 def agent_api_call(
     agent_ref: str,
@@ -873,11 +955,24 @@ def agent_api_call(
 
 
 @cli.command(name="api")
-@click.argument("method", type=click.Choice(["GET", "POST", "PUT", "PATCH", "DELETE"], case_sensitive=False))
+@click.argument(
+    "method",
+    type=click.Choice(["GET", "POST", "PUT", "PATCH", "DELETE"], case_sensitive=False),
+)
 @click.argument("path")
 @click.option("--json", "json_text", default=None, help="Inline JSON request body")
-@click.option("--data", "data_file", default=None, help="JSON request body from a file (@file.json)")
-@click.option("--query", "query_pairs", multiple=True, help="Query parameter as key=value (repeatable)")
+@click.option(
+    "--data",
+    "data_file",
+    default=None,
+    help="JSON request body from a file (@file.json)",
+)
+@click.option(
+    "--query",
+    "query_pairs",
+    multiple=True,
+    help="Query parameter as key=value (repeatable)",
+)
 def api_cmd(
     method: str,
     path: str,
@@ -1019,7 +1114,9 @@ def _run_remote_exec(config, command_str: str, timeout: int = 1800) -> int:
                         first_delta_at = time.monotonic()
                         logger.debug(
                             "exec first output (stream=%s, %d bytes) after %.3fs",
-                            stream, nbytes, first_delta_at - started_at,
+                            stream,
+                            nbytes,
+                            first_delta_at - started_at,
                         )
                 elif etype == "done":
                     exit_code = int(event.get("exit_code", 0))
@@ -1046,10 +1143,132 @@ def _run_remote_exec(config, command_str: str, timeout: int = 1800) -> int:
     logger.info(
         "exec stop: agent=%s exec_id=%s exit_code=%s duration=%.3fs "
         "stdout=%dB stderr=%dB terminal=%s",
-        config.agent_id, exec_id, exit_code, duration,
-        stdout_bytes, stderr_bytes, terminal_event,
+        config.agent_id,
+        exec_id,
+        exit_code,
+        duration,
+        stdout_bytes,
+        stderr_bytes,
+        terminal_event,
     )
     return exit_code
+
+
+# ─── chat ──────────────────────────────────────────────────────────────────
+
+
+@cli.command(name="chat", context_settings={"ignore_unknown_options": True})
+@click.option(
+    "--agent",
+    "agent_ref",
+    default=None,
+    help="Agent to talk to (name, slug, or id). Omit to infer from the current "
+    "agent workspace.",
+)
+@click.option(
+    "--resume",
+    default=None,
+    metavar="SESSION_ID",
+    help="Continue an existing session instead of starting a new one.",
+)
+@click.option(
+    "--file",
+    "files",
+    multiple=True,
+    type=click.Path(),
+    help="Attach a local file to the message (repeatable).",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["conversation", "building"]),
+    default="conversation",
+    show_default=True,
+    help="Session mode for a NEW session.",
+)
+@click.option("--title", default=None, help="Title for a NEW session.")
+@click.option(
+    "--download-dir",
+    default=None,
+    help="Where to save attachments the agent produces "
+    "(default: ./cinna-chat-files/<session_id>/).",
+)
+@click.option(
+    "--no-download",
+    is_flag=True,
+    help="Don't download agent attachments — just report their file ids.",
+)
+@click.option(
+    "--interval",
+    type=float,
+    default=2.0,
+    show_default=True,
+    help="Seconds between polls while the agent is responding.",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    show_default=True,
+    help="Max seconds to wait for the agent's turn to finish.",
+)
+@click.option(
+    "--pretty",
+    is_flag=True,
+    help="Human-readable output instead of the default NDJSON event stream.",
+)
+@click.argument("message", nargs=-1, type=click.UNPROCESSED)
+def chat_cmd(
+    agent_ref: str | None,
+    resume: str | None,
+    files: tuple[str, ...],
+    mode: str,
+    title: str | None,
+    download_dir: str | None,
+    no_download: bool,
+    interval: float,
+    timeout: int,
+    pretty: bool,
+    message: tuple[str, ...],
+):
+    """Chat with an agent through a real platform session.
+
+    Runs the message through the production conversation pipeline (permission
+    checks, agent-env calls, the model/SDK the platform selects) rather than any
+    local mock — so a coding agent can test the agent it is building. The reply
+    is observed by polling the backend, so it is robust to streaming/transport
+    quirks.
+
+    By default each new message/event is printed as one JSON object per line
+    (NDJSON) — easy for another agent to parse. Use --pretty for a human view.
+    Files the agent attaches to its replies are downloaded locally for
+    inspection; attach your own with --file.
+
+    Run it from your account workspace (or any synced agent folder under it). If
+    no message is given and you're in a TTY, you'll be prompted for one;
+    otherwise it is read from stdin.
+
+    \b
+    Examples:
+      cinna chat --agent crm-agent "Summarize today's leads"
+      cinna chat --agent crm-agent --file report.csv "Validate this export"
+      cinna chat --resume 3f2c… "And now break it down by region"
+      echo "ping" | cinna chat --agent crm-agent
+    """
+    from cinna.chat import run_chat
+
+    run_chat(
+        agent_ref=agent_ref,
+        resume=resume,
+        message_tokens=message,
+        files=files,
+        mode=mode,
+        title=title,
+        download_dir=download_dir,
+        no_download=no_download,
+        interval=interval,
+        timeout=timeout,
+        pretty=pretty,
+    )
 
 
 # ─── status ────────────────────────────────────────────────────────────────
@@ -1376,9 +1595,7 @@ def _run_dev_session(favor_remote: bool) -> None:
                 f"Resolved {len(res.resolved)} conflict(s) in favor of remote."
             )
             if res.backup_dir is not None:
-                console.status(
-                    f"Local versions backed up to {res.backup_dir}"
-                )
+                console.status(f"Local versions backed up to {res.backup_dir}")
         else:
             console.status("No conflicts — local workspace is consistent with remote.")
         if res.remaining:
@@ -1388,7 +1605,9 @@ def _run_dev_session(favor_remote: bool) -> None:
             )
         console.status("Attaching live view. Press Ctrl-C to stop.")
     else:
-        console.status(f"Sync session created ({st.state}) — attaching live view. Press Ctrl-C to stop.")
+        console.status(
+            f"Sync session created ({st.state}) — attaching live view. Press Ctrl-C to stop."
+        )
 
     sync_session.run_foreground(config, root)
     console.status("Sync session terminated.")
@@ -1424,6 +1643,7 @@ def _make_remote_deleter(config):
     agent, so we shell it out through the exec stream (``rm -f -- <path>``) and
     report success from the terminal ``done`` event's exit code.
     """
+
     def _delete(relpath: str) -> bool:
         remote_path = f"/app/workspace/{relpath}"
         cmd = f"rm -f -- {shlex.quote(remote_path)}"
@@ -1435,7 +1655,9 @@ def _make_remote_deleter(config):
                     if etype == "done":
                         exit_code = int(event.get("exit_code", 0))
                     elif etype == "error":
-                        logger.error("remote rm error for %s: %s", relpath, event.get("content"))
+                        logger.error(
+                            "remote rm error for %s: %s", relpath, event.get("content")
+                        )
                         return False
         except Exception as exc:  # network / stream failure
             logger.error("remote rm failed for %s: %s", relpath, exc)
@@ -1458,7 +1680,12 @@ def sync():
 
 
 @sync.command("status")
-@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
+@click.option(
+    "--agent",
+    "agent_ref",
+    default=None,
+    help="Target a synced agent from the account root",
+)
 def sync_status(agent_ref: str | None):
     """Print the sync session state."""
     root, config = _resolve_sync_target(agent_ref)
@@ -1487,7 +1714,12 @@ def sync_status(agent_ref: str | None):
 
 
 @sync.command("conflicts")
-@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
+@click.option(
+    "--agent",
+    "agent_ref",
+    default=None,
+    help="Target a synced agent from the account root",
+)
 def sync_conflicts(agent_ref: str | None):
     """List sync conflicts the Mutagen daemon has parked.
 
@@ -1517,8 +1749,17 @@ def sync_conflicts(agent_ref: str | None):
 
 
 @sync.command("push")
-@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
-@click.option("--force", is_flag=True, help="Local wins: clear conflicts in favor of local before flushing")
+@click.option(
+    "--agent",
+    "agent_ref",
+    default=None,
+    help="Target a synced agent from the account root",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Local wins: clear conflicts in favor of local before flushing",
+)
 def sync_push(agent_ref: str | None, force: bool):
     """Flush local → remote once and block until settled (headless-friendly).
 
@@ -1534,13 +1775,19 @@ def sync_push(agent_ref: str | None, force: bool):
     if force:
         with console.spinner("Resolving conflicts in favor of local…"):
             res = sync_session.resolve_conflicts(
-                config, root, prefer="local",
+                config,
+                root,
+                prefer="local",
                 remote_delete=_make_remote_deleter(config),
             )
         if res.resolved:
-            console.status(f"Resolved {len(res.resolved)} conflict(s) in favor of local.")
+            console.status(
+                f"Resolved {len(res.resolved)} conflict(s) in favor of local."
+            )
         if res.remaining:
-            console.warn(f"{len(res.remaining)} conflict(s) could not be resolved: {', '.join(res.remaining)}")
+            console.warn(
+                f"{len(res.remaining)} conflict(s) could not be resolved: {', '.join(res.remaining)}"
+            )
 
     # `mutagen sync flush` is bidirectional; the push/pull distinction is the
     # --force resolution direction, not the flush itself.
@@ -1555,8 +1802,17 @@ def sync_push(agent_ref: str | None, force: bool):
 
 
 @sync.command("pull")
-@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
-@click.option("--force", is_flag=True, help="Remote wins: clear conflicts in favor of remote before flushing")
+@click.option(
+    "--agent",
+    "agent_ref",
+    default=None,
+    help="Target a synced agent from the account root",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Remote wins: clear conflicts in favor of remote before flushing",
+)
 def sync_pull(agent_ref: str | None, force: bool):
     """Flush remote → local once and block until settled.
 
@@ -1572,11 +1828,15 @@ def sync_pull(agent_ref: str | None, force: bool):
         with console.spinner("Resolving conflicts in favor of remote…"):
             res = sync_session.resolve_conflicts(config, root, prefer="remote")
         if res.resolved:
-            console.status(f"Resolved {len(res.resolved)} conflict(s) in favor of remote.")
+            console.status(
+                f"Resolved {len(res.resolved)} conflict(s) in favor of remote."
+            )
             if res.backup_dir is not None:
                 console.status(f"Local versions backed up to {res.backup_dir}")
         if res.remaining:
-            console.warn(f"{len(res.remaining)} conflict(s) could not be resolved: {', '.join(res.remaining)}")
+            console.warn(
+                f"{len(res.remaining)} conflict(s) could not be resolved: {', '.join(res.remaining)}"
+            )
 
     # `mutagen sync flush` is bidirectional; the push/pull distinction is the
     # --force resolution direction, not the flush itself.
@@ -1591,8 +1851,18 @@ def sync_pull(agent_ref: str | None, force: bool):
 
 
 @sync.command("resolve")
-@click.option("--prefer", type=click.Choice(["local", "remote"]), required=True, help="Which side wins")
-@click.option("--agent", "agent_ref", default=None, help="Target a synced agent from the account root")
+@click.option(
+    "--prefer",
+    type=click.Choice(["local", "remote"]),
+    required=True,
+    help="Which side wins",
+)
+@click.option(
+    "--agent",
+    "agent_ref",
+    default=None,
+    help="Target a synced agent from the account root",
+)
 def sync_resolve(prefer: str, agent_ref: str | None):
     """Clear parked sync conflicts in favor of local or remote.
 
@@ -1617,7 +1887,9 @@ def sync_resolve(prefer: str, agent_ref: str | None):
             config, root, prefer=prefer, remote_delete=remote_delete
         )
     if res.resolved:
-        console.status(f"Resolved {len(res.resolved)} conflict(s) in favor of {prefer}.")
+        console.status(
+            f"Resolved {len(res.resolved)} conflict(s) in favor of {prefer}."
+        )
         if res.backup_dir is not None:
             console.status(f"Local versions backed up to {res.backup_dir}")
     else:
