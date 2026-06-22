@@ -1785,14 +1785,34 @@ def completion(shell: str | None, install: bool):
     \b
       cinna completion zsh          # print script to stdout
       cinna completion --install    # auto-detect shell and install
-      eval "$(cinna completion zsh)" # activate in current session
+      eval "$(_CINNA_COMPLETE=zsh_source cinna)" # activate in current session
     """
     import subprocess as sp
+
+    env_var = "_CINNA_COMPLETE"
+
+    # Bare `cinna completion` (no shell, no --install): guide the user instead
+    # of dumping the raw script to the terminal.
+    if shell is None and not install:
+        detected = _detect_shell()
+        console.console.print("Shell completion for cinna. Pick one:\n")
+        console.console.print(
+            f"  cinna completion --install      install for your shell ({detected})"
+        )
+        console.console.print(
+            "  cinna completion --install bash|zsh|fish   install for a specific shell"
+        )
+        console.console.print(
+            f'  eval "$({env_var}={detected}_source cinna)"   enable in this session only'
+        )
+        console.console.print(
+            f"  cinna completion {detected}             print the raw script (for piping)"
+        )
+        return
 
     if shell is None:
         shell = _detect_shell()
 
-    env_var = "_CINNA_COMPLETE"
     source_cmd = f"{shell}_source"
 
     if install:
@@ -1845,7 +1865,14 @@ def _detect_shell() -> str:
 def _install_target(shell: str, script: str) -> tuple[str, str]:
     """Return (rc_file, snippet_to_append) for each shell type."""
     if shell == "zsh":
-        return "~/.zshrc", 'eval "$(_CINNA_COMPLETE=zsh_source cinna)"'
+        # compdef (used by the generated script) only exists after compinit has
+        # run. A bare zsh (the macOS default) hasn't loaded it, so guard first,
+        # otherwise sourcing fails with "command not found: compdef".
+        return "~/.zshrc", (
+            "if ! type compdef &>/dev/null; then "
+            "autoload -Uz compinit && compinit; fi\n"
+            'eval "$(_CINNA_COMPLETE=zsh_source cinna)"'
+        )
     elif shell == "fish":
         return (
             "~/.config/fish/completions/cinna.fish",
