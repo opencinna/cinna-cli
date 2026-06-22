@@ -112,6 +112,16 @@ Refresh after platform updates with `cinna account refresh-context`.
 
 > **Mapping user intent → command.** "list/show my **workspaces**" → `cinna account user-workspace list` (workspaces are contexts that group agents, not agents themselves). "list/show my **agents**" → `cinna account agents` (scoped to the active workspace; add `--all` for every workspace). "what **credentials** do I have" → `cinna account credentials list`. "**schedule** the agent / run it every … / set up a cron" → `cinna agent schedule` (use `generate` first to turn the phrase into a cron). "is the agent **healthy** / what's its status / why is it failing" → `cinna agent status show` (or `refresh` to force a fresh read). When unsure which `cinna` verb covers a request, run `cinna --help` and `cinna account --help` rather than guessing or jumping to `cinna api`.
 
+## When a command fails with an auth error
+
+The account token expires (7-day rolling). If any `cinna` command fails with an authentication error — HTTP 401, "token expired", "Unauthorized", or a hint to "Run 'cinna login'" — **do not** ask the user to paste a new setup token from the UI. Refresh it yourself:
+
+1. Run `cinna login` from the account root. It prints a **verification code** and an **authorization URL**, then blocks waiting for approval.
+2. Relay both to the user: ask them to open the URL (they're already signed in to the platform in the browser), confirm the code matches, and click **Approve**. There is nothing to copy back — `cinna login` detects the approval and writes the fresh token automatically.
+3. After it reports success, run `cinna doctor` to re-mint any expired per-agent child tokens, then retry the original command.
+
+This keeps the whole refresh in the browser — no setup-token paste, no leaving the coding loop.
+
 ## Workflow
 
 1. `cinna account agents` — find the agent to work on (must show "can build").
