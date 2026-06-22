@@ -370,7 +370,7 @@ The platform's send-message route (`POST /sessions/{id}/messages/stream`) return
 3. Records the current message count as a cursor, then sends the message (`file_ids` carry the attachments).
 4. **Polls** `GET /sessions/{id}/messages?offset=<cursor>` (messages are ordered ascending by `sequence_number`, so `offset` is the cursor) and `GET …/messages/streaming-status` (`{is_streaming}`) until the turn settles — `is_streaming` false with no message flagged `streaming_in_progress`. A start-grace window covers env wake / queueing before the turn begins; an overall `--timeout` bounds the wait.
 
-Each finalized message is emitted as one NDJSON line (`session` / `upload` / `message` / `status` / `done`); the in-progress assistant message is held back (its content is still growing) and emitted once final. `--pretty` swaps NDJSON for a Rich transcript. Ctrl-C calls `POST …/messages/interrupt` and exits 130.
+Each finalized message is emitted as one NDJSON line (`session` / `upload` / `message` / `status` / `done`); the in-progress assistant message is held back (its content is still growing) and emitted once final. Every `message` also carries the agent's reasoning/tool trace under **`events`** — the normalized `streaming_events` (thinking blocks, `tool` calls with their full `tool_input` payloads, tool results), with the bookkeeping/`attachment` entries stripped (attachments are surfaced separately). The final coalesced text stays in `content`; the trace shows *how* the agent got there. `--no-events` drops the trace; `--pretty` swaps NDJSON for a Rich transcript. Ctrl-C calls `POST …/messages/interrupt` and exits 130.
 
 ### Attachments
 

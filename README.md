@@ -228,6 +228,7 @@ Run it from the account workspace (or any synced agent folder under it). The rep
 - The message is the positional argument; if omitted it is read from stdin, or you are prompted for it interactively in a TTY.
 - `--file PATH` (repeatable) uploads a local file and attaches it to the message.
 - Output is **NDJSON** by default — one JSON event per line (`session`, `upload`, `message`, `status`, `done`), trivially parseable by another agent. `--pretty` switches to a human-readable transcript.
+- Each `message` carries the agent's reasoning/tool trace under **`events`** — an ordered list of the `thinking` blocks, `tool` calls (with their full `tool_input` payload) and tool results behind the reply, so you see *what the agent did*, not just its final `content`. Pass `--no-events` to drop the trace and keep only the final text.
 - Files the agent attaches to its replies are downloaded under `./cinna-chat-files/<session_id>/` (override with `--download-dir`, or skip with `--no-download` to just report the file ids). Downloads are bounded by the api-proxy's 8 MiB response cap.
 - `--interval` / `--timeout` tune the poll cadence and the maximum wait for a turn. Ctrl-C interrupts the agent's turn and exits.
 

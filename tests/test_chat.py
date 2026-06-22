@@ -62,14 +62,32 @@ class FakeClient:
             else {
                 "streaming_events": [
                     {
+                        "type": "thinking",
+                        "event_seq": 1,
+                        "content": "Let me compute 2+2 step by step.",
+                    },
+                    {
+                        "type": "tool",
+                        "event_seq": 2,
+                        "tool_name": "calculator",
+                        "content": "calculator",
+                        "metadata": {
+                            "tool_id": "tool-1",
+                            "tool_name": "calculator",
+                            "tool_input": {"expression": "2+2"},
+                        },
+                    },
+                    {"type": "assistant", "event_seq": 3, "content": "Here you go"},
+                    {
                         "type": "attachment",
+                        "event_seq": 4,
                         "metadata": {
                             "file_id": "file-9",
                             "filename": "out.txt",
                             "mime_type": "text/plain",
                             "size": 5,
                         },
-                    }
+                    },
                 ]
             }
         )
@@ -177,6 +195,56 @@ def test_chat_new_session_emits_ndjson(runner, account_root, monkeypatch):
 
     done = events[-1]
     assert done["result_state"] == "completed"
+
+
+def test_chat_surfaces_thinking_and_tool_trace(runner, account_root, monkeypatch):
+    """The agent message carries the reasoning/tool trace under `events` — the
+    thinking block and tool calls (with their input payloads), not just the
+    final text."""
+    monkeypatch.chdir(account_root)
+    fake = FakeClient()
+    monkeypatch.setattr("cinna.chat.AccountClient", lambda cfg: fake)
+
+    result = runner.invoke(cli, ["chat", "--agent", "CRM Agent", "2+2"])
+    assert result.exit_code == 0, result.output
+
+    agent_msg = [
+        e
+        for e in _ndjson(result.output)
+        if e["event"] == "message" and e["role"] == "agent"
+    ][0]
+    # Final text still present.
+    assert agent_msg["content"] == "Here you go"
+
+    events = agent_msg["events"]
+    by_type = {e["type"]: e for e in events}
+    # Thinking block is visible.
+    assert "thinking" in by_type
+    assert by_type["thinking"]["content"] == "Let me compute 2+2 step by step."
+    # Tool call is visible with its name and full input payload.
+    tool = by_type["tool"]
+    assert tool["tool_name"] == "calculator"
+    assert tool["tool_input"] == {"expression": "2+2"}
+    # Attachments are not duplicated into the trace (surfaced separately).
+    assert "attachment" not in by_type
+
+
+def test_chat_no_events_flag_omits_trace(runner, account_root, monkeypatch):
+    """--no-events drops the reasoning/tool trace, leaving just the final text."""
+    monkeypatch.chdir(account_root)
+    fake = FakeClient()
+    monkeypatch.setattr("cinna.chat.AccountClient", lambda cfg: fake)
+
+    result = runner.invoke(cli, ["chat", "--agent", "CRM Agent", "--no-events", "2+2"])
+    assert result.exit_code == 0, result.output
+
+    agent_msg = [
+        e
+        for e in _ndjson(result.output)
+        if e["event"] == "message" and e["role"] == "agent"
+    ][0]
+    assert "events" not in agent_msg
+    assert agent_msg["content"] == "Here you go"
 
 
 def test_chat_downloads_agent_attachment(runner, account_root, monkeypatch):

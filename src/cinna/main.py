@@ -1212,6 +1212,14 @@ def _run_remote_exec(config, command_str: str, timeout: int = 1800) -> int:
     help="Max seconds to wait for the agent's turn to finish.",
 )
 @click.option(
+    "--events/--no-events",
+    "include_events",
+    default=True,
+    show_default=True,
+    help="Include the agent's reasoning/tool trace (thinking blocks, tool calls "
+    "with payloads, tool results) on each message — not just the final text.",
+)
+@click.option(
     "--pretty",
     is_flag=True,
     help="Human-readable output instead of the default NDJSON event stream.",
@@ -1227,6 +1235,7 @@ def chat_cmd(
     no_download: bool,
     interval: float,
     timeout: int,
+    include_events: bool,
     pretty: bool,
     message: tuple[str, ...],
 ):
@@ -1239,9 +1248,11 @@ def chat_cmd(
     quirks.
 
     By default each new message/event is printed as one JSON object per line
-    (NDJSON) — easy for another agent to parse. Use --pretty for a human view.
-    Files the agent attaches to its replies are downloaded locally for
-    inspection; attach your own with --file.
+    (NDJSON) — easy for another agent to parse. Each message carries the agent's
+    reasoning/tool trace under "events" (thinking blocks, tool calls with their
+    payloads, tool results); pass --no-events for just the final text. Use
+    --pretty for a human view. Files the agent attaches to its replies are
+    downloaded locally for inspection; attach your own with --file.
 
     Run it from your account workspace (or any synced agent folder under it). If
     no message is given and you're in a TTY, you'll be prompted for one;
@@ -1268,6 +1279,7 @@ def chat_cmd(
         interval=interval,
         timeout=timeout,
         pretty=pretty,
+        include_events=include_events,
     )
 
 

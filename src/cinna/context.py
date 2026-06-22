@@ -104,6 +104,19 @@ def generate_context_files(
     (workspace_root / "BUILDING_AGENT.md").write_text(building_md)
 
     # --- CLAUDE.md ---
+    regenerate_claude_md(config, workspace_root)
+
+
+def regenerate_claude_md(config: CinnaConfig, workspace_root: Path) -> None:
+    """Render the per-agent ``CLAUDE.md`` from the bundled template.
+
+    Pure (no network, no building context): the local-dev guide is a function
+    of the bundled template plus this agent's config (name + knowledge sources).
+    Split out so ``cinna account refresh-context`` can re-render it across every
+    synced agent workspace — a CLI upgrade's new guidance then reaches existing
+    workspaces without a full re-sync, mirroring the account-root regeneration.
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     mcp_tools = _format_mcp_tools(config)
     claude_md = (
         _load_template("CLAUDE.md.template")

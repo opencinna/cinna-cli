@@ -77,6 +77,22 @@ class _Emitter:
                 role, "white"
             )
             console.console.print(f"\n[bold {color}]{role}[/bold {color}]:")
+            for ev in event.get("events", []):
+                etype = ev.get("type")
+                if etype == "assistant":
+                    continue  # shown as the final content below
+                if etype == "thinking":
+                    console.console.print(
+                        f"  [magenta]🧠 thinking:[/magenta] {ev.get('content', '')}"
+                    )
+                elif etype in ("tool", "tool_use"):
+                    payload = ev.get("tool_input")
+                    console.console.print(
+                        f"  [cyan]🔧 {ev.get('tool_name', 'tool')}[/cyan] "
+                        f"[dim]{json.dumps(payload, ensure_ascii=False) if payload is not None else ''}[/dim]"
+                    )
+                elif ev.get("content"):
+                    console.console.print(f"  [dim]{etype}: {ev['content']}[/dim]")
             if event.get("content"):
                 console.console.print(event["content"])
             for att in event.get("attachments", []):
@@ -110,6 +126,7 @@ def run_chat(
     interval: float,
     timeout: int,
     pretty: bool,
+    include_events: bool = True,
 ) -> None:
     """Drive one chat turn: send a message to a session and stream the reply."""
     emit = _Emitter(pretty)
@@ -200,6 +217,7 @@ def run_chat(
                 dl_dir,
                 interval,
                 timeout,
+                include_events,
             )
         except KeyboardInterrupt:
             try:
@@ -248,6 +266,7 @@ def _poll_turn(
     dl_dir: Path | None,
     interval: float,
     timeout: int,
+    include_events: bool = True,
 ) -> None:
     """Emit each finalized message as it appears; return when the turn settles."""
     started = time.monotonic()
@@ -275,7 +294,7 @@ def _poll_turn(
                             {"event": "status", "state": "working", "message_id": mid}
                         )
                     break
-                _emit_message(client, emit, m, dl_dir)
+                _emit_message(client, emit, m, dl_dir, include_events)
                 consumed += 1
                 advanced = True
                 if m.get("role") and m["role"] != "user":
@@ -310,9 +329,19 @@ def _poll_turn(
 
 
 def _emit_message(
-    client: AccountClient, emit: _Emitter, m: dict, dl_dir: Path | None
+    client: AccountClient,
+    emit: _Emitter,
+    m: dict,
+    dl_dir: Path | None,
+    include_events: bool = True,
 ) -> None:
-    """Emit one finalized message, downloading any attachments it carries."""
+    """Emit one finalized message, downloading any attachments it carries.
+
+    ``content`` is the final assistant text; the reasoning/tool trace (thinking
+    blocks, tool calls with their input payloads, tool results) lives in
+    ``message_metadata.streaming_events`` and is surfaced under ``events`` so the
+    calling agent sees *what the agent did*, not just its closing line.
+    """
     event: dict = {
         "event": "message",
         "id": m.get("id"),
@@ -326,6 +355,11 @@ def _emit_message(
     if m.get("status_message"):
         event["status_message"] = m["status_message"]
 
+    if include_events:
+        events = _extract_events(m)
+        if events:
+            event["events"] = events
+
     attachments = _extract_attachments(m)
     if attachments:
         if dl_dir is not None:
@@ -333,6 +367,42 @@ def _emit_message(
                 _download_attachment(client, att, dl_dir)
         event["attachments"] = attachments
     emit.emit(event)
+
+
+# Streaming-event types surfaced separately (attachments) or pure bookkeeping —
+# excluded from the `events` trace to avoid duplication / noise.
+_TRACE_SKIP_TYPES = {"attachment", "attachment_error", "done"}
+
+
+def _extract_events(m: dict) -> list[dict]:
+    """Normalize a message's ``streaming_events`` into an agent-readable trace.
+
+    Keeps the ordered thinking / assistant-text / tool / tool-result events and
+    drops the bookkeeping ones. Tool events carry their ``tool_name`` and the
+    full ``tool_input`` payload so the caller can see exactly what was invoked.
+    """
+    out: list[dict] = []
+    meta = m.get("message_metadata") or {}
+    for ev in meta.get("streaming_events", []) or []:
+        etype = ev.get("type")
+        if not etype or etype in _TRACE_SKIP_TYPES:
+            continue
+        entry: dict = {"seq": ev.get("event_seq"), "type": etype}
+        content = ev.get("content")
+        if content not in (None, ""):
+            entry["content"] = content
+        md = ev.get("metadata") or {}
+        tool_name = ev.get("tool_name") or md.get("tool_name")
+        if tool_name:
+            entry["tool_name"] = tool_name
+        if md.get("tool_id"):
+            entry["tool_id"] = md["tool_id"]
+        if md.get("tool_input") is not None:
+            entry["tool_input"] = md["tool_input"]
+        if md.get("tool_use_id"):
+            entry["tool_use_id"] = md["tool_use_id"]
+        out.append(entry)
+    return out
 
 
 def _extract_attachments(m: dict) -> list[dict]:

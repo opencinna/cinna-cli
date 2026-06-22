@@ -864,9 +864,10 @@ def run_account_refresh_context() -> None:
 
     The old context tree is only removed after a successful download, so a
     failed refresh leaves the existing context intact (warn-don't-die). The
-    orchestrator `CLAUDE.md` is re-rendered from the bundled template too, so a
-    CLI upgrade's new commands / guidance reach existing account workspaces
-    without a full re-setup.
+    orchestrator `CLAUDE.md` is re-rendered from the bundled template too — and
+    so is every synced agent's per-agent `CLAUDE.md` under `agents/<slug>/` — so
+    a CLI upgrade's new commands / guidance reach existing account workspaces
+    (orchestrator and child agents alike) without a full re-setup.
     """
     account_root = find_account_root()
     account_cfg = load_account_config(account_root)
@@ -887,6 +888,26 @@ def run_account_refresh_context() -> None:
     # Regenerate the knowledge MCP wiring so a CLI upgrade reaches existing
     # account workspaces (auto-generated infra — safe to overwrite).
     _write_account_mcp_config(account_root)
+
+    # Re-render the per-agent CLAUDE.md for every synced child workspace from
+    # the same bundled template — offline (the local-dev guide is a pure
+    # function of the template + the agent's config), so one bad workspace never
+    # aborts the rest. BUILDING_AGENT.md is left untouched (it mirrors the
+    # platform's building prompt and is refreshed on sync, not from a template).
+    from cinna.context import regenerate_claude_md
+
+    refreshed = 0
+    for child, child_cfg in list_child_workspaces(account_root):
+        try:
+            regenerate_claude_md(child_cfg, child)
+            refreshed += 1
+        except Exception as exc:  # one unreadable/locked workspace mustn't abort
+            console.warn(f"Could not regenerate CLAUDE.md for {child.name}: {exc}")
+    if refreshed:
+        console.status(
+            f"Regenerated CLAUDE.md for {refreshed} synced agent "
+            f"workspace{'s' if refreshed != 1 else ''}"
+        )
 
 
 def run_account_agents(show_all: bool = False) -> None:

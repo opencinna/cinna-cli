@@ -482,6 +482,33 @@ def test_refresh_context_replaces_tree(
 
 
 @patch("cinna.account.AccountClient")
+def test_refresh_context_regenerates_child_agent_claude_md(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """refresh-context re-renders each synced agent's per-agent CLAUDE.md from
+    the bundled template, so a CLI upgrade's new guidance reaches existing
+    child workspaces too — not just the orchestrator one."""
+    monkeypatch.chdir(account_root)
+
+    child, _cfg = make_child_workspace(account_root, name="CRM Agent")
+    # A stale CLAUDE.md predating the template update.
+    (child / "CLAUDE.md").write_text("# OLD per-agent guide\n")
+
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.download_context_package.return_value = make_context_tarball()
+
+    result = runner.invoke(cli, ["account", "refresh-context"])
+    assert result.exit_code == 0, result.output
+    assert "Regenerated CLAUDE.md for 1 synced agent workspace" in result.output
+
+    regenerated = (child / "CLAUDE.md").read_text()
+    assert "# OLD per-agent guide" not in regenerated
+    assert "# Agent: CRM Agent" in regenerated
+    # The freshly-shipped guidance (talking to the agent to test it) is present.
+    assert "cinna chat" in regenerated
+
+
+@patch("cinna.account.AccountClient")
 def test_refresh_context_failure_preserves_old_tree(
     mock_client_cls, runner, account_root, monkeypatch
 ):
