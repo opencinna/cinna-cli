@@ -22,6 +22,19 @@ sessions. It heals the failure modes that accumulate over time:
 Why a dedicated command rather than self-healing sessions: Mutagen has **no**
 "give up after N failures" knob — a session retries a dead remote forever until
 something pauses or terminates it — so the leftovers need an explicit sweep.
+
+The repair is offered as three ordered, independently-confirmed steps — each
+defaulting to **Yes**:
+
+  1. **delete stalled sessions** — the broken state above (deleted workspaces,
+     halted / dead / orphaned sessions).
+  2. **terminate active sessions** — the healthy, still-watching sessions left
+     over from past ``cinna dev`` runs. They are recreated on demand, so clearing
+     them just frees the shared Mutagen daemon.
+  3. **refresh tokens** — re-mint expired CLI tokens via the parent account.
+
+The live ``cinna-*`` session inventory — each tagged with the agent and folder
+it serves — is shown up front on every run.
 """
 
 import logging
@@ -69,6 +82,16 @@ class Finding:
     detail: str  # what's wrong
     fix: str  # the planned action (human text)
     apply: Callable[[], str] | None  # None ⇒ report-only (no fix)
+    session: str | None = None  # Mutagen session this finding owns, if any
+
+
+@dataclass
+class SessionInfo:
+    """A live ``cinna-*`` Mutagen session plus the agent/folder it belongs to."""
+
+    name: str  # Mutagen session name (cinna-<short-id>)
+    agent: str  # agent display name
+    folder: str  # workspace folder on disk
 
 
 def _daemon_config(entries: list[dict]) -> CinnaConfig:
@@ -247,6 +270,7 @@ def diagnose() -> list[Finding]:
                     "remove registry entry"
                     + (" + terminate session" if session else ""),
                     _make_stale_fix(agent_id, sname if session else None, cfg),
+                    session=sname if session else None,
                 )
             )
             continue
@@ -264,6 +288,7 @@ def diagnose() -> list[Finding]:
                         "session halted — local workspace/ root was deleted",
                         "terminate session (cinna dev recreates it)",
                         _make_terminate(sname, cfg),
+                        session=sname,
                     )
                 )
             elif (
@@ -280,6 +305,7 @@ def diagnose() -> list[Finding]:
                         f"(status: {status or 'unknown'})",
                         "terminate session",
                         _make_terminate(sname, cfg),
+                        session=sname,
                     )
                 )
 
@@ -300,6 +326,7 @@ def diagnose() -> list[Finding]:
                 "Mutagen session has no registry entry",
                 "terminate session",
                 _make_terminate(name, cfg),
+                session=name,
             )
         )
 
@@ -388,30 +415,154 @@ def _print_table(
     console.console.print(table)
 
 
+# Auto-fixable findings that represent broken / stale Mutagen sessions or the
+# registry state around them. Grouped under the "delete stalled sessions" prompt.
+_STALLED_CATEGORIES = {
+    "stale_folder",
+    "zombie_session",
+    "dead_remote",
+    "orphan_session",
+}
+
+
+def _collect_cinna_sessions(
+    entries: list[dict], cfg: CinnaConfig
+) -> list[SessionInfo]:
+    """Every live ``cinna-*`` session, tagged with the agent + folder it serves.
+
+    Scoped to ``cinna-*`` on purpose: the Mutagen daemon is shared across every
+    tool on the machine (docs/mutagen_capabilities.md §10), so doctor must never
+    report — let alone terminate — another consumer's sessions.
+    """
+    try:
+        sessions = sync_session.list_all_sessions(cfg)
+    except Exception as exc:  # daemon down / mutagen missing — nothing to show
+        logger.warning("Could not list Mutagen sessions: %s", exc)
+        return []
+
+    by_name = {
+        sync_session.session_name(e["agent_id"]): e for e in entries
+    }
+    infos: list[SessionInfo] = []
+    for s in sessions:
+        name = s.get("name")
+        if not name or not name.startswith("cinna-"):
+            continue
+        entry = by_name.get(name)
+        if entry is not None:
+            agent = _label_for(entry)
+            folder = entry.get("workspace_path") or "?"
+        else:
+            # Orphan: no registry entry — derive what we can from the sync root.
+            apath = (s.get("alpha") or {}).get("path", "")
+            parent = Path(apath).parent if apath else None
+            agent = parent.name if parent else name
+            folder = str(parent) if parent else "?"
+        infos.append(SessionInfo(name=name, agent=agent, folder=folder))
+    return infos
+
+
+def _print_sessions_table(infos: list[SessionInfo], title: str) -> None:
+    from rich.table import Table
+
+    table = Table(
+        title=f"{title} ({len(infos)})",
+        title_style="bold",
+        show_lines=True,
+    )
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("Session")
+    table.add_column("Agent")
+    table.add_column("Folder")
+
+    for i, s in enumerate(infos, 1):
+        table.add_row(str(i), s.name, f"[bold]{s.agent}[/bold]", s.folder)
+
+    console.console.print(table)
+
+
+def _apply_step(
+    findings: list[Finding], prompt: str, yes: bool, skip_message: str
+) -> int:
+    """Confirm (default Yes), then apply a group of actionable findings.
+
+    Returns the number applied. ``--yes`` skips the prompt; declining prints
+    ``skip_message`` and applies nothing.
+    """
+    if not findings:
+        return 0
+    if not (yes or click.confirm(prompt, default=True)):
+        console.warn(skip_message)
+        return 0
+    applied = 0
+    for f in _in_category_order(findings):
+        try:
+            console.status(f"{f.label}: {f.apply()}")
+            applied += 1
+        except Exception as exc:
+            console.error(f"{f.label}: {exc}")
+    return applied
+
+
 def run_doctor(dry_run: bool, yes: bool) -> None:
     """Scan, report, and (unless ``dry_run``) repair stale sync state.
 
-    Findings split in two: **actionable** ones doctor can fix (deleted
-    workspaces, halted/dead/orphaned sessions, account token re-mints) and
-    **manual** ones it can't (standalone expired tokens, which need a pasted
-    setup token). Everything actionable is applied together behind a single
-    confirmation; the manual list is only reported.
+    The repair walks three ordered, independently-confirmed steps — each
+    defaulting to Yes:
+
+      1. **Delete stalled sessions** — deleted workspaces and halted / dead /
+         orphaned Mutagen sessions.
+      2. **Terminate active sessions** — the healthy, still-watching sessions
+         left over from past ``cinna dev`` runs (recreated on demand, so safe to
+         clear and free the shared daemon).
+      3. **Refresh tokens** — re-mint expired CLI tokens via the parent account.
+
+    Findings doctor can't fix itself (standalone expired tokens) are reported
+    only, never touched. The live-session inventory — with the agent and folder
+    each belongs to — is shown up front, on every run.
     """
     with console.spinner("Scanning registry and Mutagen sessions…"):
         findings = diagnose()
 
-    if not findings:
+    entries = list_agent_registry()
+    cfg = _daemon_config(entries)
+    live = _collect_cinna_sessions(entries, cfg)
+
+    stalled = [f for f in findings if f.category in _STALLED_CATEGORIES]
+    remint = [f for f in findings if f.category == "token_remint"]
+    manual = [f for f in findings if f.apply is None]
+
+    # "Active" = live sessions not already accounted for as stalled/broken.
+    problem_sessions = {f.session for f in findings if f.session}
+    active = [s for s in live if s.name not in problem_sessions]
+
+    if not findings and not active:
         console.status("Everything looks healthy — no stale sync state found.")
         return
 
-    actionable = [f for f in findings if f.apply is not None]
-    manual = [f for f in findings if f.apply is None]
+    if not findings:
+        console.status("No problems found — only leftover sessions to tidy up.")
 
-    if actionable:
-        _print_table(actionable, "Will fix", "Planned fix")
-    if manual:
-        if actionable:
+    # ── report (shown on every run, including --dry-run) ──────────────────────
+    sections = 0
+
+    def _gap() -> None:
+        nonlocal sections
+        if sections:
             console.console.print()
+        sections += 1
+
+    if stalled:
+        _gap()
+        _print_table(stalled, "Stalled sessions / state", "Planned fix")
+    if active:
+        _gap()
+        _print_sessions_table(active, "Active Mutagen sessions")
+    if remint:
+        _gap()
+        _print_table(remint, "Expired tokens — account re-mint", "Planned fix")
+    if manual:
+        _gap()
         _print_table(
             manual,
             "No automatic fix — manual action needed",
@@ -425,19 +576,37 @@ def run_doctor(dry_run: bool, yes: bool) -> None:
         return
 
     applied = 0
-    if actionable:
+    terminated = 0
+
+    # Step 1 — delete stalled sessions / stale registry state.
+    applied += _apply_step(
+        stalled,
+        f"Delete {len(stalled)} stalled session(s)?",
+        yes,
+        skip_message="No stalled sessions deleted.",
+    )
+
+    # Step 2 — terminate the healthy, no-longer-needed active sessions.
+    if active:
         if yes or click.confirm(
-            f"Apply {len(actionable)} fix(es)?", default=True
+            f"Terminate {len(active)} active session(s)?", default=True
         ):
-            for f in _in_category_order(actionable):
-                try:
-                    result = f.apply()
-                    console.status(f"{f.label}: {result}")
-                    applied += 1
-                except Exception as exc:
-                    console.error(f"{f.label}: {exc}")
+            for s in active:
+                if sync_session.terminate_named(s.name, cfg):
+                    console.status(f"{s.name}: session terminated")
+                    terminated += 1
+                else:
+                    console.error(f"{s.name}: could not terminate")
         else:
-            console.warn("No fixes applied.")
+            console.warn("Sessions left running.")
+
+    # Step 3 — refresh expired tokens (account re-mint).
+    applied += _apply_step(
+        remint,
+        f"Refresh {len(remint)} expired token(s)?",
+        yes,
+        skip_message="No tokens refreshed.",
+    )
 
     if manual:
         console.console.print()
@@ -451,4 +620,7 @@ def run_doctor(dry_run: bool, yes: bool) -> None:
             )
 
     console.console.print()
-    console.status(f"doctor applied {applied} fix(es).")
+    if findings:
+        console.status(f"doctor applied {applied} fix(es).")
+    if terminated:
+        console.status(f"doctor terminated {terminated} session(s).")

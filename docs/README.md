@@ -198,7 +198,7 @@ main.py  (CLI commands — Click)
   │
   ├── bootstrap.py       — setup orchestration
   ├── account.py         — account workspace; `cinna login` (device auth), `cinna account`, `cinna agent`
-  ├── doctor.py          — `cinna doctor`: reconcile registry ↔ Mutagen, repair stale state, refresh tokens
+  ├── doctor.py          — `cinna doctor`: reconcile registry ↔ Mutagen, delete stalled / terminate active sessions, refresh tokens
   ├── chat.py            — `cinna chat`: session-backed conversation testing (poll + NDJSON) over the api-proxy
   ├── config.py          — .cinna/config.json: load/save/find
   ├── auth.py            — JWT storage, Authorization headers
@@ -430,7 +430,7 @@ When a CLI token expires (or is revoked) the normal remedy is `cinna set-token <
 
 **Account tokens** refresh without a paste. `cinna login` (run inside an account workspace) drives the platform's RFC 8628 device-authorization flow: `POST /account/login/start` returns a short code + verification URL, the user clicks **Authorize** in the browser (already signed in), and the CLI polls `POST /account/login/poll` until it receives the fresh token, which it writes back into `.cinna/account.json` in place. The poll endpoint always returns HTTP 200 with a `status` field (`authorization_pending` / `slow_down` / `authorized` / `access_denied` / `expired_token`) — a deliberate divergence from RFC 8628's 400+`error` shape. Run from a fresh folder, the same command bootstraps a new account workspace instead of resuming one.
 
-**Bulk repair** is `cinna doctor`. It reconciles the `~/.cinna/agents.json` registry against the Mutagen daemon and heals the state that drifts as agents come and go — registry entries whose workspace was deleted, sessions halted on a deleted local root or stuck retrying a dead remote env, and orphaned sessions (Mutagen has no "stop after N failures" knob, so these retry forever until terminated). Expired **per-agent** tokens under an account workspace are re-minted automatically through the parent account token; when the **account** token has itself expired, doctor groups the blocked agents into a single "run `cinna login`" finding instead of attempting re-mints that would 401. Standalone agents are reported for a manual `cinna set-token`.
+**Bulk repair** is `cinna doctor`. It reconciles the `~/.cinna/agents.json` registry against the Mutagen daemon and heals the state that drifts as agents come and go — registry entries whose workspace was deleted, sessions halted on a deleted local root or stuck retrying a dead remote env, and orphaned sessions (Mutagen has no "stop after N failures" knob, so these retry forever until terminated). It prints the live `cinna-*` session inventory up front — each tagged with the agent and folder it serves — then walks three ordered, separately-confirmed steps (each defaulting to Yes): **delete stalled sessions**, **terminate active sessions** (the healthy leftovers, recreated on the next `cinna dev`), and **refresh tokens**. Expired **per-agent** tokens under an account workspace are re-minted automatically through the parent account token; when the **account** token has itself expired, doctor groups the blocked agents into a single "run `cinna login`" finding instead of attempting re-mints that would 401. Standalone agents are reported for a manual `cinna set-token`.
 
 ### Authorization
 

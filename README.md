@@ -307,16 +307,25 @@ It detects and fixes:
 - **Halted sessions** — sessions stopped on `halted-on-root-deletion` (the local `workspace/` root was deleted) while the agent dir is otherwise intact. Terminated; `cinna dev` recreates a clean one.
 - **Dead-remote sessions** — sessions stuck retrying a remote env that no longer exists (`connecting-beta` / beta polling error). Mutagen has **no** "give up after N failures" option — a session retries forever until paused or terminated — so `doctor` is the cleanup path for these. Terminated.
 - **Orphaned sessions** — `cinna-*` sessions with no registry entry at all. Terminated.
+- **Active sessions** — the healthy, still-watching sessions left over from past `cinna dev` runs. They are not broken, but they keep the shared Mutagen daemon busy and are recreated on demand, so doctor offers to clear them as a separate step.
 - **Expired tokens** — for **account-managed** workspaces (those under an account root), the CLI token is re-minted automatically through the parent account token, no pasting required. **Standalone** workspaces (set up via `cinna setup`) can only be refreshed with a pasted setup token, so they are reported with a `cinna set-token` hint rather than changed.
 - **Expired account token** — a sub-agent token can only be re-minted while the **account** token that mints it is still valid. When the account token has itself expired, doctor probes it once and surfaces a single _"renew the account token — run `cinna login`"_ finding (listing the blocked sub-agents) instead of a pile of re-mints that would all fail with 401. Run `cinna login`, then re-run `cinna doctor` to re-mint the dependents.
 
 ```bash
-cinna doctor              # diagnose, then apply all fixes behind one confirmation
+cinna doctor              # diagnose, then walk the repair steps (each defaults to Yes)
 cinna doctor --dry-run    # report problems only; change nothing
-cinna doctor --yes        # apply every fix non-interactively
+cinna doctor --yes        # accept every step non-interactively
 ```
 
-The diagnosis is split into two tables: **Will fix** (everything doctor can repair — deleted-workspace cleanup, halted/dead/orphaned session termination, account token re-mints) and **No automatic fix — manual action needed** (standalone expired tokens, which need a pasted setup token and are never touched). Everything actionable is applied together behind a single `Apply N fix(es)?` confirmation, so the count always matches the "Will fix" table.
+`doctor` first prints the live `cinna-*` session inventory — each session tagged with the **agent** and **folder** it serves — so you can see what's running before deciding anything. Findings it can't fix itself (standalone expired tokens) are listed under **No automatic fix — manual action needed** and never touched.
+
+The repair then runs as three ordered, independently-confirmed steps, each defaulting to **Yes**:
+
+1. **Delete stalled sessions** — deleted-workspace cleanup plus halted / dead / orphaned session termination.
+2. **Terminate active sessions** — clear the healthy leftovers from the inventory above (recreated on the next `cinna dev`).
+3. **Refresh tokens** — re-mint expired account-managed tokens.
+
+`--yes` accepts all three; `--dry-run` shows the tables and changes nothing.
 
 ### `cinna disconnect`
 

@@ -1548,10 +1548,12 @@ def doctor(dry_run: bool, yes: bool):
 
     Mutagen has no "stop retrying after N failures" option — a session retries a
     dead remote forever — so this is the cleanup path for those sessions.
-    Findings split into what doctor can fix (shown as "Will fix") and what needs
-    you (standalone expired tokens, shown as "manual action needed" and never
-    touched). Bare ``cinna doctor`` applies every actionable fix behind a single
-    confirmation; ``--yes`` skips the prompt, ``--dry-run`` only reports.
+    The live Mutagen session inventory — each tagged with its agent and folder —
+    is shown up front, then repairs run as three ordered, separately-confirmed
+    steps (each defaulting to Yes): delete stalled sessions, terminate active
+    sessions (recreated on the next ``cinna dev``), and refresh expired tokens.
+    Standalone expired tokens are reported as "manual action needed" and never
+    touched. ``--yes`` accepts every prompt; ``--dry-run`` only reports.
     """
     from cinna.doctor import run_doctor
 
