@@ -7,9 +7,13 @@ from cinna.context import (
     generate_opencode_json,
     generate_gitignore,
     list_synced_prompt_refs,
+    regenerate_claude_md,
+    write_git_versioning_guide,
     _format_mcp_tools,
+    _git_versioning_reference,
     _sync_prompt_references,
 )
+from cinna.config import GitLayout
 
 
 def test_generate_context_files(workspace_root, sample_config):
@@ -34,6 +38,46 @@ def test_generate_context_files(workspace_root, sample_config):
     assert guide.exists()
     assert "like a real user" in guide.read_text()
     assert "CHAT_TESTING.md" in claude_md
+
+
+def test_git_versioning_guide_written_and_referenced(workspace_root, sample_config):
+    generate_context_files({"building_prompt": "x"}, sample_config, workspace_root)
+
+    guide = workspace_root / "GIT_VERSIONING.md"
+    assert guide.exists()
+    assert "Git Versioning" in guide.read_text()
+    # Referenced from CLAUDE.md, conditionally.
+    claude_md = (workspace_root / "CLAUDE.md").read_text()
+    assert "GIT_VERSIONING.md" in claude_md
+    # Placeholder must be fully substituted.
+    assert "{git_versioning_section}" not in claude_md
+
+
+def test_git_versioning_reference_is_conditional(sample_config):
+    # Not versioned → "read only if the user asks".
+    not_versioned = _git_versioning_reference(sample_config)
+    assert "not** git-versioned" in not_versioned or "not git-versioned" in not_versioned
+    assert "GIT_VERSIONING.md" in not_versioned
+
+    # Versioned → guide is mandatory reading before git ops.
+    sample_config.git = GitLayout(clone_path="/x", subdir="s", vcs_enabled=True)
+    versioned = _git_versioning_reference(sample_config)
+    assert "ENABLED" in versioned
+    assert "GIT_VERSIONING.md" in versioned
+
+
+def test_regenerate_claude_md_reflects_git_state(workspace_root, sample_config):
+    regenerate_claude_md(sample_config, workspace_root)
+    assert "not** git-versioned" in (workspace_root / "CLAUDE.md").read_text()
+
+    sample_config.git = GitLayout(clone_path="/x", subdir="s", vcs_enabled=True)
+    regenerate_claude_md(sample_config, workspace_root)
+    assert "ENABLED for this agent" in (workspace_root / "CLAUDE.md").read_text()
+
+
+def test_write_git_versioning_guide_standalone(workspace_root):
+    write_git_versioning_guide(workspace_root)
+    assert (workspace_root / "GIT_VERSIONING.md").exists()
 
 
 def test_generate_mcp_json(workspace_root, sample_config):

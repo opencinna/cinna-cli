@@ -94,6 +94,27 @@ class PlatformClient:
         )
         return self._handle_response(response).content
 
+    # --- Git versioning coordinates ---
+
+    def get_git_coordinates(self) -> dict:
+        """GET /api/v1/cli/git-coordinates — the agent's git source coordinates.
+
+        The path has **no** ``{agent_id}``: the backend derives the agent from
+        the per-agent CLI token. Returns ``CliGitCoordinates``::
+
+            {vcs_enabled, repo_url, subdir, ref, sync_direction,
+             last_synced_commit, auth_hint}
+
+        A backend too old to expose the route answers 404; that is treated as
+        "not git-versioned" (``{"vcs_enabled": False}``) rather than an error,
+        so the CLI degrades to Mutagen-only behavior transparently.
+        """
+        response = self._client.get("/api/v1/cli/git-coordinates")
+        if response.status_code == 404:
+            logger.debug("git-coordinates route not available (404); vcs disabled")
+            return {"vcs_enabled": False}
+        return self._handle_response(response).json()
+
     # --- Building Context ---
 
     def get_building_context(self, agent_id: str) -> dict:

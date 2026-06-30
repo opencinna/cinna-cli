@@ -941,7 +941,11 @@ def test_account_status_valid_token(mock_probe, runner, account_root, monkeypatc
     assert "https://platform.example.com" in result.output
     assert "laptop" in result.output
     assert "valid token" in result.output
-    assert "agents/crm-agent/" in result.output
+    # Synced agents now render as a table with per-agent details.
+    assert "Synced agents" in result.output
+    assert "CRM Agent" in result.output
+    assert "general-env" in result.output
+    assert "agents/crm-agent" in result.output
 
 
 @patch("cinna.account.probe_account_token")
@@ -1001,10 +1005,11 @@ MINT_RESPONSE = {
 }
 
 
+@patch("cinna.account.PlatformClient")
 @patch("cinna.account.provision_workspace")
 @patch("cinna.account.AccountClient")
 def test_agent_sync_mints_and_bootstraps(
-    mock_client_cls, mock_provision, runner, account_root, monkeypatch
+    mock_client_cls, mock_provision, mock_platform, runner, account_root, monkeypatch
 ):
     """`cinna agent sync` mints a child token then delegates to the standard
     per-agent bootstrap writer (config + registry + provisioning)."""
@@ -1014,6 +1019,8 @@ def test_agent_sync_mints_and_bootstraps(
     mock_client = mock_client_cls.return_value.__enter__.return_value
     mock_client.list_account_agents.return_value = AGENTS_LISTING
     mock_client.mint_agent_token.return_value = MINT_RESPONSE
+    # Per-agent client only used to discover git coordinates here — not versioned.
+    mock_platform.return_value.get_git_coordinates.return_value = {"vcs_enabled": False}
 
     result = runner.invoke(cli, ["agent", "sync", "HR Manager Agent"])
     assert result.exit_code == 0, result.output
@@ -1024,8 +1031,8 @@ def test_agent_sync_mints_and_bootstraps(
     assert agent_id == "agent-789"
     assert machine_name == "laptop"
 
-    # Standard workspace written under agents/<slug>/ with the minted token.
-    ws = account_root / "agents" / "hr-manager-agent"
+    # Model-A nested layout: agents/<slug>/<subdir>/ with the minted token.
+    ws = account_root / "agents" / "hr-manager-agent" / "hr-manager-agent"
     config = load_config(ws)
     assert config.cli_token == "child-jwt-shown-once"
     assert config.cli_token_id == "tok-uuid-1"
@@ -1048,18 +1055,20 @@ def test_agent_sync_mints_and_bootstraps(
     assert config_arg.agent_id == "agent-789"
     assert root_arg == ws
 
-    assert "cd agents/hr-manager-agent/" in result.output
+    assert "cd agents/hr-manager-agent/hr-manager-agent/" in result.output
 
 
+@patch("cinna.account.PlatformClient")
 @patch("cinna.account.provision_workspace")
 @patch("cinna.account.AccountClient")
 def test_agent_sync_resolves_by_id_and_slug(
-    mock_client_cls, mock_provision, runner, account_root, monkeypatch
+    mock_client_cls, mock_provision, mock_platform, runner, account_root, monkeypatch
 ):
     monkeypatch.chdir(account_root)
     mock_client = mock_client_cls.return_value.__enter__.return_value
     mock_client.list_account_agents.return_value = AGENTS_LISTING
     mock_client.mint_agent_token.return_value = MINT_RESPONSE
+    mock_platform.return_value.get_git_coordinates.return_value = {"vcs_enabled": False}
 
     result = runner.invoke(cli, ["agent", "sync", "hr-manager-agent"])
     assert result.exit_code == 0, result.output
@@ -1281,6 +1290,37 @@ def test_resolve_child_workspace_by_id_slug_and_name(account_root):
         assert resolved[0] == ws
 
     assert resolve_child_workspace(account_root, "other") is None
+
+
+def test_resolve_child_workspace_multi_segment_subdir(account_root):
+    """A git-versioned agent whose backend subdir is multi-segment puts .cinna/
+    several levels below the clone root; --agent resolution must still find it."""
+    from cinna.config import save_config
+
+    # agents/<slug>/<a>/<b>/<c>/.cinna/   (mirrors a backend subdir like
+    # "agents/localhost/hello-testing")
+    deep = (
+        account_root
+        / "agents"
+        / "hello-testing-agent"
+        / "agents"
+        / "localhost"
+        / "hello-testing"
+    )
+    config = CinnaConfig(
+        platform_url="https://platform.example.com",
+        cli_token="t",
+        agent_id="agent-deep",
+        agent_name="Hello Testing Agent",
+        environment_id="env-1",
+        template="general-env",
+    )
+    save_config(config, deep)
+
+    for ref in ("agent-deep", "hello-testing-agent", "Hello Testing Agent"):
+        resolved = resolve_child_workspace(account_root, ref)
+        assert resolved is not None, ref
+        assert resolved[0] == deep
 
 
 # --- AccountClient (HTTP-level) ---

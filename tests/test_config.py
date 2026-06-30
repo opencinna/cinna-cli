@@ -137,6 +137,27 @@ def test_agent_registry_upsert_overwrites_same_id():
     assert lookup_agent_registry("agent-a")["platform_url"] == "http://new"
 
 
+def test_agent_registry_git_block_preserved_on_credential_reupsert():
+    """A sync op re-upserting creds (no git arg) must NOT wipe the git block."""
+    git = {"clone_path": "/c", "subdir": "s", "repo_url": "r", "ref": "main"}
+    upsert_agent_registry("agent-a", "http://h", "t", Path("/tmp/a"), git=git)
+    assert lookup_agent_registry("agent-a")["git"] == git
+
+    # Simulate `cinna sync push` / `cinna dev`: refresh creds, no git arg.
+    upsert_agent_registry("agent-a", "http://h", "t2", Path("/tmp/a"))
+    entry = lookup_agent_registry("agent-a")
+    assert entry["cli_token"] == "t2"
+    assert entry["git"] == git  # preserved, not stripped
+
+
+def test_agent_registry_git_block_explicit_none_clears():
+    """`cinna git unlink` passes git=None to remove the block."""
+    git = {"clone_path": "/c", "subdir": "s"}
+    upsert_agent_registry("agent-a", "http://h", "t", Path("/tmp/a"), git=git)
+    upsert_agent_registry("agent-a", "http://h", "t", Path("/tmp/a"), git=None)
+    assert "git" not in lookup_agent_registry("agent-a")
+
+
 def test_agent_registry_remove():
     upsert_agent_registry("agent-a", "http://h", "t", Path("/tmp/a"))
     upsert_agent_registry("agent-b", "http://h", "t", Path("/tmp/b"))

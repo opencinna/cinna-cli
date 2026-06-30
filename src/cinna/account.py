@@ -35,10 +35,15 @@ import httpx
 from cinna import console
 from cinna import sync_session
 from cinna.bootstrap import (
+    config_from_payload,
     normalize_agent_dir_name,
+    persist_config,
+    prepare_git_layout,
     provision_workspace,
     remove_workspace_artifacts,
-    write_workspace_from_payload,
+    resolve_clone_slug,
+    workspace_agent_id_at,
+    _maybe_autolink,
 )
 from cinna.client import AccountClient, PlatformClient
 from cinna.config import (
@@ -231,18 +236,67 @@ def _exchange_account_setup_token(
 # ── Child workspace resolution ──────────────────────────────────────────────
 
 
+# Dirs never worth descending into when hunting for an agent's ``.cinna/`` —
+# they're large and never contain a nested agent config.
+_AGENT_SCAN_PRUNE = {
+    "workspace",
+    ".git",
+    CONFIG_DIR,
+    "node_modules",
+    ".venv",
+    "__pycache__",
+}
+_AGENT_SCAN_MAX_DEPTH = 8
+
+
+def _find_agent_dirs_under(clone_root: Path):
+    """Yield every agent dir (folder holding ``.cinna/config.json``) under a clone.
+
+    The Model-A subdir can be **multi-segment** (e.g. ``agents/localhost/hello``),
+    so the config can sit several levels below the clone root. Walk down, pruning
+    heavy/irrelevant subtrees, and stop descending once an agent dir is found
+    (an agent dir never nests another).
+    """
+
+    def walk(d: Path, depth: int):
+        if depth > _AGENT_SCAN_MAX_DEPTH:
+            return
+        if (d / CONFIG_DIR / "config.json").is_file():
+            yield d
+            return
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            return
+        for e in entries:
+            if e.is_dir() and e.name not in _AGENT_SCAN_PRUNE:
+                yield from walk(e, depth + 1)
+
+    yield from walk(clone_root, 0)
+
+
+def _iter_agent_dirs(base: Path):
+    """Yield agent dirs (the folder holding ``.cinna/``) under ``agents/``.
+
+    Handles the legacy flat layout (``agents/<slug>/.cinna/``) and the Model-A
+    nested layout with an arbitrarily deep, possibly multi-segment subdir
+    (``agents/<slug>/<a>/<b>/.cinna/``).
+    """
+    if not base.is_dir():
+        return
+    for child in sorted(base.iterdir()):
+        if child.is_dir():
+            yield from _find_agent_dirs_under(child)
+
+
 def list_child_workspaces(account_root: Path) -> list[tuple[Path, CinnaConfig]]:
     """Return every synced per-agent workspace under ``agents/``."""
     result: list[tuple[Path, CinnaConfig]] = []
-    base = agents_dir(account_root)
-    if not base.is_dir():
-        return result
-    for child in sorted(base.iterdir()):
-        if child.is_dir() and (child / CONFIG_DIR / "config.json").is_file():
-            try:
-                result.append((child, load_config(child)))
-            except Exception:
-                logger.warning("Unreadable child workspace config: %s", child)
+    for child in _iter_agent_dirs(agents_dir(account_root)):
+        try:
+            result.append((child, load_config(child)))
+        except Exception:
+            logger.warning("Unreadable child workspace config: %s", child)
     return result
 
 
@@ -1047,9 +1101,59 @@ def run_account_status() -> None:
     console.console.print(table)
 
     if children:
+        console.console.print()
+        console.console.print(_synced_agents_table(account_root, children))
+
+    _print_token_reauth_hint(token_status)
+
+
+def _synced_agents_table(account_root: Path, children: list[tuple[Path, CinnaConfig]]):
+    """Build a table of the per-agent workspaces synced under ``agents/``.
+
+    One row per child workspace, showing its display name, template, agent id,
+    workspace path (relative to the account root for brevity), and the last time
+    sync connected when that's recorded in the child config.
+    """
+    from rich.table import Table
+
+    agents = Table(title="Synced agents")
+    agents.add_column("Agent")
+    agents.add_column("Template", style="dim")
+    agents.add_column("Agent ID", style="dim")
+    agents.add_column("Path")
+    agents.add_column("Last sync", style="dim")
+
+    for path, cfg in children:
+        try:
+            rel = path.relative_to(account_root)
+        except ValueError:
+            rel = path
+        agents.add_row(
+            cfg.agent_name or "—",
+            cfg.template or "—",
+            cfg.agent_id or "—",
+            str(rel),
+            cfg.last_sync_connected_at or "—",
+        )
+    return agents
+
+
+def _print_token_reauth_hint(token_status: str) -> None:
+    """Nudge the user to re-authenticate when the account token isn't valid.
+
+    Shared by ``cinna account status`` and ``cinna status`` (which falls back to
+    the account view inside an account workspace). ``cinna login`` refreshes the
+    token in place without a pasted setup token.
+    """
+    if token_status == "expired":
         console.console.print(
-            "[dim]Synced:[/dim] "
-            + ", ".join(f"agents/{path.name}/" for path, _ in children)
+            "\n[red]Account token has expired.[/red] Re-authenticate with:\n"
+            "  [bold]cinna login[/bold]"
+        )
+    elif token_status == "unreachable":
+        console.console.print(
+            "\n[yellow]Could not reach the platform to verify the token.[/yellow]\n"
+            "If this persists, re-authenticate with:  [bold]cinna login[/bold]"
         )
 
 
@@ -1083,11 +1187,17 @@ def run_agent_sync(agent_ref: str, machine_name: str | None) -> None:
         item = _resolve_account_agent(listing.get("data", []), agent_ref)
 
         dir_name = normalize_agent_dir_name(item["name"])
-        workspace_root = agents_dir(account_root) / dir_name
-        if (workspace_root / CONFIG_DIR / "config.json").exists():
+        # Resolve the clone-root name the same way the bootstrap will (slug, or
+        # slug-<hash> when another agent already owns the slug), then refuse only
+        # when THIS agent is already synced there.
+        clone_slug = resolve_clone_slug(
+            agents_dir(account_root), dir_name, item["id"]
+        )
+        clone_candidate = agents_dir(account_root) / clone_slug
+        if workspace_agent_id_at(clone_candidate) == item["id"]:
             raise click.ClickException(
-                f"'{AGENTS_DIR}/{dir_name}/' is already a synced workspace.\n"
-                f"Run 'cinna agent unsync {dir_name}' first, or use "
+                f"'{AGENTS_DIR}/{clone_slug}/' is already a synced workspace.\n"
+                f"Run 'cinna agent unsync {clone_slug}' first, or use "
                 f"'cinna set-token' inside it to refresh the token."
             )
 
@@ -1108,13 +1218,19 @@ def run_agent_sync(agent_ref: str, machine_name: str | None) -> None:
     }
 
     agents_dir(account_root).mkdir(exist_ok=True)
-    workspace_root.mkdir(exist_ok=True)
-    config = write_workspace_from_payload(payload, workspace_root)
-    console.status(f"Minted CLI token for agent: {config.agent_name}")
-
-    # Steps 2-4: standard per-agent provisioning (same as `cinna setup`)
+    config = config_from_payload(payload)
     agent_client = PlatformClient(config)
     try:
+        # Same Model-A nested layout + auto-link as `cinna setup`, rooted under
+        # the account workspace's agents/ dir.
+        _clone_root, workspace_root, coords = prepare_git_layout(
+            config, agent_client, agents_dir(account_root)
+        )
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        persist_config(config, workspace_root)
+        console.status(f"Minted CLI token for agent: {config.agent_name}")
+
+        # Steps 2-4: standard per-agent provisioning (same as `cinna setup`)
         provision_workspace(
             agent_client,
             config,
@@ -1123,12 +1239,14 @@ def run_agent_sync(agent_ref: str, machine_name: str | None) -> None:
             total=total,
             first_step=2,
         )
+        workspace_root = _maybe_autolink(config, agent_client, workspace_root, coords)
     finally:
         agent_client.close()
 
-    console.status(f"Agent synced under {AGENTS_DIR}/{dir_name}/")
+    rel_dir = workspace_root.relative_to(account_root)
+    console.status(f"Agent synced under {rel_dir}/")
     console.console.print()
-    console.console.print(f"  cd {AGENTS_DIR}/{dir_name}/")
+    console.console.print(f"  cd {rel_dir}/")
     console.console.print(
         "  cinna dev                         # start a foreground dev session"
     )

@@ -56,6 +56,39 @@ def test_status_command(mock_load, mock_find, mock_status, mock_probe, runner, w
     ]
 
 
+@patch("cinna.account.list_child_workspaces")
+@patch("cinna.account.probe_account_token")
+@patch("cinna.account.load_account_config")
+@patch("cinna.account.find_account_root")
+@patch("cinna.main.find_workspace_root")
+def test_status_falls_back_to_account_workspace(
+    mock_find_ws, mock_find_acct, mock_load_acct, mock_probe, mock_children, runner, tmp_path
+):
+    """`cinna status` inside an account workspace (only account.json, no
+    config.json) shows the account session instead of erroring, and nudges
+    re-auth when the token has expired."""
+    from cinna.errors import ConfigNotFoundError
+    from cinna.account import AccountConfig
+
+    mock_find_ws.side_effect = ConfigNotFoundError()
+    mock_find_acct.return_value = tmp_path
+    mock_load_acct.return_value = AccountConfig(
+        platform_url="https://wr-demo.example.com",
+        frontend_url="https://wr-demo.example.com",
+        account_token="tok",
+        machine_name="laptop-3",
+    )
+    mock_probe.return_value = "expired"
+    mock_children.return_value = []
+
+    result = runner.invoke(cli, ["status"])
+    assert result.exit_code == 0
+    assert "Account workspace" in result.output
+    assert "https://wr-demo.example.com" in result.output
+    assert "expired token" in result.output
+    assert "cinna login" in result.output
+
+
 @patch("cinna.bootstrap.httpx.post")
 def test_set_token_replaces_cli_token(mock_post, runner, tmp_path, monkeypatch, sample_config):
     """`cinna set-token` exchanges a fresh setup token and updates config +

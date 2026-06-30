@@ -217,12 +217,21 @@ main.py  (CLI commands — Click)
 
 ### Local Directory Layout
 
-After `cinna setup` (agent name normalized, e.g. "HR Manager Agent" → `hr-manager-agent/`):
+After `cinna setup` (agent name normalized, e.g. "HR Manager Agent" → `hr-manager-agent`),
+every new checkout uses the **Model-A nested layout** (`config.compute_agent_layout`):
+a clone-root dir holds the agent at `<subdir>/`, so the folder is already shaped like
+the agent's git repo whether or not Git Versioning is enabled (see "Git Versioning"
+below). `<subdir>` defaults to the agent slug. If the clone-root dir `<slug>/` is
+already taken by a **different** agent (two names normalizing to the same slug), the
+clone root falls back to `<slug>-<shorthash>/` (the agent id's short hash) so the two
+don't collide; re-running setup for the *same* agent still reports "already set up".
 
 ```
-hr-manager-agent/               (workspace root)
+hr-manager-agent/               (clone root — becomes the git working tree once linked)
+└── hr-manager-agent/           (workspace root == the repo's <subdir>/ node)
   .cinna/
-    config.json                 (agent config, CLI token, mutagen_version pin)
+    config.json                 (agent config, CLI token, mutagen_version pin, git{} layout)
+  cinna.agent.json              (backend-owned manifest; present once git-versioned)
   workspace/                    (continuously synced with remote /app/workspace)
     scripts/                    (bundle-owned — shipped in published revisions)
     docs/                       (bundle-owned)
@@ -250,10 +259,116 @@ Per-user global state (one copy, shared across every agent workspace):
 
 ```
 ~/.cinna/
-  agents.json                   (agent_id → {platform_url, cli_token, workspace_path}; 0600)
+  agents.json                   (agent_id → {platform_url, cli_token, workspace_path,
+                                 git?:{clone_path, subdir, repo_url, ref, …}}; 0600)
   mutagen-ssh/
     ssh                         (bash wrapper — execs cinna-sync-ssh; 0755)
 ```
+
+---
+
+## Git Versioning
+
+> Full feature docs: [git_versioning](features/git_versioning/git_versioning.md)
+> (business logic), [_tech](features/git_versioning/git_versioning_tech.md)
+> (implementation), [_acceptance](features/git_versioning/git_versioning_acceptance.md)
+> (live e2e scenarios). This section is the quick reference + backend contract.
+
+A git-versioned agent has **two independent sync layers** on the same folder:
+**Mutagen** keeps `workspace/` mirrored to the running container in near-real-time
+(it ignores `.git`), and **git** durably versions the same files against the agent's
+external remote. They meet only at the remote. All git ops are local and run with the
+developer's **own** git/SSH credentials — the platform's deploy key never reaches the
+CLI. (The agent-facing version of this guidance is shipped into each checkout as the
+on-demand `GIT_VERSIONING.md`, referenced conditionally from `CLAUDE.md`.)
+
+Because new checkouts already use the Model-A nested layout, enabling Git Versioning
+later needs no re-download or file move — just a link:
+
+```
+cinna git status      # is this agent git-versioned? linked? working-tree status
+cinna git link        # init the clone, sparse-checkout <subdir>, fetch + reset --mixed
+cinna git commit -m "…" [--push]   # stage the subdir + commit (honors .gitignore)
+cinna git push        # fast-forward only; rejected pushes tell you to pull --rebase
+cinna git pull        # rebase the remote in; Mutagen mirrors it into the running env
+cinna git log         # recent commits touching this agent's subdir
+cinna git checkout <ref> [--reload]   # restore a past version's workspace/ files into
+                       #   the tree (uncommitted) + flush to the running env via Mutagen
+                       #   — debug/rollback without committing
+cinna git unlink      # stop offering git helpers (keeps .git + history)
+```
+
+`cinna setup` / `cinna agent sync` auto-run `git link` when the agent is already
+git-versioned, so the developer gets a working tree from the first checkout.
+`--agent <ref>` targets a synced child from the account root (like `cinna sync`).
+
+Key behaviors: `link` uses `git reset --mixed` (never `--hard`) so the backend's
+in-flight changes survive as ordinary uncommitted edits; pushes are fast-forward-only
+and never auto-forced; a `sync_direction=pull` agent refuses local pushes; and a legacy
+*flat* workspace that becomes git-versioned is **not** auto-converted (link prints a
+disconnect + re-sync instruction).
+
+### Backend contract (cinna-core)
+
+The CLI consumes one discovery endpoint; the agent is derived from the per-agent
+token, so the path has **no `{agent_id}`**:
+
+```
+GET /api/v1/cli/git-coordinates   (Auth: per-agent CLI JWT)
+```
+
+Response (`CliGitCoordinates` — `client.get_git_coordinates`, modelled by
+`git_versioning.GitCoordinates`). `vcs_enabled=false` ⇒ all other fields null; a 404
+(older backend) is treated as `vcs_enabled=false`:
+
+```jsonc
+{
+  "vcs_enabled": true,                 // false ⇒ agent has no git source
+  "repo_url": "git@github.com:acme/agents.git",
+  "subdir": "hr-bot",                  // null ⇒ agent lives at the repo root
+  "ref": "main",
+  "sync_direction": "bidirectional",   // "pull" | "push" | "bidirectional"
+  "last_synced_commit": "a1b2c3…",     // SHA the backend last imported/pushed; may be null
+  "auth_hint": "ssh"                   // "ssh" | "https" — which local cred the DEV needs
+}
+```
+
+The remote repo stores each agent as the `schema_version`-2 bundle snapshot — this is
+the layout `link` reconciles against (`reset --mixed` brings the manifest + `.gitignore`
+from the ref; `workspace/**` stays the live copy):
+
+```
+<repo-root>/<subdir>/
+├── cinna.agent.json   # backend-owned manifest (prompts, SDK config, schedules,
+│                      #   plugin specs, required_credential_specs, content_hash…)
+├── workspace/         # the editable agent files (scripts/, docs/, …)
+└── .gitignore         # auto-generated; excludes credentials/, app-data/, logs/,
+                       #   databases/, uploads/, plugins-derived, __pycache__, *.pyc…
+```
+
+Contract rules the CLI honors:
+
+- **Two-writer, fast-forward-only.** Backend (deploy key) and developer (own creds)
+  push the same ref; both ff-only, no auto-merge. A rejected dev push ⇒ surface
+  `git pull --rebase`, never force.
+- **Backend-owned manifest.** `cinna.agent.json` is regenerated by the backend from
+  the DB on every backend push/connect — the CLI commits it as-is and never invents
+  values (it lacks the DB/env inputs). Editing prompt **files** under
+  `workspace/docs/` flows back into the DB via the platform's prompt-sync.
+- **Never committable** (the committed `.gitignore` + a local `.git/info/exclude`
+  enforce it; the CLI never `git add -f`): `credentials/`, `app-data/`, logs,
+  databases, `uploads/`, plugins-derived files, `__pycache__/`, `*.pyc`, plus the
+  CLI's own `.cinna/` (holds the token) and generated guides.
+- **Deploy key is host-side only** and never leaves the backend; `git-coordinates`
+  deliberately omits all key material — the dev authenticates with their own
+  git/SSH (`auth_hint` only advises which).
+- **Backend adoption of dev pushes.** After a dev push the backend is behind; it
+  adopts the change when the user clicks **Pull** on the agent's Git Versioning card
+  or via the configured GitOps webhook — the CLI cannot trigger it.
+
+The backend half lives in cinna-core — see its `docs/agents/agent_git_versioning/` <!-- nocheck: cross-repo (cinna-core) path -->
+plus `backend/app/api/routes/cli.py` (`CliGitCoordinates` / `_git_auth_hint`),
+`GitSourceService`, and `SSHKeyService`; that repo owns the authoritative spec.
 
 ---
 
@@ -460,6 +575,7 @@ When a CLI token expires (or is revoked) the normal remedy is `cinna set-token <
 | GET  | `/api/v1/cli/agents/{id}/building-context` | CLI JWT | Assembled building prompt |
 | POST | `/api/v1/cli/agents/{id}/knowledge/search` | CLI JWT | Knowledge base search (via MCP proxy) |
 | GET  | `/api/v1/cli/agents/{id}/sync-runtime` | CLI JWT | Required Mutagen version + hash (also used by `cinna list` / `cinna status` as a cheap token-validity probe) |
+| GET  | `/api/v1/cli/git-coordinates` | CLI JWT | Agent's git-versioning coordinates — **no `{id}`**, derived from the token (see "Git Versioning"). 404 on older backends ⇒ treated as not-versioned |
 | POST | `/api/v1/cli/agents/{id}/exec` | CLI JWT | Streaming SSE command execution |
 | WSS  | `/api/v1/cli/agents/{id}/sync-stream` | CLI JWT | Mutagen transport tunnel |
 | POST | `/api/v1/cli/account/login/start` | None | Begin a `cinna login` device-authorization request |
@@ -555,6 +671,21 @@ git push origin main && git push origin v0.1.5
 - **Multi-device presence UI**.
 - **Bundled Mutagen daemon** — stay with a user-installed daemon.
 - **Telemetry pipe** to the backend.
+
+---
+
+## Feature Documentation
+
+Per-feature docs live under `docs/features/{feature}/` in up to three layers:
+`{feature}.md` (business logic / reasoning), `{feature}_tech.md` (implementation +
+file refs), `{feature}_acceptance.md` (live e2e scenarios a testing agent runs
+against a real environment). Author new ones with the `/cinna-cli.feature.doc`
+command (`.claude/commands/cinna-cli.feature.doc.md`) and validate references with
+`scripts/check_docs_references.py`.
+
+| Feature | Docs | Summary |
+|---------|------|---------|
+| Git Versioning (`cinna git`) | [business](features/git_versioning/git_versioning.md) · [tech](features/git_versioning/git_versioning_tech.md) · [acceptance](features/git_versioning/git_versioning_acceptance.md) | Version an agent's workspace with git against its external remote (commit/push/pull/rollback) alongside live Mutagen sync. |
 
 ---
 

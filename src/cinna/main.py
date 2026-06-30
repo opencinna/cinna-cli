@@ -1288,8 +1288,31 @@ def chat_cmd(
 
 @cli.command()
 def status():
-    """Show agent info and current sync state."""
-    root = find_workspace_root()
+    """Show agent info and current sync state.
+
+    Works in a per-agent workspace (sync state + token) and in an *account*
+    workspace (``.cinna/account.json`` from ``cinna account setup`` / ``cinna
+    login``), where it shows the account session and token validity instead of
+    failing — the same view as ``cinna account status``.
+    """
+    from cinna.errors import ConfigNotFoundError
+
+    try:
+        root = find_workspace_root()
+    except ConfigNotFoundError:
+        # Not a per-agent workspace. The folder may still be an account
+        # workspace (these only carry account.json, not config.json); show the
+        # account session there rather than the generic "not a workspace" error.
+        from cinna.account import find_account_root, run_account_status
+        from cinna.errors import AccountConfigNotFoundError
+
+        try:
+            find_account_root()
+        except AccountConfigNotFoundError:
+            raise ConfigNotFoundError() from None
+        run_account_status()
+        return
+
     config = load_config(root)
 
     from rich.table import Table
@@ -1915,6 +1938,238 @@ def sync_resolve(prefer: str, agent_ref: str | None):
         )
 
 
+# ─── git versioning ────────────────────────────────────────────────────────
+
+
+def _git_agent_opt(f):
+    """Shared ``--agent`` option for the git subcommands (mirrors sync)."""
+    return click.option(
+        "--agent",
+        "agent_ref",
+        default=None,
+        help="Target a synced agent from the account root",
+    )(f)
+
+
+@cli.group()
+def git():
+    """Version the agent's workspace with git against its external remote.
+
+    Thin, fail-loud wrappers over real git that run with YOUR own git/SSH
+    credentials (the platform's deploy key is never used locally). The CLI's job
+    is discovering the agent's git coordinates, getting the working-tree layout
+    and Mutagen wiring right, and surfacing fast-forward-only rejections clearly
+    — not replacing git. See 'cinna git link' to get started.
+    """
+
+
+@git.command(name="link")
+@_git_agent_opt
+def git_link(agent_ref: str | None):
+    """Turn this agent's folder into a git working tree against its remote.
+
+    Fetches the agent's git coordinates, then (re-)initializes the clone,
+    sparse-checks-out the agent's subdir, fetches the remote ref with your
+    credentials, and points the index at it WITHOUT clobbering the live files —
+    so the backend's in-flight changes show up as ordinary uncommitted edits
+    ready to review and commit.
+    """
+    from cinna import git_versioning
+
+    root, config = _resolve_sync_target(agent_ref)
+    with PlatformClient(config) as client:
+        coords = git_versioning.fetch_coordinates(client)
+        if not coords.vcs_enabled:
+            raise click.ClickException(
+                "This agent is not git-versioned. Enable Git Versioning in the "
+                "agent's settings on the platform, then re-run 'cinna git link'."
+            )
+        with console.spinner("Linking git working tree…"):
+            result = git_versioning.link(config, client, root, coords)
+
+    console.status(
+        f"Linked {config.agent_name} to {coords.repo_url} (branch {result.ref})."
+    )
+    console.console.print(f"  working tree: {result.clone}")
+    if result.relayout_moved:
+        console.warn(
+            "The agent folder was moved to match the backend subdir. If a dev "
+            "session was running, restart it with 'cinna dev' from the new path."
+        )
+    console.console.print(
+        "  cinna git status / commit -m / push / pull   # standard git, fail-loud"
+    )
+
+
+@git.command(name="status")
+@_git_agent_opt
+def git_status(agent_ref: str | None):
+    """Show the agent's git coordinates and working-tree status."""
+    from cinna import git_versioning
+
+    root, config = _resolve_sync_target(agent_ref)
+
+    if config.git is None or not config.git.vcs_enabled:
+        # Surface live backend state so the user knows whether to link.
+        try:
+            with PlatformClient(config) as client:
+                coords = git_versioning.fetch_coordinates(client)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("coordinates fetch failed: %s", exc)
+            coords = None
+        if coords is not None and coords.vcs_enabled:
+            console.status(
+                f"This agent is git-versioned ({coords.repo_url}, branch "
+                f"{coords.effective_ref}) but not linked locally."
+            )
+            console.console.print("  Run 'cinna git link' to set up the working tree.")
+        else:
+            console.status("This agent is not git-versioned (Mutagen-only).")
+        return
+
+    g = config.git
+    console.status(f"Linked: {g.repo_url} (branch {g.ref})")
+    console.console.print(f"  working tree: {git_versioning.clone_root(config, root)}")
+    console.console.print(f"  subdir:       {g.subdir or '(repo root)'}")
+    console.console.print(f"  direction:    {g.sync_direction or 'bidirectional'}")
+    text = git_versioning.status(config, root)
+    console.console.print()
+    console.console.print(text or "  (working tree clean)")
+
+
+@git.command(name="commit")
+@click.option("-m", "--message", required=True, help="Commit message")
+@click.option("--push", is_flag=True, help="Push to the remote after committing")
+@_git_agent_opt
+def git_commit(message: str, push: bool, agent_ref: str | None):
+    """Stage the agent's subdir and commit (honors the committed .gitignore)."""
+    from cinna import git_versioning
+
+    root, config = _resolve_sync_target(agent_ref)
+    changed = git_versioning.commit(config, root, message)
+    if not changed:
+        console.status("Nothing to commit — the working tree is clean.")
+        return
+    console.status("Committed.")
+    if push:
+        with console.spinner("Pushing to remote…"):
+            git_versioning.push(config, root)
+        _print_push_followup()
+
+
+@git.command(name="push")
+@_git_agent_opt
+def git_push(agent_ref: str | None):
+    """Push the agent's branch to the remote (fast-forward only)."""
+    from cinna import git_versioning
+
+    root, config = _resolve_sync_target(agent_ref)
+    with console.spinner("Pushing to remote…"):
+        git_versioning.push(config, root)
+    _print_push_followup()
+
+
+@git.command(name="pull")
+@_git_agent_opt
+def git_pull(agent_ref: str | None):
+    """Rebase-pull the remote into the local working tree.
+
+    Mutagen then mirrors the updated workspace/ into the running container, so
+    the live env picks up the change. (The backend's own DB-side state — prompts,
+    schedules — only updates when the backend pulls.)
+    """
+    from cinna import git_versioning
+
+    root, config = _resolve_sync_target(agent_ref)
+    with console.spinner("Pulling from remote…"):
+        git_versioning.pull(config, root)
+    console.status("Pulled. Mutagen will mirror the update into the running env.")
+
+
+@git.command(name="log")
+@_git_agent_opt
+def git_log(agent_ref: str | None):
+    """Show recent commits touching this agent's subdir."""
+    from cinna import git_versioning
+
+    root, config = _resolve_sync_target(agent_ref)
+    text = git_versioning.log_oneline(config, root)
+    console.console.print(text or "No commits yet.")
+
+
+@git.command(name="checkout")
+@click.argument("ref")
+@click.option(
+    "--reload/--no-reload",
+    default=True,
+    help="Flush the restored files to the running env via Mutagen (default on).",
+)
+@click.option(
+    "--manifest",
+    is_flag=True,
+    help="Also restore cinna.agent.json (note: not Mutagen-synced; backend reload still needed).",
+)
+@_git_agent_opt
+def git_checkout(ref: str, reload: bool, manifest: bool, agent_ref: str | None):
+    """Restore a past version's workspace files into the tree (no commit).
+
+    Lays an earlier commit's ``workspace/**`` back into the working tree as
+    uncommitted changes and (with ``--reload``) flushes them to the running
+    container via Mutagen — so the live agent runs that version's prompts and
+    scripts for debugging or rollback, without committing anything. Undo with
+    'cinna git checkout <current-ref>' or 'cinna sync pull --force'.
+    """
+    from cinna import git_versioning
+
+    root, config = _resolve_sync_target(agent_ref)
+    restored = git_versioning.checkout_version(
+        config, root, ref, include_manifest=manifest
+    )
+    if not restored:
+        console.status(f"Nothing restored from {ref}.")
+        return
+    console.status(f"Restored {', '.join(restored)} from {ref} (uncommitted).")
+
+    if reload:
+        with console.spinner("Flushing restored files to the running env…"):
+            sync_session.ensure_session(config, root)
+            st = sync_session.flush(config)
+        console.status(f"Live env updated ({st.state}).")
+        if st.conflict_count:
+            console.warn(
+                f"{st.conflict_count} conflict(s) — resolve with 'cinna sync resolve'."
+            )
+    if manifest:
+        console.warn(
+            "cinna.agent.json was restored locally but Mutagen does not sync it. "
+            "To reload the manifest into the agent, use the platform UI 'Pull' on "
+            "the agent's Git Versioning card (or the configured GitOps webhook)."
+        )
+
+
+@git.command(name="unlink")
+@_git_agent_opt
+def git_unlink(agent_ref: str | None):
+    """Stop offering git helpers for this agent (keeps .git and history)."""
+    from cinna import git_versioning
+
+    root, config = _resolve_sync_target(agent_ref)
+    git_versioning.unlink(config, root)
+    console.status(
+        "Git helpers disabled for this agent. Your .git/ and history are kept; "
+        "re-run 'cinna git link' to re-enable."
+    )
+
+
+def _print_push_followup() -> None:
+    console.status("Pushed.")
+    console.console.print(
+        "  The running agent isn't updated yet — click 'Pull' on the agent's GIT "
+        "Versioning card in the web UI, or rely on the configured GitOps webhook, "
+        "to apply it."
+    )
+
+
 # ─── disconnect ────────────────────────────────────────────────────────────
 
 
@@ -1959,11 +2214,28 @@ def disconnect_all():
     cwd = Path.cwd()
     agents: list[tuple[Path, object | None]] = []
     for child in sorted(cwd.iterdir()):
-        if child.is_dir() and (child / ".cinna" / "config.json").is_file():
-            try:
-                agents.append((child, load_config(child)))
-            except Exception:
-                agents.append((child, None))
+        if not child.is_dir():
+            continue
+        # The agent's config lives either directly in this dir (legacy flat) or
+        # one level down in the Model-A nested layout (<clone>/<subdir>/.cinna/).
+        cfg_dir = None
+        if (child / ".cinna" / "config.json").is_file():
+            cfg_dir = child
+        else:
+            for grandchild in sorted(child.iterdir()):
+                if grandchild.is_dir() and (
+                    grandchild / ".cinna" / "config.json"
+                ).is_file():
+                    cfg_dir = grandchild
+                    break
+        if cfg_dir is None:
+            continue
+        # Delete the top-level dir (clone root for nested agents) on cleanup, but
+        # load the config from wherever .cinna/ actually is.
+        try:
+            agents.append((child, load_config(cfg_dir)))
+        except Exception:
+            agents.append((child, None))
 
     if not agents:
         console.status("No cinna workspaces found in current directory.")

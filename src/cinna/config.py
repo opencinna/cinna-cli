@@ -28,6 +28,35 @@ class KnowledgeSource:
 
 
 @dataclass
+class GitLayout:
+    """Where the agent sits inside a (possibly future) git working tree.
+
+    Recorded for *every* new checkout — not only git-versioned ones — so the
+    local folder is laid out exactly the way the remote repo expects (Model A:
+    ``<clone_path>/<subdir>/workspace/``). Enabling VCS later then needs only a
+    ``git init`` + a coordinates update, never a re-download or a file move.
+
+    - ``clone_path`` — absolute path to the git working-tree root (the dir that
+      holds, or will hold, ``.git``). Equals the agent dir's parent when
+      ``subdir`` is set; equals the agent dir itself for a repo-root agent.
+    - ``subdir`` — the agent's path within the repo (the agent dir's name).
+      ``None`` ⇒ repo-root agent (``clone_path`` == agent dir).
+    - ``vcs_enabled`` — flips True once ``cinna git link`` has run and the
+      backend reports the agent is git-versioned. The remaining fields
+      (``repo_url`` … ``last_synced_commit``) are populated then.
+    """
+
+    clone_path: str
+    subdir: str | None = None
+    vcs_enabled: bool = False
+    repo_url: str | None = None
+    ref: str | None = None
+    sync_direction: str | None = None
+    auth_hint: str | None = None
+    last_synced_commit: str | None = None
+
+
+@dataclass
 class CinnaConfig:
     platform_url: str
     cli_token: str
@@ -48,6 +77,9 @@ class CinnaConfig:
     mutagen_version: str | None = None
     last_sync_runtime_check_at: str | None = None
     last_sync_connected_at: str | None = None
+    # Git working-tree layout for this agent. Present for every checkout made by
+    # a CLI new enough to write it; ``None`` for legacy flat workspaces.
+    git: GitLayout | None = None
 
 
 def find_workspace_root(start: Path | None = None) -> Path:
@@ -75,10 +107,17 @@ def load_config(workspace_root: Path | None = None) -> CinnaConfig:
         raise ConfigNotFoundError()
     data = json.loads(config_path.read_text())
     ks_list = [KnowledgeSource(**ks) for ks in data.pop("knowledge_sources", [])]
+    git_raw = data.pop("git", None)
+    git = None
+    if isinstance(git_raw, dict):
+        git = GitLayout(
+            **{k: v for k, v in git_raw.items() if k in GitLayout.__dataclass_fields__}
+        )
     # Tolerate legacy fields (e.g. container_name from pre-live-sync configs).
-    known_fields = {f for f in CinnaConfig.__dataclass_fields__ if f != "knowledge_sources"}
+    nested = {"knowledge_sources", "git"}
+    known_fields = {f for f in CinnaConfig.__dataclass_fields__ if f not in nested}
     data = {k: v for k, v in data.items() if k in known_fields}
-    return CinnaConfig(**data, knowledge_sources=ks_list)
+    return CinnaConfig(**data, knowledge_sources=ks_list, git=git)
 
 
 def save_config(config: CinnaConfig, workspace_root: Path) -> None:
@@ -119,6 +158,13 @@ def build_dir(workspace_root: Path) -> Path:
 
 _registry_lock = threading.Lock()
 
+# Sentinel for ``upsert_agent_registry(git=...)``: distinguishes "caller didn't
+# touch git" (preserve whatever block is already stored) from an explicit
+# ``None`` (clear it, e.g. ``cinna git unlink``). Without this, every sync
+# operation — which re-upserts credentials but knows nothing about git — would
+# silently wipe a linked agent's git block.
+_PRESERVE_GIT = object()
+
 
 def agents_registry_path() -> Path:
     return GLOBAL_STATE_DIR / AGENTS_REGISTRY_FILE
@@ -154,12 +200,25 @@ def upsert_agent_registry(
     cli_token: str,
     workspace_path: Path,
     frontend_url: str | None = None,
+    git=_PRESERVE_GIT,
 ) -> None:
     """Register or refresh an agent's credentials in the global registry.
 
     ``frontend_url`` is optional for backwards compatibility with callers
     written before the field existed; ``cinna list`` will fall back to
     ``platform_url`` when it's missing.
+
+    ``workspace_path`` stays the agent dir (the folder holding ``.cinna/``) so
+    ``cinna doctor`` / ``cinna list`` keep resolving configs the same way.
+
+    ``git`` carries the working-tree coordinates (``clone_path``, ``subdir``,
+    ``repo_url``, ``ref``) when the agent is git-versioned. Its three modes:
+
+    - **omitted** (default) → preserve any git block already stored. Sync
+      operations re-upsert credentials without knowing about git; this stops
+      them wiping a linked agent's coordinates.
+    - ``dict`` → set/replace the git block (``cinna git link``).
+    - ``None`` → explicitly clear it (``cinna git unlink``).
     """
     with _registry_lock:
         data = _read_registry()
@@ -170,6 +229,13 @@ def upsert_agent_registry(
         }
         if frontend_url:
             entry["frontend_url"] = frontend_url
+        if git is _PRESERVE_GIT:
+            prev = data.get(agent_id)
+            if isinstance(prev, dict) and prev.get("git"):
+                entry["git"] = prev["git"]
+        elif git:
+            entry["git"] = git
+        # git is None → omit the block (explicit clear).
         data[agent_id] = entry
         _write_registry(data)
 
@@ -196,3 +262,57 @@ def list_agent_registry() -> list[dict]:
     """
     registry = _read_registry()
     return [{"agent_id": aid, **entry} for aid, entry in sorted(registry.items())]
+
+
+# ── Model-A on-disk layout ───────────────────────────────────────────────
+#
+# Every new checkout is laid out the way the agent's remote git repo expects,
+# whether or not VCS is enabled yet (Model A; see the "Git Versioning" section
+# of docs/README.md):
+#
+#     <parent>/<slug>/            ← clone root (git working tree once linked)
+#     └── <subdir>/               ← the agent dir == workspace_root
+#         ├── .cinna/config.json
+#         ├── cinna.agent.json    ← backend-owned manifest (when present)
+#         ├── .gitignore
+#         └── workspace/          ← Mutagen alpha endpoint
+#
+# ``subdir`` defaults to the agent slug so the local path matches the backend's
+# canonical ``<subdir>`` in the common case; enabling VCS is then a pure config
+# update with no file movement.
+
+
+def compute_agent_layout(
+    parent_dir: Path, slug: str, subdir: str | None = None
+) -> tuple[Path, Path, str]:
+    """Return ``(clone_root, workspace_root, subdir)`` for a nested checkout.
+
+    ``parent_dir`` is where the clone root is created (the cwd for ``cinna
+    setup``; ``agents/`` for ``cinna agent sync``). ``subdir`` defaults to
+    ``slug`` — pass the backend's real subdir when coordinates are already
+    known so the layout matches the remote tree exactly.
+    """
+    subdir = subdir or slug
+    clone_root = parent_dir / slug
+    workspace_root = clone_root / subdir
+    return clone_root, workspace_root, subdir
+
+
+def clone_root(config: CinnaConfig, workspace_root: Path) -> Path:
+    """Resolve the git working-tree root for an agent.
+
+    Reads ``config.git.clone_path`` when present (the recorded clone root);
+    otherwise falls back to ``workspace_root`` itself (legacy flat workspace =
+    a repo-root agent).
+    """
+    if config.git and config.git.clone_path:
+        return Path(config.git.clone_path).expanduser()
+    return workspace_root
+
+
+def git_subdir(config: CinnaConfig, workspace_root: Path) -> str | None:
+    """The agent's subdir within the repo, or None for a repo-root agent."""
+    if config.git is not None:
+        return config.git.subdir
+    # Legacy flat workspace: infer repo-root when no git layout was recorded.
+    return None

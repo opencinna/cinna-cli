@@ -6,6 +6,8 @@ You are working in the **local development copy** of a Cinna Core agent. The wor
 
 **Read `BUILDING_AGENT.md` first** for the platform-assembled building-mode system prompt — agent role, capabilities, scripts inventory, credentials map, knowledge topics. This file (`CLAUDE.md`) is the local-development companion: how to build, run, schedule, and ship work in this workspace.
 
+{git_versioning_section}
+
 ---
 
 ## 1. Mental model

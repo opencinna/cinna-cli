@@ -12,6 +12,8 @@ import click
 import httpx
 
 from cinna.config import (
+    CONFIG_DIR,
+    CONFIG_FILE,
     CinnaConfig,
     KnowledgeSource,
     find_workspace_root,
@@ -152,9 +154,8 @@ def run_set_token(setup_input: str, machine_name: str) -> None:
     console.status(f"Token refreshed for agent: {config.agent_name}")
 
 
-def write_workspace_from_payload(payload: dict, workspace_root: Path) -> CinnaConfig:
-    """Write `.cinna/config.json` + the global registry entry from an exchange
-    payload.
+def config_from_payload(payload: dict) -> CinnaConfig:
+    """Build an in-memory ``CinnaConfig`` from an exchange payload (no IO).
 
     ``payload`` is the per-agent bootstrap shape returned by
     ``POST /api/cli-setup/{token}`` (and mirrored by the account mint flow):
@@ -162,7 +163,7 @@ def write_workspace_from_payload(payload: dict, workspace_root: Path) -> CinnaCo
     ``frontend_url`` / ``cli_token_id`` / ``knowledge_sources``.
     """
     agent_info = payload["agent"]
-    config = CinnaConfig(
+    return CinnaConfig(
         platform_url=payload["platform_url"],
         cli_token=payload["cli_token"],
         agent_id=agent_info["id"],
@@ -175,6 +176,16 @@ def write_workspace_from_payload(payload: dict, workspace_root: Path) -> CinnaCo
             KnowledgeSource(**ks) for ks in payload.get("knowledge_sources", [])
         ],
     )
+
+
+def persist_config(config: CinnaConfig, workspace_root: Path) -> None:
+    """Write ``.cinna/config.json`` + the global registry entry for ``config``.
+
+    Carries the git layout block into the registry when present so tooling can
+    locate the clone without re-reading the per-agent config.
+    """
+    from dataclasses import asdict
+
     save_config(config, workspace_root)
     upsert_agent_registry(
         config.agent_id,
@@ -182,8 +193,99 @@ def write_workspace_from_payload(payload: dict, workspace_root: Path) -> CinnaCo
         config.cli_token,
         workspace_root,
         frontend_url=config.frontend_url,
+        git=asdict(config.git) if config.git else None,
     )
+
+
+def write_workspace_from_payload(payload: dict, workspace_root: Path) -> CinnaConfig:
+    """Build the config from ``payload`` and persist it to ``workspace_root``."""
+    config = config_from_payload(payload)
+    persist_config(config, workspace_root)
     return config
+
+
+def short_agent_hash(agent_id: str) -> str:
+    """Stable short form of an agent id used to disambiguate clone-root names.
+
+    Same form as the Mutagen session label (``agent_id`` with dashes stripped,
+    first 8 chars) so a given agent always maps to the same suffix.
+    """
+    return agent_id.replace("-", "")[:8] or "agent"
+
+
+def workspace_agent_id_at(clone_root: Path) -> str | None:
+    """Return the agent_id of a cinna workspace already living at ``clone_root``.
+
+    Looks for a config directly in ``clone_root`` (legacy flat layout) or one
+    level down (Model-A nested). Returns ``None`` when no cinna workspace is
+    present — an empty or unrelated directory does not count as taken.
+    """
+    candidates: list[Path] = []
+    if (clone_root / CONFIG_DIR / CONFIG_FILE).is_file():
+        candidates.append(clone_root)
+    elif clone_root.is_dir():
+        for child in sorted(clone_root.iterdir()):
+            if child.is_dir() and (child / CONFIG_DIR / CONFIG_FILE).is_file():
+                candidates.append(child)
+    for c in candidates:
+        try:
+            return load_config(c).agent_id
+        except Exception:
+            continue
+    return None
+
+
+def resolve_clone_slug(parent_dir: Path, slug: str, agent_id: str) -> str:
+    """Pick a clone-root dir name, disambiguating slug collisions.
+
+    Returns ``slug`` when ``<parent>/<slug>/`` is free or already belongs to this
+    same agent (so the caller's existence check can report "already set up").
+    When it is taken by a *different* agent, appends the agent's short hash —
+    ``<slug>-<shorthash>`` — so two agents whose names normalize to the same slug
+    get distinct folders.
+    """
+    existing = workspace_agent_id_at(parent_dir / slug)
+    if existing is None or existing == agent_id:
+        return slug
+    return f"{slug}-{short_agent_hash(agent_id)}"
+
+
+def prepare_git_layout(
+    config: CinnaConfig, client: PlatformClient, parent_dir: Path
+) -> tuple[Path, Path, "object | None"]:
+    """Decide the Model-A nested layout for a fresh checkout.
+
+    Returns ``(clone_root, workspace_root, coords)`` and mutates ``config.git``
+    in place to record the layout (``vcs_enabled=False`` until linked). The
+    backend's real ``subdir`` is used when the agent is already git-versioned
+    (so the path matches the remote tree and ``cinna git link`` needs no move);
+    otherwise the agent slug is the default subdir. When ``<parent>/<slug>/`` is
+    already taken by a different agent, the clone-root name gets the agent's
+    short-hash suffix so the two don't collide. Coordinates are fetched
+    best-effort — an older backend or a network hiccup falls back to the slug.
+    """
+    from cinna.config import GitLayout, compute_agent_layout
+    from cinna import git_versioning
+
+    slug = normalize_agent_dir_name(config.agent_name)
+    coords = None
+    try:
+        coords = git_versioning.fetch_coordinates(client)
+    except Exception as exc:  # noqa: BLE001 — best-effort discovery
+        logger.warning("git coordinates fetch failed: %s", exc)
+
+    subdir = None
+    if coords is not None and coords.vcs_enabled and coords.subdir is not None:
+        subdir = coords.subdir
+
+    clone_slug = resolve_clone_slug(parent_dir, slug, config.agent_id)
+    clone_root, workspace_root, subdir = compute_agent_layout(
+        parent_dir, clone_slug, subdir
+    )
+    config.git = GitLayout(
+        clone_path=str(clone_root), subdir=subdir, vcs_enabled=False
+    )
+    return clone_root, workspace_root, coords
 
 
 def provision_workspace(
@@ -244,6 +346,7 @@ def provision_workspace(
 GENERATED_WORKSPACE_FILES = [
     "CLAUDE.md",
     "CHAT_TESTING.md",
+    "GIT_VERSIONING.md",
     "BUILDING_AGENT.md",
     ".mcp.json",
     "opencode.json",
@@ -273,6 +376,34 @@ def remove_workspace_artifacts(workspace_root: Path) -> None:
             p.unlink()
 
 
+def _maybe_autolink(
+    config: CinnaConfig,
+    client: PlatformClient,
+    workspace_root: Path,
+    coords: "object | None",
+) -> Path:
+    """Run ``cinna git link`` automatically when the agent is git-versioned.
+
+    Returns the (possibly relayout-moved) workspace_root. Link failures are
+    surfaced as warnings, never fatal — the agent still works Mutagen-only and
+    the dev can retry with ``cinna git link``.
+    """
+    from cinna import git_versioning
+
+    if coords is None or not getattr(coords, "vcs_enabled", False):
+        return workspace_root
+    try:
+        result = git_versioning.link(config, client, workspace_root, coords)
+        console.status(
+            f"Git-versioned: linked to {coords.repo_url} "
+            f"(branch {result.ref}). Use 'cinna git commit/push/pull'."
+        )
+        return result.workspace_root
+    except click.ClickException as exc:
+        console.warn(f"Git link skipped: {exc.format_message()}")
+        return workspace_root
+
+
 def run_setup(setup_input: str, machine_name: str) -> None:
     """Full setup flow — called by `cinna setup <token_or_url>`."""
     total = 5
@@ -284,22 +415,29 @@ def run_setup(setup_input: str, machine_name: str) -> None:
     payload = _exchange_setup_token(platform_url, token, machine_name)
     agent_info = payload["agent"]
     agent_name = agent_info["name"]
-    dir_name = normalize_agent_dir_name(agent_name)
-    logger.info("Agent: %s (dir: %s)", agent_name, dir_name)
+    logger.info("Agent: %s", agent_name)
 
-    workspace_root = Path.cwd() / dir_name
-    if (workspace_root / ".cinna" / "config.json").exists():
-        raise click.ClickException(
-            f"Directory '{dir_name}/' already contains a cinna workspace.\n"
-            f"Remove it first with 'cinna disconnect' or delete the directory."
-        )
-    workspace_root.mkdir(exist_ok=True)
-
-    config = write_workspace_from_payload(payload, workspace_root)
-    console.status(f"Authenticated as agent: {agent_name}")
-
+    config = config_from_payload(payload)
     client = PlatformClient(config)
     try:
+        # Decide the Model-A nested layout (clone-root / subdir) and learn
+        # whether the agent is already git-versioned.
+        clone_root, workspace_root, coords = prepare_git_layout(
+            config, client, Path.cwd()
+        )
+        # Refuse if either the nested target or a legacy flat workspace at the
+        # clone-root path already holds a cinna config.
+        for existing in (workspace_root, clone_root):
+            if (existing / ".cinna" / "config.json").exists():
+                rel = existing.relative_to(Path.cwd())
+                raise click.ClickException(
+                    f"Directory '{rel}/' already contains a cinna workspace.\n"
+                    f"Remove it first with 'cinna disconnect' or delete the directory."
+                )
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        persist_config(config, workspace_root)
+        console.status(f"Authenticated as agent: {agent_name}")
+
         # Steps 2-4: Mutagen + clone + context files
         provision_workspace(
             client,
@@ -309,6 +447,11 @@ def run_setup(setup_input: str, machine_name: str) -> None:
             total=total,
             first_step=2,
         )
+
+        # If the agent is already git-versioned, link now so the developer gets
+        # a real working tree from the first checkout (no separate `git link`).
+        workspace_root = _maybe_autolink(config, client, workspace_root, coords)
+        dir_name = str(workspace_root.relative_to(Path.cwd()))
 
         # Step 5: Start continuous sync (foreground — blocks until Ctrl-C)
         console.step(5, total, "Starting continuous sync...")

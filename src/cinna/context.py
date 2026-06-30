@@ -123,9 +123,11 @@ def regenerate_claude_md(config: CinnaConfig, workspace_root: Path) -> None:
         .replace("{agent_name}", config.agent_name)
         .replace("{timestamp}", timestamp)
         .replace("{mcp_tools_section}", mcp_tools)
+        .replace("{git_versioning_section}", _git_versioning_reference(config))
     )
     (workspace_root / "CLAUDE.md").write_text(claude_md)
     write_chat_testing_guide(workspace_root)
+    write_git_versioning_guide(workspace_root)
 
 
 def write_chat_testing_guide(workspace_root: Path) -> None:
@@ -138,6 +140,43 @@ def write_chat_testing_guide(workspace_root: Path) -> None:
     upgrade ships the latest guidance.
     """
     (workspace_root / "CHAT_TESTING.md").write_text(_load_template("CHAT_TESTING.md"))
+
+
+def write_git_versioning_guide(workspace_root: Path) -> None:
+    """Write the static ``GIT_VERSIONING.md`` guide next to ``CLAUDE.md``.
+
+    A bundled, on-demand guide referenced conditionally from ``CLAUDE.md`` (see
+    ``_git_versioning_reference``): the coding agent loads it only when the agent
+    is git-versioned or the user brings up git/commits/rollback, keeping the
+    default context lean. Always written (even for non-versioned agents) so the
+    reference resolves and the guide is on hand the moment versioning is enabled.
+    Overwritten on every regenerate so a CLI upgrade ships the latest guidance.
+    """
+    (workspace_root / "GIT_VERSIONING.md").write_text(_load_template("GIT_VERSIONING.md"))
+
+
+def _git_versioning_reference(config: CinnaConfig) -> str:
+    """Render the conditional ``GIT_VERSIONING.md`` pointer for ``CLAUDE.md``.
+
+    Adapts to whether this agent is currently git-versioned so the agent knows
+    when the guide is mandatory reading vs. read-only-if-the-user-asks. Kept to a
+    short callout — the full guidance lives in the on-demand guide file.
+    """
+    if config.git is not None and config.git.vcs_enabled:
+        return (
+            "> **Git versioning is ENABLED for this agent** — its `workspace/` is "
+            "version-controlled against an external git remote. Before any `cinna "
+            "git` command (commit / push / pull / checkout / rollback) or before "
+            "committing edits, read [`./GIT_VERSIONING.md`](./GIT_VERSIONING.md) — "
+            "it covers the layout, the fast-forward-only two-writer model, and the "
+            "debug checkout/reload workflow. Skip it for unrelated build/test work."
+        )
+    return (
+        "> **Git versioning** (optional): this agent is **not** git-versioned right "
+        "now. If the user asks to version it with git, enable Git Versioning, or "
+        "mention commits / push / pull / rollback, read "
+        "[`./GIT_VERSIONING.md`](./GIT_VERSIONING.md) first. Otherwise ignore it."
+    )
 
 
 # Relative (workspace-root-anchored) path to the per-agent config. Written into
@@ -223,6 +262,7 @@ def generate_gitignore(workspace_root: Path) -> None:
 .claude/settings.local.json
 CLAUDE.md
 CHAT_TESTING.md
+GIT_VERSIONING.md
 BUILDING_AGENT.md
 WEBAPP_BUILDING.md
 COMPLEX_AGENT_DESIGN.md
