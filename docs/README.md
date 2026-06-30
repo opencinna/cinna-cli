@@ -267,6 +267,33 @@ Per-user global state (one copy, shared across every agent workspace):
 
 ---
 
+## Feature Registry
+
+Each feature is documented under `docs/features/{feature}/` as a layered set:
+`{feature}.md` (business logic / reasoning), `{feature}_tech.md` (implementation +
+file refs), and `{feature}_acceptance.md` (live e2e scenarios). See
+[cinna-cli.feature.doc](../.claude/commands/cinna-cli.feature.doc.md) for the
+authoring convention.
+
+| Feature | Command surface | Docs |
+|---|---|---|
+| **Bootstrap & onboarding** | `cinna setup` / `set-token` / `login` / `list` / `status` / `disconnect[-all]` / `completion` / `dev` / `redev` | [business](features/bootstrap_onboarding/bootstrap_onboarding.md) · [tech](features/bootstrap_onboarding/bootstrap_onboarding_tech.md) · [acceptance](features/bootstrap_onboarding/bootstrap_onboarding_acceptance.md) |
+| **Account workspace** | `cinna account` (setup, agents, status, refresh-context, user-workspace, credentials) | [business](features/account_workspace/account_workspace.md) · [tech](features/account_workspace/account_workspace_tech.md) · [acceptance](features/account_workspace/account_workspace_acceptance.md) |
+| **Agent management** | `cinna agent` (sync, unsync, create, restart-env, show, status) | [business](features/agent_management/agent_management.md) · [tech](features/agent_management/agent_management_tech.md) · [acceptance](features/agent_management/agent_management_acceptance.md) |
+| **Agent schedules** | `cinna agent schedule` (list, generate, create, update, run, logs, delete) | [business](features/agent_schedules/agent_schedules.md) · [tech](features/agent_schedules/agent_schedules_tech.md) · [acceptance](features/agent_schedules/agent_schedules_acceptance.md) |
+| **Live sync** | `cinna sync` (status, conflicts, push, pull, resolve) + Mutagen transport | [business](features/live_sync/live_sync.md) · [tech](features/live_sync/live_sync_tech.md) · [acceptance](features/live_sync/live_sync_acceptance.md) |
+| **Remote exec** | `cinna exec` | [business](features/remote_exec/remote_exec.md) · [tech](features/remote_exec/remote_exec_tech.md) · [acceptance](features/remote_exec/remote_exec_acceptance.md) |
+| **Remote chat** | `cinna chat` | [business](features/remote_chat/remote_chat.md) · [tech](features/remote_chat/remote_chat_tech.md) · [acceptance](features/remote_chat/remote_chat_acceptance.md) |
+| **Agent API** | `cinna agent-api` (enable, refresh, spec, call) · `cinna api` · `cinna connect agent-api` | [business](features/agent_api/agent_api.md) · [tech](features/agent_api/agent_api_tech.md) · [acceptance](features/agent_api/agent_api_acceptance.md) |
+| **MCP integration** | `cinna connect mcp` · `cinna mcp-proxy` (knowledge stdio server) | [business](features/mcp_integration/mcp_integration.md) · [tech](features/mcp_integration/mcp_integration_tech.md) · [acceptance](features/mcp_integration/mcp_integration_acceptance.md) |
+| **Git versioning** | `cinna git` (link, status, commit, push, pull, log, checkout, unlink) | [business](features/git_versioning/git_versioning.md) · [tech](features/git_versioning/git_versioning_tech.md) · [acceptance](features/git_versioning/git_versioning_acceptance.md) |
+
+The sections below (Git Versioning, Sync Transport, Remote Exec, Remote Chat,
+Bootstrap Flow) remain as in-README quick references and backend contracts; the
+feature folders above are the authoritative deep dives.
+
+---
+
 ## Git Versioning
 
 > Full feature docs: [git_versioning](features/git_versioning/git_versioning.md)

@@ -158,7 +158,7 @@ running container /app/workspace ◄──────────────�
 
 ## Integration points
 
-- **Live Sync** (`../live_sync/live_sync.md`, not yet written) <!-- nocheck: planned doc --> —
+- **Live Sync** (`../live_sync/live_sync.md`) —
   Mutagen mirrors `workspace/` to the container; `cinna git checkout --reload`
   rides this to make a restored version live.
 - **Account workspace** — `cinna git --agent <ref>` targets a synced child from the
