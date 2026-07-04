@@ -165,6 +165,81 @@ class FakeClient:
         return {}
 
 
+class FakeStreamingClient(FakeClient):
+    """Scripts a turn whose agent message streams in two chunks before it
+    finalizes — models a long-running turn so progressive delta emission can
+    be exercised (see test_chat_streams_progressive_deltas_while_in_progress)."""
+
+    def __init__(self):
+        super().__init__()
+        self.poll_count = 0
+
+    def _user_msg(self):
+        return {
+            "id": "m1",
+            "role": "user",
+            "sequence_number": 1,
+            "timestamp": "2026-06-22T00:00:00Z",
+            "content": self.last_content,
+            "message_metadata": {},
+            "files": [],
+        }
+
+    def _agent_msg(self):
+        thinking = {"type": "thinking", "event_seq": 1, "content": "Step one."}
+        tool = {
+            "type": "tool",
+            "event_seq": 2,
+            "tool_name": "calculator",
+            "content": "calculator",
+            "metadata": {"tool_id": "tool-1", "tool_input": {"expression": "2+2"}},
+        }
+        assistant = {"type": "assistant", "event_seq": 3, "content": "Here you go"}
+        base = {
+            "id": "m2",
+            "role": "agent",
+            "sequence_number": 2,
+            "timestamp": "2026-06-22T00:00:01Z",
+            "files": [],
+        }
+        if self.poll_count == 1:
+            return {
+                **base,
+                "content": "Agent is responding...",
+                "message_metadata": {
+                    "streaming_in_progress": True,
+                    "streaming_events": [thinking],
+                },
+            }
+        if self.poll_count == 2:
+            return {
+                **base,
+                "content": "Agent is responding...",
+                "message_metadata": {
+                    "streaming_in_progress": True,
+                    "streaming_events": [thinking, tool],
+                },
+            }
+        return {
+            **base,
+            "content": "Here you go",
+            "message_metadata": {"streaming_events": [thinking, tool, assistant]},
+        }
+
+    def get_messages(self, session_id, limit=100, offset=0):
+        if not self.sent:
+            return {"data": [], "count": 0}
+        self.poll_count += 1
+        if offset == 0:
+            return {"data": [self._user_msg(), self._agent_msg()], "count": 2}
+        if offset == 1:
+            return {"data": [self._agent_msg()], "count": 1}
+        return {"data": [], "count": 0}
+
+    def get_streaming_status(self, session_id):
+        return {"is_streaming": self.poll_count < 3}
+
+
 def _ndjson(output: str) -> list[dict]:
     return [json.loads(line) for line in output.splitlines() if line.strip()]
 
@@ -244,6 +319,37 @@ def test_chat_no_events_flag_omits_trace(runner, account_root, monkeypatch):
         if e["event"] == "message" and e["role"] == "agent"
     ][0]
     assert "events" not in agent_msg
+    assert agent_msg["content"] == "Here you go"
+
+
+def test_chat_streams_progressive_deltas_while_in_progress(
+    runner, account_root, monkeypatch
+):
+    """A long-running turn (agent message stays `streaming_in_progress` across
+    several polls) surfaces its trace incrementally via `delta` events instead
+    of going silent until the whole message finalizes."""
+    monkeypatch.chdir(account_root)
+    fake = FakeStreamingClient()
+    monkeypatch.setattr("cinna.chat.AccountClient", lambda cfg: fake)
+
+    result = runner.invoke(
+        cli, ["chat", "--agent", "CRM Agent", "--interval", "0", "2+2"]
+    )
+    assert result.exit_code == 0, result.output
+
+    events = _ndjson(result.output)
+    deltas = [e for e in events if e["event"] == "delta"]
+    assert len(deltas) == 2
+    assert [ev["type"] for ev in deltas[0]["events"]] == ["thinking"]
+    # Second delta carries only the newly-appended event, not a repeat of
+    # what was already shown.
+    assert [ev["type"] for ev in deltas[1]["events"]] == ["tool"]
+
+    agent_msg = [
+        e
+        for e in events
+        if e["event"] == "message" and e["role"] == "agent"
+    ][0]
     assert agent_msg["content"] == "Here you go"
 
 

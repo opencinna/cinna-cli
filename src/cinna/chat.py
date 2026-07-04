@@ -104,6 +104,24 @@ class _Emitter:
                 console.console.print(f"  [dim]📎 {att.get('filename')} → {loc}[/dim]")
         elif kind == "status":
             console.console.print(f"[dim]· {event.get('state')}…[/dim]")
+        elif kind == "delta":
+            for ev in event.get("events", []):
+                etype = ev.get("type")
+                if etype == "assistant":
+                    if ev.get("content"):
+                        console.console.print(ev["content"], end="")
+                elif etype == "thinking":
+                    console.console.print(
+                        f"  [magenta]🧠 thinking:[/magenta] {ev.get('content', '')}"
+                    )
+                elif etype in ("tool", "tool_use"):
+                    payload = ev.get("tool_input")
+                    console.console.print(
+                        f"  [cyan]🔧 {ev.get('tool_name', 'tool')}[/cyan] "
+                        f"[dim]{json.dumps(payload, ensure_ascii=False) if payload is not None else ''}[/dim]"
+                    )
+                elif ev.get("content"):
+                    console.console.print(f"  [dim]{etype}: {ev['content']}[/dim]")
         elif kind == "done":
             console.console.print(
                 f"[dim]done — result: {event.get('result_state')}[/dim]"
@@ -274,6 +292,12 @@ def _poll_turn(
     start_deadline = started + START_GRACE_SECONDS
     turn_started = not expect_turn
     flagged_in_progress: set[str] = set()
+    # How much of an in-progress message's trace we've already surfaced —
+    # the row is periodically re-flushed server-side with its *full*
+    # accumulated ``streaming_events`` so far, so this is what lets us emit
+    # only what's new since the last poll instead of going silent until the
+    # whole (possibly many-minutes-long) message finalizes.
+    shown_event_count: dict[str, int] = {}
 
     while True:
         # Drain newly-finalized messages; stop at the first in-progress one
@@ -285,16 +309,19 @@ def _poll_turn(
             advanced = False
             for m in batch:
                 meta = m.get("message_metadata") or {}
+                mid = m.get("id")
                 if meta.get("streaming_in_progress"):
                     in_progress = True
-                    mid = m.get("id")
                     if mid not in flagged_in_progress:
                         flagged_in_progress.add(mid)
                         emit.emit(
                             {"event": "status", "state": "working", "message_id": mid}
                         )
+                    if include_events:
+                        _emit_delta(emit, m, shown_event_count)
                     break
                 _emit_message(client, emit, m, dl_dir, include_events)
+                shown_event_count.pop(mid, None)
                 consumed += 1
                 advanced = True
                 if m.get("role") and m["role"] != "user":
@@ -326,6 +353,29 @@ def _poll_turn(
         time.sleep(interval)
 
     _emit_done(client, emit, session_id)
+
+
+def _emit_delta(
+    emit: _Emitter,
+    m: dict,
+    shown_event_count: dict[str, int],
+) -> None:
+    """Emit trace events newly appended to a still-in-progress message.
+
+    ``streaming_events`` (thinking blocks, tool calls, tool results, and
+    individual assistant-text chunks) accumulates on the row as the turn
+    progresses and is what the server periodically flushes; this diffs
+    against what's already been shown for this message id so a long-running
+    turn surfaces gradual output instead of nothing until it finalizes.
+    """
+    mid = m.get("id")
+    events = _extract_events(m)
+    prev_count = shown_event_count.get(mid, 0)
+    new_events = events[prev_count:]
+    if not new_events:
+        return
+    emit.emit({"event": "delta", "message_id": mid, "role": m.get("role"), "events": new_events})
+    shown_event_count[mid] = len(events)
 
 
 def _emit_message(
