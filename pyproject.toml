@@ -1,6 +1,6 @@
 [project]
 name = "cinna-cli"
-version = "0.2.4"
+version = "0.2.5"
 description = "Local development CLI for Cinna Core agents"
 readme = "README.md"
 requires-python = ">=3.10"
