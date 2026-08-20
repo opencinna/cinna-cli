@@ -352,6 +352,66 @@ def _resolve_account_agent(items: list[dict], agent_ref: str) -> dict:
     )
 
 
+# ── Context package freshness ───────────────────────────────────────────────
+
+CONTEXT_VERSION_FILE = "VERSION"
+
+
+def local_context_package_version(account_root: Path) -> str | None:
+    """The version the workspace's ``context/`` tree was extracted at.
+
+    ``None`` means either no context package at all or one installed before the
+    platform started stamping ``context/VERSION`` — both are "refresh me".
+    """
+    path = account_root / "context" / CONTEXT_VERSION_FILE
+    try:
+        return path.read_text().strip() or None
+    except OSError:
+        return None
+
+
+def context_package_status(
+    config: AccountConfig, account_root: Path, client: "AccountClient | None" = None
+) -> tuple[str, str | None, str | None]:
+    """Classify the workspace's context package: (state, local, remote).
+
+    States: ``current``, ``stale``, ``unknown`` (nothing stamped locally), and
+    ``unreachable`` (the platform could not be asked — never an error, the
+    package is advisory). Guides ship in this tree, so a workspace that never
+    refreshes silently lacks whole playbooks; this is what makes that visible.
+    """
+    local = local_context_package_version(account_root)
+    try:
+        if client is not None:
+            remote = client.get_context_package_version()
+        else:
+            with AccountClient(config) as owned:
+                remote = owned.get_context_package_version()
+    except Exception as exc:  # noqa: BLE001 — advisory, never fatal
+        logger.debug("Context package version check failed: %s", exc)
+        return "unreachable", local, None
+    if remote is None:
+        return "unreachable", local, None
+    if local is None:
+        return "unknown", local, remote
+    return ("current" if local == remote else "stale"), local, remote
+
+
+def context_package_hint(state: str) -> str | None:
+    """The one-line nudge shown when the local package is behind."""
+    if state == "stale":
+        return (
+            "[yellow]![/yellow] Your context/ package is out of date — "
+            "run 'cinna account refresh-context' to pick up new guides."
+        )
+    if state == "unknown":
+        return (
+            "[yellow]![/yellow] This workspace has no context package version — "
+            "run 'cinna account refresh-context' to install the current guides."
+        )
+    return None
+
+
 # ── Token probe ─────────────────────────────────────────────────────────────
 
 
@@ -1054,6 +1114,12 @@ def run_account_agents(show_all: bool = False) -> None:
         else:
             build_cell = "[dim]view-only[/dim]"
 
+        # Which *kind* of bundle install this is decides where a fix has to
+        # land — the publisher install is the only copy a fix can be published
+        # from. `cinna improve` sends the reader here to establish that.
+        if item.get("is_publisher_install"):
+            build_cell += "\n[dim]publisher install[/dim]"
+
         env_cell = (
             "[green]● active[/green]"
             if item.get("has_active_environment")
@@ -1098,11 +1164,27 @@ def run_account_status() -> None:
     table.add_row("Synced agents", str(len(children)))
     table.add_row("Token", _format_token_label(token_status))
 
+    pkg_state, pkg_local, pkg_remote = context_package_status(account_cfg, account_root)
+    if pkg_state == "current":
+        pkg_cell = f"[green]{pkg_local}[/green] (up to date)"
+    elif pkg_state == "stale":
+        pkg_cell = f"[yellow]{pkg_local} → {pkg_remote} available[/yellow]"
+    elif pkg_state == "unknown":
+        pkg_cell = "[yellow]not stamped — refresh to install current guides[/yellow]"
+    else:
+        pkg_cell = "[dim]unknown (platform unreachable)[/dim]"
+    table.add_row("Context package", pkg_cell)
+
     console.console.print(table)
 
     if children:
         console.console.print()
         console.console.print(_synced_agents_table(account_root, children))
+
+    hint = context_package_hint(pkg_state)
+    if hint:
+        console.console.print()
+        console.console.print(hint)
 
     _print_token_reauth_hint(token_status)
 

@@ -796,6 +796,34 @@ def test_account_agents_renders_table(
 
 
 @patch("cinna.account.AccountClient")
+def test_account_agents_flags_publisher_install(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A publisher install is called out — it decides where a fix must land."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = {
+        "count": 1,
+        "data": [
+            {
+                "id": "agent-pub",
+                "name": "CRM Agent",
+                "can_build": True,
+                "is_foreign_install": False,
+                "is_publisher_install": True,
+                "has_active_environment": True,
+            }
+        ],
+    }
+
+    result = runner.invoke(cli, ["account", "agents"])
+
+    assert result.exit_code == 0, result.output
+    assert "publisher install" in result.output
+
+
+@patch("cinna.account.AccountClient")
 def test_account_agents_outside_account_workspace(
     mock_client_cls, runner, tmp_path, monkeypatch
 ):
@@ -927,6 +955,61 @@ def test_account_agents_empty_active_workspace(
 
 
 # --- cinna account status ---
+
+
+def test_context_package_status_classification(account_cfg, account_root):
+    """current / stale / unknown / unreachable — the four states status reports."""
+    from unittest.mock import MagicMock
+
+    from cinna.account import context_package_status, local_context_package_version
+
+    client = MagicMock()
+    client.get_context_package_version.return_value = "v2"
+
+    # No context/ tree at all: nothing stamped locally.
+    assert local_context_package_version(account_root) is None
+    assert context_package_status(account_cfg, account_root, client=client)[0] == (
+        "unknown"
+    )
+
+    (account_root / "context").mkdir()
+    (account_root / "context" / "VERSION").write_text("v1\n")
+    assert context_package_status(account_cfg, account_root, client=client)[0] == "stale"
+
+    (account_root / "context" / "VERSION").write_text("v2\n")
+    assert context_package_status(account_cfg, account_root, client=client)[0] == (
+        "current"
+    )
+
+    # A backend that predates the route (None) is unreachable, not stale.
+    client.get_context_package_version.return_value = None
+    assert context_package_status(account_cfg, account_root, client=client)[0] == (
+        "unreachable"
+    )
+
+    client.get_context_package_version.side_effect = RuntimeError("offline")
+    assert context_package_status(account_cfg, account_root, client=client)[0] == (
+        "unreachable"
+    )
+
+
+@patch("cinna.account.AccountClient")
+@patch("cinna.account.probe_account_token")
+def test_account_status_reports_stale_context_package(
+    mock_probe, mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "200")
+    mock_probe.return_value = "valid"
+    (account_root / "context").mkdir()
+    (account_root / "context" / "VERSION").write_text("old\n")
+    mock_client_cls.return_value.__enter__.return_value.get_context_package_version.return_value = "new"
+
+    result = runner.invoke(cli, ["account", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "Context package" in result.output
+    assert "out of date" in result.output
 
 
 @patch("cinna.account.probe_account_token")

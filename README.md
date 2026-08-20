@@ -130,6 +130,8 @@ List the agents your account can access (run from inside the account workspace).
 
 One-shot summary of the account workspace: platform/frontend URLs, machine name, synced-agent count, and an account-token probe (`valid token` / `expired token` / `no connection`) — the account-level counterpart of `cinna status`.
 
+Also reports the workspace's **context package version** against the platform's current one — the orchestrator guides ship in that tree, so a workspace set up before a guide existed silently lacks it. When it is behind, the command says so and points at `cinna account refresh-context`; `cinna improve list` prints the same nudge, since its playbook lives there.
+
 ### `cinna account refresh-context`
 
 Re-download the context package and replace the account workspace's `context/` tree (run from inside the account workspace). Use it when the platform ships updated docs or API reference. The existing tree is only removed after a successful download — a failed refresh warns and leaves the previous `context/` intact.
@@ -162,6 +164,39 @@ cinna account credentials delete <cred_id> --yes
 ```
 
 A new draft lands in the account's [active user workspace](#cinna-account-user-workspace-list--activate-nameid--clear). Deletes reuse the platform's blast-radius gate (a publisher-provided credential in a published bundle with active installs needs `--force`). All write verbs require the `agent-developer` role.
+
+### `cinna improve list | show | download | status`
+
+Work the **improvement requests** users shared with you about your agents. When someone chatting with an agent hits a bad answer, they can hand the agent's owner a frozen snapshot of that one session — the transcript plus the runtime context that produced it (bundle id + installed version, environment, SDK engine, effective model) — from the session menu or with the `/session-improve` command. These verbs are the receiving half of that loop, and they run from an account workspace so one listing spans every agent you own.
+
+```bash
+cinna improve list --status new                    # unhandled first, then newest
+cinna improve list --agent crm-agent               # narrow to one agent
+cinna improve show 3f2504e0                        # the report + the runtime context block
+cinna improve download 3f2504e0                    # → improvements/3f2504e0/
+cinna improve status 3f2504e0 in_progress          # claim it
+cinna improve status 3f2504e0 completed --note "Fixed in v1.6 — no longer re-asks for the file."
+```
+
+`<id>` is the short id printed by `cinna improve list` (or the full UUID). `download` saves and extracts the archive into `improvements/<short-id>/` under the account root (`--out DIR` to choose another target), using the same safe extractor as the workspace clone:
+
+```
+improvements/3f2504e0/
+├── README.md          # what was reported, by whom, which agent + bundle version, runtime table
+├── metadata.json      # the request row
+├── context.json       # structured runtime context of the install that misbehaved
+├── prompts/           # the install's live prompt docs (WORKFLOW_PROMPT.md, …) + a divergence README
+├── memory/            # the agent's captured personal memory, when it had any
+└── session/
+    ├── messages.md    # human-readable transcript
+    └── messages.json  # the same transcript, structured
+```
+
+`cinna improve show` renders the prompt block as a per-prompt **in sync / diverged** table against the installed bundle revision — the one thing a publisher cannot see from their own copy, since a consumer who owns their install can edit its prompts. A diverged prompt means the session was produced by text that is not yours; read `prompts/` in the archive before assuming otherwise.
+
+The archive deliberately contains **no** container logs, **no** uploaded file contents (descriptors only), and no credential values (snapshot text is scrubbed server-side before it is stored). Statuses are `new` → `in_progress` → `completed` | `declined`; the `--note` on a closing transition is **shown to the requester**. `--json` on `list` / `show` prints the raw payload for scripting.
+
+The archive is another person's conversation: don't copy it into an agent workspace, don't commit it, and delete the local copy when you're done. The end-to-end playbook a local coding agent should follow — including where a fix has to land for a bundle publisher install versus a standalone agent — ships in the account workspace's context package at `context/guides/handling-improvement-requests.md`.
 
 ### `cinna agent create <name> [--description TEXT]`
 

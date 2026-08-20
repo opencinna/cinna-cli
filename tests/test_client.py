@@ -154,3 +154,43 @@ def test_500_raises_platform_error(client):
     )
     with pytest.raises(PlatformError, match="500"):
         client.get_building_context("agent-123")
+
+
+# --- context package version (staleness signal) ------------------------------
+
+
+@respx.mock
+def test_account_client_context_package_version():
+    import httpx
+
+    cfg = AccountConfig(
+        platform_url="https://platform.example.com",
+        frontend_url="https://ui.example.com",
+        account_token="tok",
+        machine_name="laptop",
+    )
+    respx.get(
+        "https://platform.example.com/api/v1/cli/account/context-package/version"
+    ).mock(return_value=httpx.Response(200, json={"version": "abc123"}))
+
+    with AccountClient(cfg) as client:
+        assert client.get_context_package_version() == "abc123"
+
+
+@respx.mock
+def test_account_client_context_package_version_absent_on_old_backend():
+    """A 404 means the route does not exist yet — not an error to surface."""
+    import httpx
+
+    cfg = AccountConfig(
+        platform_url="https://platform.example.com",
+        frontend_url="https://ui.example.com",
+        account_token="tok",
+        machine_name="laptop",
+    )
+    respx.get(
+        "https://platform.example.com/api/v1/cli/account/context-package/version"
+    ).mock(return_value=httpx.Response(404, json={"detail": "Not Found"}))
+
+    with AccountClient(cfg) as client:
+        assert client.get_context_package_version() is None

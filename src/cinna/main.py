@@ -415,6 +415,106 @@ def account_credentials_share_with_agent(credential_id: str, agent_ref: str):
     run_credentials_share(credential_id, agent_ref)
 
 
+# ─── improve group ─────────────────────────────────────────────────────────
+
+
+@cli.group()
+def improve():
+    """Improvement requests users shared with you about your agents.
+
+    A user chatting with one of your agents can hand you a frozen snapshot of
+    that session — the transcript plus the runtime context that produced it —
+    from the session menu or with ``/session-improve``. These verbs are the
+    receiving half of that loop: list what came in, read it, download the
+    archive for a local coding agent, and close the request with a note the
+    requester sees.
+
+    Run from an account workspace: the listing spans every agent you own.
+    The shipped playbook is ``context/guides/handling-improvement-requests.md``.
+    """
+
+
+@improve.command(name="list")
+@click.option(
+    "--status",
+    default=None,
+    help="Filter by status: new, in_progress, completed, declined.",
+)
+@click.option(
+    "--agent",
+    "agent_ref",
+    default=None,
+    help="Filter to one agent (name, slug, or id).",
+)
+@click.option("--limit", default=50, show_default=True, help="Max requests to list.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
+def improve_list(status: str | None, agent_ref: str | None, limit: int, as_json: bool):
+    """List improvement requests across the agents you own.
+
+    Unhandled first, then newest. Start here:
+
+    \b
+      cinna improve list --status new
+    """
+    from cinna.improve import run_improve_list
+
+    run_improve_list(status=status, agent_ref=agent_ref, limit=limit, as_json=as_json)
+
+
+@improve.command(name="show")
+@click.argument("request_ref")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON detail.")
+def improve_show(request_ref: str, as_json: bool):
+    """Show one request in full, including the runtime context block.
+
+    REQUEST_REF is the short id from ``cinna improve list`` or a full id.
+    """
+    from cinna.improve import run_improve_show
+
+    run_improve_show(request_ref, as_json=as_json)
+
+
+@improve.command(name="download")
+@click.argument("request_ref")
+@click.option(
+    "--out",
+    "out_dir",
+    default=None,
+    help="Directory to extract into (default: improvements/<short-id>/).",
+)
+def improve_download(request_ref: str, out_dir: str | None):
+    """Download and extract the session archive for REQUEST_REF.
+
+    Writes README.md, metadata.json, context.json and session/ (transcript in
+    Markdown + JSON). Read README.md first — it states what the archive does
+    *not* contain.
+    """
+    from cinna.improve import run_improve_download
+
+    run_improve_download(request_ref, out_dir)
+
+
+@improve.command(name="status")
+@click.argument("request_ref")
+@click.argument("new_status")
+@click.option(
+    "--note",
+    default=None,
+    help="Resolution note — shown to the person who submitted the request.",
+)
+def improve_status(request_ref: str, new_status: str, note: str | None):
+    """Set the status of REQUEST_REF to NEW_STATUS.
+
+    \b
+      cinna improve status a1b2c3d4 in_progress
+      cinna improve status a1b2c3d4 completed --note "Fixed in v1.6 — the agent
+      no longer re-asks for an uploaded file."
+    """
+    from cinna.improve import run_improve_status
+
+    run_improve_status(request_ref, new_status, note)
+
+
 # ─── agent group ───────────────────────────────────────────────────────────
 
 

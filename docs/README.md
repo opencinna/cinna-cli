@@ -200,6 +200,7 @@ main.py  (CLI commands — Click)
   ├── account.py         — account workspace; `cinna login` (device auth), `cinna account`, `cinna agent`
   ├── doctor.py          — `cinna doctor`: reconcile registry ↔ Mutagen, delete stalled / terminate active sessions, refresh tokens
   ├── chat.py            — `cinna chat`: session-backed conversation testing (poll + NDJSON) over the api-proxy
+  ├── improve.py         — `cinna improve`: improvement requests users shared about your agents (list/show/download/status)
   ├── config.py          — .cinna/config.json: load/save/find
   ├── auth.py            — JWT storage, Authorization headers
   ├── client.py          — PlatformClient: HTTP + SSE stream_exec
@@ -287,6 +288,7 @@ authoring convention.
 | **Agent API** | `cinna agent-api` (enable, refresh, spec, call) · `cinna api` · `cinna connect agent-api` | [business](features/agent_api/agent_api.md) · [tech](features/agent_api/agent_api_tech.md) · [acceptance](features/agent_api/agent_api_acceptance.md) |
 | **MCP integration** | `cinna connect mcp` · `cinna mcp-proxy` (knowledge stdio server) | [business](features/mcp_integration/mcp_integration.md) · [tech](features/mcp_integration/mcp_integration_tech.md) · [acceptance](features/mcp_integration/mcp_integration_acceptance.md) |
 | **Git versioning** | `cinna git` (link, status, commit, push, pull, log, checkout, unlink) | [business](features/git_versioning/git_versioning.md) · [tech](features/git_versioning/git_versioning_tech.md) · [acceptance](features/git_versioning/git_versioning_acceptance.md) |
+| **Improvement requests** | `cinna improve` (list, show, download, status) | [business](features/improvement_requests/improvement_requests.md) · [tech](features/improvement_requests/improvement_requests_tech.md) · [acceptance](features/improvement_requests/improvement_requests_acceptance.md) |
 
 The sections below (Git Versioning, Sync Transport, Remote Exec, Remote Chat,
 Bootstrap Flow) remain as in-README quick references and backend contracts; the
@@ -610,6 +612,7 @@ When a CLI token expires (or is revoked) the normal remedy is `cinna set-token <
 | POST | `/api/v1/cli/account/agents/{id}/mint` | Account token | Mint a per-agent CLI token (`cinna agent sync`, `cinna doctor` re-mint) |
 | POST | `/api/v1/cli/account/api-proxy` | Account token | Buffered JSON escape hatch — `cinna api`, and the transport for every `cinna chat` session/message call |
 | POST | `/api/v1/cli/account/files/upload` | Account token | Multipart upload for `cinna chat --file` (the proxy can't carry multipart) |
+| GET/PATCH | `/api/v1/cli/account/improvement-requests[/{id}[/archive]]` | Account token | Improvement requests received on the agents the account owns (`cinna improve`); the `/archive` route returns a binary ZIP the JSON-only proxy can't carry |
 
 `cinna chat` reaches the conversation API **through** the api-proxy (so these are inner routes, not CLI routes): `POST /sessions/`, `GET /sessions/{id}`, `GET /sessions/{id}/messages`, `POST /sessions/{id}/messages/stream`, `GET /sessions/{id}/messages/streaming-status`, `POST /sessions/{id}/messages/interrupt`, and `GET /files/{id}/download`.
 

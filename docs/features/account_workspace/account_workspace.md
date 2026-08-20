@@ -196,6 +196,14 @@ cinna account setup ────────────────────
 - **Remote Chat** — `cinna chat` runs through the account workspace's api-proxy
   (`AccountClient`), so it needs an account workspace; it is found by walking up
   from the cwd, exactly like the account verbs.
+- **Context package freshness** — `cinna account status` reports the local
+  `context/VERSION` against the platform's current package version and nudges
+  when it is behind, since guides (not just docs) ship in that tree.
+- **Improvement requests** — `cinna improve` runs on the account token from the
+  same root, so one queue spans every agent the account owns; the orchestrator
+  `CLAUDE.md` written here lists its verbs and `cinna account agents` supplies the
+  publisher-install flag its ownership step depends on. See
+  [improvement_requests](../improvement_requests/improvement_requests.md).
 - **Doctor / login** — `cinna doctor` re-mints expired per-agent tokens through
   the account token, and groups blocked agents under a single `cinna login` hint
   when the account token itself has expired.

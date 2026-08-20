@@ -27,6 +27,8 @@ context/                # platform knowledge package (see below)
   examples/             #   sample platform-API scripts (platform_helper.py, …)
 agents/                 # one standard cinna workspace per synced agent
   <agent-slug>/         # created by `cinna agent sync <agent>`
+improvements/           # downloaded improvement-request archives (another user's
+  <short-id>/           #   shared session — never commit, delete when done)
 ```
 
 Each directory under `agents/` is a 100% standard cinna per-agent workspace — `cd agents/<x> && cinna dev` works exactly as for a manually set-up agent, and each has its own `CLAUDE.md` with the per-agent local development guide plus `BUILDING_AGENT.md` with that agent's building prompt.
@@ -39,7 +41,7 @@ Each directory under `agents/` is a 100% standard cinna per-agent workspace — 
 - **`context/platform/README.md`** — the platform feature map and glossary. Use it to find which feature doc explains a concept (bundles, credentials, knowledge, A2A, MCP, schedules, …).
 - **`context/api_reference/`** — generated per-domain REST API reference (`README.md` index). Anything the `cinna` CLI doesn't cover can be done against the platform API directly.
 - **`context/examples/`** — working sample scripts for calling the platform API (start from `platform_helper.py`).
-- **`context/guides/`** — worked, end-to-end playbooks (e.g. `build-an-agentic-network.md`).
+- **`context/guides/`** — worked, end-to-end playbooks (e.g. `build-an-agentic-network.md`, `handling-improvement-requests.md`).
 
 Refresh after platform updates with `cinna account refresh-context`.
 
@@ -94,6 +96,15 @@ Refresh after platform updates with `cinna account refresh-context`.
 | `cinna agent status refresh <agent>` | Force a live `STATUS.md` re-read (wakes a suspended env, runs the pre-command first; never fails) |
 | `cinna agent status set-command <agent> "<cmd>"` | Set the pre-command run before each forced status read — a shell string or `/run:<name>` (the agent's `CLI_COMMANDS.yaml`); `""` opts out. Default `/run:status` |
 
+**Improvement requests (users' feedback on your agents):**
+
+| Command | What it does |
+|---------|--------------|
+| `cinna improve list [--status new] [--agent A]` | Requests users shared with you, across every agent you own (id, agent, requester, version, what was reported, status) |
+| `cinna improve show <id>` | One request in full: the report, who sent it, and the frozen runtime context (bundle version, env, SDK engine, effective model) |
+| `cinna improve download <id> [--out DIR]` | Download + extract the archive into `improvements/<short-id>/` — README, the session transcript, structured context |
+| `cinna improve status <id> <new\|in_progress\|completed\|declined> [--note N]` | Move the request along; `--note` is **shown to the requester** |
+
 **Agent REST API (producer build + verify) — precedes `connect agent-api`:**
 
 | Command | What it does |
@@ -111,7 +122,7 @@ Refresh after platform updates with `cinna account refresh-context`.
 | `cinna connect mcp --producer P --consumer C` | Wire C to P's agent2agent MCP connector |
 | `cinna api <METHOD> <path>` | Generic platform-API escape hatch (see `context/api_reference/`) |
 
-> **Mapping user intent → command.** "list/show my **workspaces**" → `cinna account user-workspace list` (workspaces are contexts that group agents, not agents themselves). "list/show my **agents**" → `cinna account agents` (scoped to the active workspace; add `--all` for every workspace). "what **credentials** do I have" → `cinna account credentials list`. "**schedule** the agent / run it every … / set up a cron" → `cinna agent schedule` (use `generate` first to turn the phrase into a cron). "is the agent **healthy** / what's its status / why is it failing" → `cinna agent status show` (or `refresh` to force a fresh read). "**test / try / talk to / chat with** the agent", "see what it replies", "does it actually work" → `cinna chat --agent <agent> "…"`. When unsure which `cinna` verb covers a request, run `cinna --help` and `cinna account --help` rather than guessing or jumping to `cinna api`.
+> **Mapping user intent → command.** "list/show my **workspaces**" → `cinna account user-workspace list` (workspaces are contexts that group agents, not agents themselves). "list/show my **agents**" → `cinna account agents` (scoped to the active workspace; add `--all` for every workspace). "what **credentials** do I have" → `cinna account credentials list`. "**schedule** the agent / run it every … / set up a cron" → `cinna agent schedule` (use `generate` first to turn the phrase into a cron). "**improvement requests** / what did users report / check the feedback queue / fix what someone complained about" → `cinna improve list --status new` (then follow `context/guides/handling-improvement-requests.md`). "is the agent **healthy** / what's its status / why is it failing" → `cinna agent status show` (or `refresh` to force a fresh read). "**test / try / talk to / chat with** the agent", "see what it replies", "does it actually work" → `cinna chat --agent <agent> "…"`. When unsure which `cinna` verb covers a request, run `cinna --help` and `cinna account --help` rather than guessing or jumping to `cinna api`.
 
 ## When a command fails with an auth error
 
@@ -161,6 +172,18 @@ Once an agent's logic works, you give it **schedules** (so it runs on its own) a
   - Then `cinna agent schedule list crm-agent`, toggle with `cinna agent schedule update crm-agent <sid> --disable`, trigger immediately with `cinna agent schedule run crm-agent <sid>`, and inspect outcomes with `cinna agent schedule logs crm-agent <sid>`.
 - **Monitor it.** `cinna agent status show crm-agent` prints the agent's self-reported `STATUS.md` (severity, summary, last-reported time) plus its configured refresh command; `cinna agent status refresh crm-agent` forces a fresh read (and surfaces any warning from the pre-command). To control how status is regenerated, set the pre-command with `cinna agent status set-command crm-agent "/run:status"` (a `/run:<name>` reference resolves against the agent's `CLI_COMMANDS.yaml`; `""` disables it). A good `script_trigger` health check usually pairs with a `STATUS.md`-updating helper so `status show` reflects the latest check.
 - **Foreign (bundle) installs are read-only here.** On an installed bundle you own, the schedule *definitions* are publisher-managed — you can `list`, toggle (`update --enable/--disable`), `run`, and view `logs`, but `create` / `delete` / editing fields returns an error. Status verbs work normally.
+
+### Acting on improvement requests
+
+A user who hit a bad answer while chatting with one of your agents can share that one session with you — the transcript plus the runtime context that produced it (bundle version, environment, SDK engine, effective model), frozen at the moment they consented. That is an **improvement request**, and it is the closest thing you get to a bug report with a repro.
+
+- **See what came in** — `cinna improve list --status new` (across every agent you own; `--agent <name>` narrows). Claim one with `cinna improve status <id> in_progress` so a parallel session doesn't pick it up too.
+- **Read it** — `cinna improve show <id>` for the report plus the runtime context, then `cinna improve download <id>` to extract the archive into `improvements/<short-id>/`. Read `README.md` first, then `session/messages.md`. Write yourself an *expected vs. actual* before changing anything; if you can't, ask the user rather than guessing.
+- **Establish where the fix goes** — this is the step that decides whether your fix reaches anyone. `cinna account agents` flags publisher installs and foreign installs; the archive's `context.json` describes the *requester's* install. A standalone agent you own is fixed in its synced workspace. A **publisher install** of a bundle you publish is fixed here and then needs a **new bundle version** published from the Bundle tab. A consumer install you own is overwritten by the next bundle update — warn the user instead of patching it.
+- **Close the loop** — `cinna improve status <id> completed --note "…"` (or `declined` with the reason). The note is shown to the requester, so write it for them.
+- **Handle the data carefully** — the archive is another person's conversation. Don't copy it into an agent workspace, don't commit it, don't paste anything that looks like a secret, and delete the local copy when you're done.
+
+The full playbook — including when to implement autonomously and when to stop and ask — is **`context/guides/handling-improvement-requests.md`**. Read it before working a request.
 
 ### Finalizing an agent — author its prompts
 

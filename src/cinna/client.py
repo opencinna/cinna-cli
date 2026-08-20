@@ -836,6 +836,94 @@ class AccountClient:
         )
         return self._handle_response(response).content
 
+    # --- Improvement requests (received on the agents this account owns) ---
+    #
+    # Dedicated account routes rather than the api-proxy: the archive is a
+    # binary body the JSON-only hatch cannot carry (the same reason
+    # `/account/files/upload` is dedicated), and the JSON verbs live beside it
+    # so `cinna improve` speaks to one route group.
+
+    def list_improvement_requests(
+        self,
+        status: str | None = None,
+        agent_id: str | None = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> dict:
+        """GET /account/improvement-requests — ``{data: [...], count: N}``.
+
+        Cross-agent listing of the requests the account user *receives*, spanning
+        every agent they own (unhandled first, then newest). Requests they
+        submitted on somebody else's agent are not listed here.
+        """
+        params: dict = {"skip": skip, "limit": limit}
+        if status:
+            params["status"] = status
+        if agent_id:
+            params["agent_id"] = agent_id
+        response = self._client.get(
+            "/api/v1/cli/account/improvement-requests", params=params
+        )
+        return self._handle_response(response).json()
+
+    def get_improvement_request(self, request_id: str) -> dict:
+        """GET /account/improvement-requests/{id} — detail incl. ``context``.
+
+        404 for any id the account user is not party to (existence-leak-safe),
+        which surfaces here as a ``PlatformError``.
+        """
+        response = self._client.get(
+            f"/api/v1/cli/account/improvement-requests/{request_id}"
+        )
+        return self._handle_response(response).json()
+
+    def download_improvement_archive(self, request_id: str) -> bytes:
+        """GET /account/improvement-requests/{id}/archive — the ZIP bytes.
+
+        The archive is built on demand from the frozen snapshot (README,
+        metadata, context, transcript). A cross-user download is audited
+        server-side.
+        """
+        response = self._client.get(
+            f"/api/v1/cli/account/improvement-requests/{request_id}/archive",
+            timeout=DOWNLOAD_TIMEOUT,
+        )
+        return self._handle_response(response).content
+
+    def update_improvement_request(
+        self,
+        request_id: str,
+        status: str | None = None,
+        resolution_note: str | None = None,
+    ) -> dict:
+        """PATCH /account/improvement-requests/{id} — status / resolution note.
+
+        Recipient-only: a requester who is party to the row gets 403. The note
+        is shown to the person who submitted the request.
+        """
+        body: dict = {}
+        if status is not None:
+            body["status"] = status
+        if resolution_note is not None:
+            body["resolution_note"] = resolution_note
+        response = self._client.patch(
+            f"/api/v1/cli/account/improvement-requests/{request_id}", json=body
+        )
+        return self._handle_response(response).json()
+
+    def get_context_package_version(self) -> str | None:
+        """GET /account/context-package/version — the package's content version.
+
+        The staleness signal: an extracted ``context/`` tree records the version
+        it came from in ``context/VERSION``, and a workspace set up before a
+        guide existed has no other way to know it is missing one. Returns None
+        on a backend that predates the route.
+        """
+        response = self._client.get("/api/v1/cli/account/context-package/version")
+        if response.status_code == 404:
+            return None
+        return self._handle_response(response).json().get("version")
+
     def revoke_child_token(self, token_id: str) -> dict:
         """DELETE /api/v1/cli/account/tokens/children/{token_id}.
 
