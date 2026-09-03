@@ -222,6 +222,25 @@ works exactly as for a manually set-up agent. Synced agents also appear in `cinn
 
 Detach a synced workspace: stop its sync session, revoke the minted CLI token server-side (via the account-scoped revoke endpoint, authenticated with the account token; idempotent), then perform the equivalent of `cinna disconnect`: remove `.cinna/`, generated files, and the registry entry. Workspace files under `agents/<slug>/workspace/` are preserved. The revoke degrades gracefully — if it fails (no connection, or a workspace synced before token-id tracking), a warning is printed and the local teardown still completes; the token then expires on its own or can be revoked from the agent's Integrations tab.
 
+### `cinna agent import <path> [--name TEXT] [--workspace REF] [--update] [--dry-run] [--no-push] [--yes]`
+
+Import an agent that was built **locally** with the [Local Agent Kit](docs/features/local_agent_import/local_agent_import.md) — a folder holding a `cinna-agent.json` manifest, typically `../Local/<slug>` next to this account workspace. Run it from the account workspace root (or any folder inside it).
+
+Nine idempotent steps, each printed as `[n/9]`: read and validate the manifest → create (or resolve) the cloud agent → write its description, router trigger, example prompts and the three document prompts in one bulk write, plus the status refresh command → attach a local workspace (`cinna agent sync`) → copy the tree into `agents/<slug>/workspace/` honouring the contract's exclude list and secret rules, generating `workspace_requirements.txt` from `pyproject.toml` when the agent doesn't ship one → `cinna sync push` → create the credential drafts and attach them → create the schedules → record the publication in `publications.json` and print the summary.
+
+```bash
+cinna agent import ../Local/invoice-watcher --dry-run   # see the plan, touch nothing
+cinna agent import ../Local/invoice-watcher --yes
+cinna chat --agent invoice-watcher "check invoices from last week"
+
+# after more local work:
+cinna agent import ../Local/invoice-watcher --update --yes
+```
+
+The folder rules come from the kit's versioned contract, `.cinna-kit/layout.json` — the same file Cinna Desktop reads — so a correction published there reaches this command on the next kit refresh rather than waiting for a new cinna-cli. `credentials/` and `app-data/` are **never** copied, not even if the contract drops them, and on top of the exclude list the contract's `secret_files` rules withhold every dotenv shape (`.env`, `.env.prod`, `staging.env`) wherever it sits, while `.env.example` still travels. No secret value is ever read, sent, or printed: credentials are created as empty drafts and the command prints the URLs the user opens to fill them in the browser.
+
+Where the folder has been published is recorded in `publications.json`, a **sibling** of `cinna-agent.json` holding one entry per Cinna instance — it cannot live inside the manifest, because each entry records a hash of the exported tree and the manifest is part of that tree. Every step is idempotent (agent by the entry whose `platform_url` matches the instance you are logged into, credentials by name, schedules by name), so a partial import is resumed with `--update` instead of duplicating anything. The publication is recorded **only after the push settled** — `--no-push`, a failed flush, or remaining conflicts leave it unrecorded, and the next run is a plain `--update`. A legacy `cloud` block is migrated into the ledger on the first write and is still read until then, so an older folder's `--update` never creates a second agent. `--dry-run` makes no platform call and writes nothing.
+
 ### `cinna connect agent-api --producer <agent> --consumer <agent> [--label TEXT] [--read-only]`
 
 Wire one agent to another's REST API from the account workspace. Resolves both agents (name, slug, or ID), mints a producer API token, and attaches it to the consumer as a credential — which rides the consumer's normal credential sync into its remote environment, so no key ever touches your machine. Prints the credential ID, token prefix, base URL, and spec URL. `--read-only` restricts the consumer to read-only access; `--label` names the credential. Backend errors surface verbatim: 400 if the producer's REST API is disabled, 403/404 for ownership violations.

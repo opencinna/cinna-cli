@@ -573,6 +573,66 @@ def agent_create(name: str, description: str | None):
     run_agent_create(name, description)
 
 
+@agent.command(name="import")
+@click.argument("path", type=click.Path(exists=True, file_okay=False))
+@click.option("--name", default=None, help="Override the manifest's agent name")
+@click.option(
+    "--workspace",
+    default=None,
+    help="Target user workspace (name or id; 'default' for the Default one)",
+)
+@click.option(
+    "--update",
+    is_flag=True,
+    help="Re-import into the agent this manifest already points at",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the plan (files, credentials, schedules) without any platform write",
+)
+@click.option("--no-push", is_flag=True, help="Copy the files but skip 'cinna sync push'")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+def agent_import(
+    path: str,
+    name: str | None,
+    workspace: str | None,
+    update: bool,
+    dry_run: bool,
+    no_push: bool,
+    yes: bool,
+):
+    """Import an agent built locally with the Local Agent Kit.
+
+    PATH is the local agent folder — the one holding ``cinna-agent.json``
+    (typically ``../Local/<slug>`` next to this account workspace). Run from
+    the account workspace root or any folder inside it.
+
+    Nine idempotent steps: read the manifest, create (or resolve) the cloud
+    agent, write its prompts and metadata, attach a local workspace, copy the
+    tree honouring the contract's exclude list and secret rules, push it,
+    create the credential drafts (printing the URLs the user opens to fill
+    them), create the schedules, and record the publication in
+    ``publications.json`` beside the manifest.
+
+    ``credentials/``, ``app-data/`` and every dotenv shape are never copied and
+    no secret value is ever read or printed. A partial import is resumed with
+    ``--update``, which resolves the agent by the ledger entry whose
+    ``platform_url`` matches the instance you are logged into.
+    """
+    from cinna.local_import import run_agent_import
+
+    run_agent_import(
+        path,
+        name=name,
+        workspace=workspace,
+        update=update,
+        dry_run=dry_run,
+        no_push=no_push,
+        yes=yes,
+    )
+
+
 @agent.command(name="restart-env")
 @click.argument("agent_ref")
 def agent_restart_env(agent_ref: str):

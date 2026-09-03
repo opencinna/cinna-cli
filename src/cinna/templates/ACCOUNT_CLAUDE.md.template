@@ -25,6 +25,7 @@ context/                # platform knowledge package (see below)
   platform/             #   business-logic platform docs (feature map at platform/README.md)
   api_reference/        #   generated per-domain REST API reference
   examples/             #   sample platform-API scripts (platform_helper.py, …)
+  local-kit/            #   Local Agent Kit — local-first agent conventions
 agents/                 # one standard cinna workspace per synced agent
   <agent-slug>/         # created by `cinna agent sync <agent>`
 improvements/           # downloaded improvement-request archives (another user's
@@ -42,6 +43,7 @@ Each directory under `agents/` is a 100% standard cinna per-agent workspace — 
 - **`context/api_reference/`** — generated per-domain REST API reference (`README.md` index). Anything the `cinna` CLI doesn't cover can be done against the platform API directly.
 - **`context/examples/`** — working sample scripts for calling the platform API (start from `platform_helper.py`).
 - **`context/guides/`** — worked, end-to-end playbooks (e.g. `build-an-agentic-network.md`, `handling-improvement-requests.md`).
+- **`context/local-kit/`** — the **Local Agent Kit**: how an agent is built locally with no account (folder layout, `cinna-agent.json` manifest, capability ladder, `tools/kit.py`) and how it comes to the cloud. Read it when the user mentions a `Local/<slug>` folder, a `cinna-agent.json`, or "the agent I built on my machine" — its go-cloud playbook is `context/local-kit/guides/11-go-cloud.md`.
 
 Refresh after platform updates with `cinna account refresh-context`.
 
@@ -68,6 +70,7 @@ Refresh after platform updates with `cinna account refresh-context`.
 | Command | What it does |
 |---------|--------------|
 | `cinna agent create <name> [--description D]` | Create a new agent on the platform (backend applies all defaults; lands in the active workspace) |
+| `cinna agent import <path> [--update] [--dry-run]` | Import an agent built locally with the Local Agent Kit (manifest → agent + prompts + files + credential drafts + schedules) |
 | `cinna agent sync <agent>` | Mint a per-agent CLI token and materialize a standard workspace under `agents/<slug>/` (name, slug, or agent id) |
 | `cinna agent unsync <agent>` | Stop sync, revoke the agent's CLI token, and remove the generated workspace config (user files preserved) |
 | `cinna agent show <agent> [--prompts]` | Show the agent's effective prompts / features / connected credentials as the runtime sees them — confirm "is what I edited actually live?" |
@@ -122,7 +125,7 @@ Refresh after platform updates with `cinna account refresh-context`.
 | `cinna connect mcp --producer P --consumer C` | Wire C to P's agent2agent MCP connector |
 | `cinna api <METHOD> <path>` | Generic platform-API escape hatch (see `context/api_reference/`) |
 
-> **Mapping user intent → command.** "list/show my **workspaces**" → `cinna account user-workspace list` (workspaces are contexts that group agents, not agents themselves). "list/show my **agents**" → `cinna account agents` (scoped to the active workspace; add `--all` for every workspace). "what **credentials** do I have" → `cinna account credentials list`. "**schedule** the agent / run it every … / set up a cron" → `cinna agent schedule` (use `generate` first to turn the phrase into a cron). "**improvement requests** / what did users report / check the feedback queue / fix what someone complained about" → `cinna improve list --status new` (then follow `context/guides/handling-improvement-requests.md`). "is the agent **healthy** / what's its status / why is it failing" → `cinna agent status show` (or `refresh` to force a fresh read). "**test / try / talk to / chat with** the agent", "see what it replies", "does it actually work" → `cinna chat --agent <agent> "…"`. When unsure which `cinna` verb covers a request, run `cinna --help` and `cinna account --help` rather than guessing or jumping to `cinna api`.
+> **Mapping user intent → command.** "list/show my **workspaces**" → `cinna account user-workspace list` (workspaces are contexts that group agents, not agents themselves). "list/show my **agents**" → `cinna account agents` (scoped to the active workspace; add `--all` for every workspace). "what **credentials** do I have" → `cinna account credentials list`. "**schedule** the agent / run it every … / set up a cron" → `cinna agent schedule` (use `generate` first to turn the phrase into a cron). "**improvement requests** / what did users report / check the feedback queue / fix what someone complained about" → `cinna improve list --status new` (then follow `context/guides/handling-improvement-requests.md`). "is the agent **healthy** / what's its status / why is it failing" → `cinna agent status show` (or `refresh` to force a fresh read). "**import / bring to the cloud** the agent I built locally / on my machine", a `Local/<slug>` folder, a `cinna-agent.json` → `cinna agent import <path>` (never rebuild it by hand). "**test / try / talk to / chat with** the agent", "see what it replies", "does it actually work" → `cinna chat --agent <agent> "…"`. When unsure which `cinna` verb covers a request, run `cinna --help` and `cinna account --help` rather than guessing or jumping to `cinna api`.
 
 ## When a command fails with an auth error
 
@@ -156,6 +159,7 @@ Building a multi-agent network never requires the platform UI:
 - **Wire REST** — `cinna connect agent-api --producer crm-agent --consumer hr-manager-agent` lets the consumer call the producer's REST API. The minted credential is attached to the consumer and rides its normal credential sync into the remote env (`--read-only` to restrict, `--label` to name it).
 - **Wire MCP** — `cinna connect mcp --producer crm-agent --consumer hr-manager-agent` connects the consumer to the producer's agent2agent MCP connector (the producer must expose one your account may consume; `--conversation-only` / `--building-only` to scope modes). If an `authorize_url` is printed, it must be opened to finish the connection.
 - **Finalize prompts (last step of every build)** — once an agent's logic works, author its prompts and rewrite its **description** to match what you actually built, then assign them in one bulk write: keep a local `agents/<slug>/prompts.json` and push it with `cinna api PUT agents/<id> --data @agents/<slug>/prompts.json` (verify with `cinna agent show <slug> --prompts`). See **`context/guides/authoring-agent-prompts.md`**.
+- **Importing an agent built locally** — when the user points at a folder holding a `cinna-agent.json` (the Local Agent Kit layout, usually `../Local/<slug>` beside this workspace), do **not** rebuild it by hand: run `cinna agent import <path>` from here. It creates the agent, writes its prompts and metadata, syncs and pushes the files, drafts the credentials it declares (printing the URLs the user opens to fill them — the CLI never handles secrets, and `credentials/` is never copied), and creates its schedules. Preview with `--dry-run`; re-import after further local work with `--update`. The playbook the user's local assistant followed is `context/local-kit/guides/11-go-cloud.md`.
 - **Everything else** — `cinna api <METHOD> <path>` is the generic escape hatch into the platform API (e.g. `cinna api GET agents`, `cinna api PATCH agents/<id> --json '{…}'`). Consult `context/api_reference/` for the endpoint catalogue and `context/examples/` for patterns. Credentials, user management, admin, CLI, MFA/auth, and streaming routes are excluded by policy — exit code 2 means the platform refused the call, exit code 1 means the target route returned an error.
 
 ### Building an agentic network

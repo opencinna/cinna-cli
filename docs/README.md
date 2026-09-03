@@ -201,6 +201,10 @@ main.py  (CLI commands — Click)
   ├── doctor.py          — `cinna doctor`: reconcile registry ↔ Mutagen, delete stalled / terminate active sessions, refresh tokens
   ├── chat.py            — `cinna chat`: session-backed conversation testing (poll + NDJSON) over the api-proxy
   ├── improve.py         — `cinna improve`: improvement requests users shared about your agents (list/show/download/status)
+  ├── local_import.py    — `cinna agent import`: the Local Agent Kit go-cloud step
+  ├── kit_contract.py    — the Local Agent Kit contract as data (`.cinna-kit/layout.json`):
+  │                        exclude patterns, secret-file rules, export walk, content_hash,
+  │                        publications.json ledger, contract-version gate
   ├── config.py          — .cinna/config.json: load/save/find
   ├── auth.py            — JWT storage, Authorization headers
   ├── client.py          — PlatformClient: HTTP + SSE stream_exec
@@ -289,6 +293,7 @@ authoring convention.
 | **MCP integration** | `cinna connect mcp` · `cinna mcp-proxy` (knowledge stdio server) | [business](features/mcp_integration/mcp_integration.md) · [tech](features/mcp_integration/mcp_integration_tech.md) · [acceptance](features/mcp_integration/mcp_integration_acceptance.md) |
 | **Git versioning** | `cinna git` (link, status, commit, push, pull, log, checkout, unlink) | [business](features/git_versioning/git_versioning.md) · [tech](features/git_versioning/git_versioning_tech.md) · [acceptance](features/git_versioning/git_versioning_acceptance.md) |
 | **Improvement requests** | `cinna improve` (list, show, download, status) | [business](features/improvement_requests/improvement_requests.md) · [tech](features/improvement_requests/improvement_requests_tech.md) · [acceptance](features/improvement_requests/improvement_requests_acceptance.md) |
+| **Local agent import** | `cinna agent import` (Local Agent Kit → cloud agent), incl. the versioned folder contract (`.cinna-kit/layout.json`), `publications.json` and `content_hash` | [business](features/local_agent_import/local_agent_import.md) · [tech](features/local_agent_import/local_agent_import_tech.md) · [acceptance](features/local_agent_import/local_agent_import_acceptance.md) |
 
 The sections below (Git Versioning, Sync Transport, Remote Exec, Remote Chat,
 Bootstrap Flow) remain as in-README quick references and backend contracts; the

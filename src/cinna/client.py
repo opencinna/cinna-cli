@@ -514,6 +514,20 @@ class AccountClient:
         response = self._client.get(f"/api/v1/cli/account/agents/{agent_id}/inspect")
         return self._handle_response(response).json()
 
+    def update_agent_config(self, agent_id: str, fields: dict) -> dict:
+        """PUT agents/{id} through the escape hatch — the bulk prompt write.
+
+        ``fields`` is the documented prompt subset (``description``,
+        ``workflow_prompt``, ``entrypoint_prompt``, ``refiner_prompt``,
+        ``router_trigger_prompt``, ``example_prompts``); omitted keys are left
+        unchanged. There is no dedicated account route for this — the
+        authoring-agent-prompts guide drives it with
+        ``cinna api PUT agents/<id> --data @prompts.json``, and this method is
+        the same call made from Python (see the account CLI workspace doc,
+        "Authoring Agent Prompts").
+        """
+        return self._proxy_json("PUT", f"agents/{agent_id}", json_body=fields)
+
     # --- Schedules (full CRUD via dedicated account verbs) ---
 
     def list_schedules(self, agent_id: str) -> dict:
