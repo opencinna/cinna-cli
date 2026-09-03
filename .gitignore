@@ -8,4 +8,5 @@ __pycache__/
 dist/
 build/
 cinna.log
+cinna.log.*
 .claude/settings.local.json
