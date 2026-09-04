@@ -17,6 +17,12 @@ logger = logging.getLogger("cinna.sync")
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
+# ``TarFile.extract(..., filter=...)`` (PEP 706) only exists on Python 3.12+ and
+# the 3.10.12 / 3.11.4 security backports; on older 3.10/3.11 patch releases it
+# raises ``TypeError: extract() got an unexpected keyword argument 'filter'``.
+# ``tarfile.data_filter`` landed in the same change, so it is an exact probe.
+_HAS_EXTRACT_FILTER = hasattr(tarfile, "data_filter")
+
 
 def ensure_workspace_dirs(workspace: Path) -> None:
     """Ensure required workspace subdirectories exist.
@@ -80,13 +86,26 @@ def _extract_tar(
             if member.issym() or member.islnk():
                 console.warn(f"Skipping symlink: {member.name}")
                 continue
+            if not (member.isfile() or member.isdir()):
+                # Devices / fifos: the "data" filter rejects these outright, so
+                # skip them explicitly and keep the fallback path equivalent.
+                console.warn(f"Skipping special file: {member.name}")
+                continue
             if member.size > MAX_FILE_SIZE:
                 console.warn(f"Skipping large file: {member.name}")
                 continue
             if only_files is not None and member.name not in only_files:
                 continue
 
-            tar.extract(member, path=workspace, filter="data")
+            if _HAS_EXTRACT_FILTER:
+                tar.extract(member, path=workspace, filter="data")
+            else:
+                # Pre-backport interpreter: extract unfiltered, but only after
+                # the checks above have already covered what "data" guards
+                # against (traversal, links, special files). Strip setuid /
+                # setgid / sticky bits the filter would have cleared.
+                member.mode &= 0o777
+                tar.extract(member, path=workspace)
             extracted.append(member.name)
     return extracted
 
