@@ -26,8 +26,10 @@ the silent-secret and scope-drift bugs live.
 - **Editable install** of the CLI under test:
   `python3 -c "import cinna,os;print(os.path.dirname(cinna.__file__))"` must point
   at this repo's `src/cinna`. Confirm `which cinna` resolves and
-  `cinna account --help` lists `setup / agents / status / refresh-context /
-  user-workspace / credentials`.
+  `cinna account --help` lists `setup / set-token / agents / status /
+  refresh-context / user-workspace / credentials`.
+- For the no-terminal scenarios (15–18): `jq` to inspect the JSON lines, and a
+  second **account** setup token per run (every exchange burns one).
 - `git` and `mutagen` on `PATH` (needed once a child agent is synced and
   exercised).
 
@@ -253,8 +255,114 @@ the silent-secret and scope-drift bugs live.
 - **Watch for:** user files deleted; the registry entry surviving; a revoke error
   aborting the command.
 
+### 15. Desktop-style setup: absolute `--dir`, `--no-input`, `--json`, no TTY
+
+- **Goal:** Cinna Desktop creates the account workspace as a child process with
+  no terminal and parses the result.
+- **Setup:** a fresh account setup token; note the `setup_command` string the
+  platform returns (`curl -sL …/api/cli-setup/account/<TOKEN> | python3 -`).
+- **Steps:**
+  ```
+  TARGET="$HOME/CinnaAgents/Cloud/localhost"          # parents must not exist yet
+  cinna account setup 'curl -sL http://localhost:8000/api/cli-setup/account/<TOKEN> | python3 -' \
+      --dir "$TARGET" --name desktop-test --no-input --json < /dev/null > out.jsonl; echo "exit $?"
+  cat out.jsonl | jq -c .
+  ls -a "$TARGET"; cat "$TARGET/.cinna/account.json"
+  ```
+- **Expected:** exit `0`. Every line of `out.jsonl` parses; the first three are
+  `{"step":1..3,"total":3,"status":"start",…}`, the last is `{"result":"ok",
+  "workspace":"<TARGET>","platform_url":…,"frontend_url":…,"machine_name":
+  "desktop-test","context_package":"ok"}`. The workspace sits exactly at
+  `$TARGET` (dots in the host kept, parents created), with the same files as
+  scenario 1. No table, hint or spinner text on stdout.
+- **Watch for:** the workspace landing under cwd instead of the absolute path;
+  a non-JSON line on stdout (Rich leaking); the process waiting on stdin
+  (folder / machine-name prompt); `context_package` not reflecting a failed
+  download (should be `failed` with a preceding `"status":"warn"` line, exit
+  still 0).
+
+### 16. Desktop-style refresh: `account set-token` in place, same account only
+
+- **Goal:** the desktop refreshes an expiring account token silently; a token
+  for another account can never be swapped in.
+- **Setup:** scenario 15's workspace; `cinna account user-workspace activate
+  <name>` so a client-side selection exists; one synced child (scenario 5).
+  Mint two fresh account setup tokens: one as the **same** user, one as a
+  **different** user on the same platform.
+- **Steps:**
+  ```
+  cd "$TARGET"; cp .cinna/account.json /tmp/before.json
+  cinna account set-token 'curl -sL http://localhost:8000/api/cli-setup/account/<SAME_USER_TOKEN> | python3 -' \
+      --no-input --json < /dev/null; echo "exit $?"
+  diff <(jq 'del(.account_token)' /tmp/before.json) <(jq 'del(.account_token)' .cinna/account.json)
+  cat agents/<slug>/.cinna/config.json | jq .cli_token       # unchanged
+  cinna account set-token 'curl -sL http://localhost:8000/api/cli-setup/account/<OTHER_USER_TOKEN> | python3 -' \
+      --no-input --json < /dev/null; echo "exit $?"
+  cinna account set-token '<SAME_USER_TOKEN again>' --json; echo "exit $?"
+  ```
+- **Expected:** first call exits `0`, prints two `start` steps, an `ok` line
+  and `{"result":"ok",…,"context_package":"skipped"}`; only `account_token`
+  changed (the `diff` is empty), the child token is untouched, and the exchange
+  was made with the **stored** machine name (check the CLI token list in
+  Settings — no new machine). The other-user call exits `11` with
+  `{"result":"error","code":"account_mismatch",…}` and `account.json` is
+  unchanged. The reused (already burned) token exits `10` with
+  `code: "setup_token_invalid"` and the backend detail.
+- **Watch for:** the mismatch being detected only after the file was written;
+  `user_workspace_id` or `machine_name` reset; a new machine appearing in the
+  platform's token list; exit `1` where `10` / `11` is required.
+
+### 17. Exit-code contract
+
+- **Goal:** a driver can act on the exit code alone.
+- **Steps:** run each from a scratch dir with `--no-input --json < /dev/null`
+  and record `$?` plus the final line's `code`:
+  ```
+  cinna account setup '<ALREADY_USED_TOKEN_URL>' --dir /tmp/x1        # 10 setup_token_invalid
+  cinna account setup '<VALID_URL>' --dir "$TARGET"                    # 1  workspace_exists (token NOT burned)
+  cinna account setup 'http://127.0.0.1:1/api/cli-setup/account/X' --dir /tmp/x2   # 12 network
+  cinna account status                                                 # 1  not_an_account_workspace
+  cinna --no-input login                                               # 1  needs_input (no domain, human text)
+  cinna account setup                                                  # 2  usage
+  ```
+  Then, with the backend stopped: `cinna account set-token '<URL>' --json` → `12`.
+- **Expected:** the codes in the comments. For the `workspace_exists` case,
+  re-use the same valid token afterwards in a fresh dir — it must still work.
+- **Watch for:** any of these coming back as a bare `1`; a traceback instead of
+  a JSON error line; the guard case burning the token.
+
+### 18. `account status --json` and the cinna-cli version pin
+
+- **Goal:** the desktop reconciles from one status line, including whether to
+  reinstall cinna-cli.
+- **Steps:**
+  ```
+  cd "$TARGET"; cinna account status --json | jq .
+  curl -s http://localhost:8000/.well-known/cinna-desktop | jq .local_dev
+  cinna account status | tail -20
+  cinna doctor --dry-run
+  ```
+- **Expected:** exactly one JSON line with `result`, `workspace`,
+  `platform_url`, `frontend_url`, `machine_name`, `active_workspace`
+  (`{id,name}` or `null`), `token` (`valid|expired|unreachable`),
+  `synced_agents`, `agents[]`, `context_package{local,remote,state}` and
+  `cli{installed,required,state}`. When the platform publishes
+  `local_dev.cinna_cli_version`, `cli.required` equals it and `state` is
+  `current` / `behind` / `ahead`; on an older platform `required` is `null`
+  and `state` is `unknown` — still exit 0. The human `status` shows the same
+  as a `cinna-cli` table row and a `uv tool install cinna-cli==<pin>` hint when
+  behind; `doctor` lists the platform under "manual action needed" only when
+  the pin differs.
+- **Watch for:** a missing discovery document turning into an error; `doctor`
+  nagging when no pin is published; the JSON line missing `cli`.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
+- **`--json` stdout is JSON only, last line is the verdict** — every stdout line
+  parses; exactly one `result` line; human hints never leak.
+- **Never wait for a human without a terminal** — with `--no-input` / `--json`
+  / `CINNA_NO_INPUT=1` every command either proceeds or fails with
+  `needs_input`; nothing reads stdin or `/dev/tty`.
 - **No secret ever sent** — credential create/update bodies carry only metadata;
   the CLI cannot read or write a credential's secret value.
 - **Account token stays account-scoped** — it is used only on `/account/*`; every
@@ -284,4 +392,3 @@ the silent-secret and scope-drift bugs live.
 - Verify `~/.cinna/agents.json` has no leftover entries for the test children —
   especially if any helper ran **outside** pytest's global-state isolation (it
   would write the real registry).
-</content>

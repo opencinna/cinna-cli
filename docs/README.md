@@ -137,6 +137,7 @@ Key properties:
 A second token type (`token_type="cli-account"`) issued to an **account workspace** (`.cinna/account.json`). Scoped only to the `/account/*` routes — it discovers agents and mints per-agent CLI tokens (`cinna agent sync`), but cannot itself sync or exec. Same 7-day rolling expiry as a CLI token.
 
 - **Refreshable without a paste** — `cinna login` runs an RFC 8628 device-authorization flow: the CLI prints a short code + URL, the user clicks **Authorize** in the browser (already signed in), and the CLI swaps the fresh token into `.cinna/account.json` in place. Run from an empty/new folder, the same command instead bootstraps a brand-new account workspace.
+- **Refreshable from a setup token** — `cinna account set-token <token_or_url>` re-exchanges a fresh *account* setup token under the stored machine name and rewrites only `account_token` (same in-place swap). Bound to the same account: a different platform origin or token subject aborts with exit `11`. This is the path Cinna Desktop drives (`--no-input --json`) so the user never runs `cinna login`.
 - **Mints child tokens** — per-agent tokens minted from it carry its id as provenance and are re-mintable via `POST /account/agents/{id}/mint` (used by `cinna agent sync` and `cinna doctor`).
 
 ### Knowledge Source
@@ -208,16 +209,17 @@ main.py  (CLI commands — Click)
   ├── config.py          — .cinna/config.json: load/save/find
   ├── auth.py            — JWT storage, Authorization headers
   ├── client.py          — PlatformClient: HTTP + SSE stream_exec
-  ├── mutagen_runtime.py — detect/install Mutagen; gate on version match
+  ├── mutagen_runtime.py — detect/install Mutagen; gate on version match; `CINNA_MUTAGEN_BIN` override
+  ├── cli_version.py     — installed vs platform-pinned cinna-cli version
   ├── sync_session.py    — wrap the `mutagen` CLI (start/stop/status/conflicts)
   ├── sync_tui.py        — live Textual TUI shown by `cinna dev` (Sync/Details/Conflicts tabs)
   ├── sync_ssh_shim.py   — `cinna-sync-ssh` entry point (WebSocket transport)
   ├── sync.py            — tarball/zip extraction helpers (initial clone only)
   ├── context.py         — CLAUDE.md, BUILDING_AGENT.md, .mcp.json, opencode.json
   ├── mcp_proxy.py       — MCP stdio server for knowledge_query
-  ├── console.py         — Rich helpers
+  ├── console.py         — Rich helpers + the `--json` / `--no-input` switches (prompt/confirm wrappers, JSON lines)
   ├── logging.py         — cinna.log (rotating file handler)
-  └── errors.py          — exception hierarchy
+  └── errors.py          — exception hierarchy; `CinnaExit` = stable exit code + machine code
 ```
 
 ### Local Directory Layout
@@ -282,8 +284,8 @@ authoring convention.
 
 | Feature | Command surface | Docs |
 |---|---|---|
-| **Bootstrap & onboarding** | `cinna setup` / `set-token` / `login` / `list` / `status` / `disconnect[-all]` / `completion` / `dev` / `redev` | [business](features/bootstrap_onboarding/bootstrap_onboarding.md) · [tech](features/bootstrap_onboarding/bootstrap_onboarding_tech.md) · [acceptance](features/bootstrap_onboarding/bootstrap_onboarding_acceptance.md) |
-| **Account workspace** | `cinna account` (setup, agents, status, refresh-context, user-workspace, credentials) | [business](features/account_workspace/account_workspace.md) · [tech](features/account_workspace/account_workspace_tech.md) · [acceptance](features/account_workspace/account_workspace_acceptance.md) |
+| **Bootstrap & onboarding** | `cinna setup` / `set-token` / `login` / `list` / `status` / `disconnect[-all]` / `completion` / `dev` / `redev`; the no-TTY contract (`--no-input`, `--json`, exit codes, `CINNA_MUTAGEN_BIN`) | [business](features/bootstrap_onboarding/bootstrap_onboarding.md) · [tech](features/bootstrap_onboarding/bootstrap_onboarding_tech.md) · [acceptance](features/bootstrap_onboarding/bootstrap_onboarding_acceptance.md) |
+| **Account workspace** | `cinna account` (setup, set-token, agents, status, refresh-context, user-workspace, credentials); desktop-managed workspaces | [business](features/account_workspace/account_workspace.md) · [tech](features/account_workspace/account_workspace_tech.md) · [acceptance](features/account_workspace/account_workspace_acceptance.md) |
 | **Agent management** | `cinna agent` (sync, unsync, create, restart-env, show, status) | [business](features/agent_management/agent_management.md) · [tech](features/agent_management/agent_management_tech.md) · [acceptance](features/agent_management/agent_management_acceptance.md) |
 | **Agent schedules** | `cinna agent schedule` (list, generate, create, update, run, logs, delete) | [business](features/agent_schedules/agent_schedules.md) · [tech](features/agent_schedules/agent_schedules_tech.md) · [acceptance](features/agent_schedules/agent_schedules_acceptance.md) |
 | **Live sync** | `cinna sync` (status, conflicts, push, pull, resolve) + Mutagen transport | [business](features/live_sync/live_sync.md) · [tech](features/live_sync/live_sync_tech.md) · [acceptance](features/live_sync/live_sync_acceptance.md) |
@@ -605,6 +607,8 @@ When a CLI token expires (or is revoked) the normal remedy is `cinna set-token <
 | Method | Route | Auth | Purpose |
 |--------|-------|------|---------|
 | POST | `/api/cli-setup/{token}` | Token | Exchange setup token for CLI token |
+| POST | `/api/cli-setup/account/{token}` | Token | Exchange an **account** setup token (`cinna account setup` / `cinna account set-token`); 4xx ⇒ exit 10, 5xx ⇒ exit 12 |
+| GET  | `/.well-known/cinna-desktop` | None | Desktop discovery document; `local_dev.cinna_cli_version` is the cinna-cli pin `cinna account status` / `cinna doctor` compare against (absent ⇒ "unknown") |
 | GET  | `/api/v1/cli/agents/{id}/workspace` | CLI JWT | One-shot tarball for initial clone |
 | GET  | `/api/v1/cli/agents/{id}/building-context` | CLI JWT | Assembled building prompt |
 | POST | `/api/v1/cli/agents/{id}/knowledge/search` | CLI JWT | Knowledge base search (via MCP proxy) |
@@ -644,6 +648,8 @@ uv run ruff format --check src/
 ## Release Management
 
 The CLI is published to [PyPI](https://pypi.org/project/cinna-cli/) by `.github/workflows/publish.yml`, which runs on any pushed tag matching `v*` (and via manual `workflow_dispatch`). It builds the sdist + wheel with `uv build`, runs `twine check`, then publishes through PyPI **Trusted Publishing** (OIDC — no stored API token) from the GitHub `pypi` environment.
+
+Cinna Desktop installs a **pinned** version (`uv tool install cinna-cli==<version>`) — the version each cinna-core instance advertises as `local_dev.cinna_cli_version` in its discovery document (`CINNA_CLI_VERSION` setting). A release that changes the driver contract (exit codes, `--json` shapes, the three desktop-driven verbs) must be published to PyPI **before** cinna-core's pin moves to it.
 
 ### Cutting a release
 

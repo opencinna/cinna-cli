@@ -29,15 +29,25 @@ and tests in `tests/test_account.py`.
 - `src/cinna/mcp_proxy.py` — account-mode knowledge proxy
   (`run_mcp_proxy` / `_resolve_proxy_context` / `create_account_mcp_server`)
   wired by the account `.mcp.json`.
-- `src/cinna/errors.py` — `AccountConfigNotFoundError` ("Not in a cinna account
-  workspace…").
+- `src/cinna/errors.py` — `CinnaExit` (stable exit code + machine `code`) and
+  its subclasses used here: `SetupTokenError` (10), `AccountMismatchError` (11),
+  `NetworkError` / `PlatformError` 5xx (12), `WorkspaceExistsError`,
+  `AccountConfigNotFoundError`.
+- `src/cinna/console.py` — the `json_mode` / `no_input` switches, the JSON line
+  writer (`emit_json` / `emit_result`) and the `prompt` / `confirm` /
+  `interactive` wrappers every prompt site goes through.
+- `src/cinna/cli_version.py` — installed-vs-pinned cinna-cli version
+  (`cli_version_status`, `fetch_required_cli_version`).
 - `src/cinna/templates/ACCOUNT_CLAUDE.md.template` — the orchestrator
   `CLAUDE.md` source.
 - Tests: `tests/test_account.py` (setup, refresh-context, agents listing +
   workspace scoping, status, agent sync/unsync, exec `--agent`, child-workspace
   resolution incl. multi-segment subdir, user-workspace, credentials,
-  `AccountClient` HTTP-level), `tests/test_client.py` (account client), and the
-  MCP-proxy account-mode tests in `tests/test_account.py`.
+  `AccountClient` HTTP-level), `tests/test_client.py` (account client), the
+  MCP-proxy account-mode tests in `tests/test_account.py`, and
+  `tests/test_onboarding.py` (the driver contract: exit codes, absolute `--dir`,
+  `account set-token`, `--no-input`, `--json` line snapshots, version pin in
+  status / doctor).
 
 ## Command surface
 
@@ -46,6 +56,8 @@ Each verb → its handler in `src/cinna/main.py` → the body in
 
 - `cinna account setup` → `src/cinna/main.py:account_setup()` →
   `src/cinna/account.py:run_account_setup()`
+- `cinna account set-token` → `src/cinna/main.py:account_set_token()` →
+  `src/cinna/account.py:run_account_set_token()`
 - `cinna account agents` → `src/cinna/main.py:account_agents()` →
   `src/cinna/account.py:run_account_agents()`
 - `cinna account status` → `src/cinna/main.py:account_status()` →
@@ -80,6 +92,14 @@ Each verb → its handler in `src/cinna/main.py` → the body in
   `src/cinna/main.py:account_credentials_share_with_agent()` →
   `src/cinna/account.py:run_credentials_share()`
 
+`setup`, `set-token` and `status` also take `--no-input` and `--json`
+(`src/cinna/main.py:no_input_option()` / `json_option()` — eager, value-less
+options whose callbacks flip `src/cinna/console.py:set_no_input()` /
+`set_json_mode()`); the root group takes `--no-input` too (also
+`CINNA_NO_INPUT=1`). The per-command copy exists because
+`ignore_unknown_options` + the `nargs=-1` setup argument would otherwise
+swallow a flag placed after the subcommand, which is how the desktop invokes it.
+
 Related (documented here as integration points): `cinna agent sync` →
 `src/cinna/account.py:run_agent_sync()`, `cinna agent unsync` →
 `run_agent_unsync()`, `cinna login` → `run_login()`.
@@ -99,10 +119,32 @@ Related (documented here as integration points): `cinna agent sync` →
   bare token falls back to `CINNA_PLATFORM_URL`.
 - `src/cinna/account.py:default_account_dir_name()` — derives the default folder
   from the platform host (collapses non-`[A-Za-z0-9-]` to `_`).
-- `src/cinna/account.py:run_account_setup()` — parse → derive/prompt the dir →
-  **guard the target before** `_exchange_account_setup_token()` → build
-  `AccountConfig` → `_write_account_files()` → best-effort
-  `_install_context_package()`.
+- `src/cinna/account.py:resolve_account_dir()` — the `--dir` contract: absolute
+  (after `~` expansion) → as is, relative → under cwd. No symlink resolution, so
+  the path reported back equals the one passed.
+- `src/cinna/account.py:run_account_setup()` — parse → derive/prompt the dir
+  (`_prompt_account_dir()` returns the default outright under `no_input`) →
+  `resolve_account_dir()` → **guard the target before**
+  `_exchange_account_setup_token()` (`WorkspaceExistsError`) → build
+  `AccountConfig` → `_write_account_files()` (creates parents) → best-effort
+  `_install_context_package()` → `console.emit_result()` with
+  `_account_result_fields()`.
+- `src/cinna/account.py:_exchange_account_setup_token()` — the exchange with the
+  exit-code mapping: transport error → `NetworkError` (12), 5xx →
+  `PlatformError` (12), any other non-200 → `SetupTokenError` (10, backend
+  detail verbatim, `http_status` in the JSON error line).
+- `src/cinna/account.py:run_account_set_token()` — `find_account_root()` →
+  `parse_account_setup_input(…, fallback_platform_url=<stored>/api)` →
+  exchange under the **stored** `machine_name` → `_same_origin()` check on
+  `platform_url` and `_jwt_claims()` `sub` comparison (both raise
+  `AccountMismatchError`, 11, before any write) → rewrite `account_token` +
+  refreshed `platform_url` / `frontend_url` → `save_account_config()`.
+  `user_workspace_*`, `machine_name`, `context/`, children untouched.
+- `src/cinna/account.py:_jwt_claims()` — unverified base64 decode of a JWT
+  payload, only to compare `sub`; opaque tokens yield `None` (no comparison).
+- `src/cinna/account.py:_account_result_fields()` — the shared `--json` final
+  line of setup / set-token (`workspace`, `platform_url`, `frontend_url`,
+  `machine_name`, `context_package: ok|failed|skipped`).
 - `src/cinna/account.py:_write_account_files()` — mkdir + `save_account_config` +
   `agents/` + `_write_account_claude_md` + `_write_account_claude_settings` +
   `_write_account_mcp_config`.
@@ -118,7 +160,15 @@ Related (documented here as integration points): `cinna agent sync` →
   **client-side** scope to `user_workspace_id` (unless `--all`), and annotate each
   row with the local checkout from `list_child_workspaces()`.
 - `src/cinna/account.py:run_account_status()` — `probe_account_token()` +
-  `_synced_agents_table()` + `_print_token_reauth_hint()`.
+  `context_package_status()` + `cli_version_status()`; in JSON mode emits the
+  single `result` line (`token`, `active_workspace`, `synced_agents`, `agents[]`,
+  `context_package{local,remote,state}`, `cli{installed,required,state}`) and
+  returns; otherwise the Rich table + `_synced_agents_table()` +
+  `_print_token_reauth_hint()` (which now names `cinna account set-token` next
+  to `cinna login`).
+- `src/cinna/cli_version.py:cli_version_status()` — `GET
+  {origin}/.well-known/cinna-desktop` → `local_dev.cinna_cli_version`, compared
+  with the running `__version__` (`current` / `behind` / `ahead` / `unknown`).
 - `src/cinna/account.py:probe_account_token()` — cheap `GET /account/agents`;
   2xx → valid, 401 → expired, else → unreachable.
 - `src/cinna/account.py:run_agent_sync()` — resolve via `_resolve_account_agent`,
@@ -185,7 +235,14 @@ All consumed by `src/cinna/client.py:AccountClient` with the account token
 - `POST /cli-setup/account/{token}` — exchange the account setup token
   (`src/cinna/account.py:_exchange_account_setup_token()`, plain `httpx.post`, not
   the client). Body: `{machine_name, machine_info}`. Returns `account_token`,
-  `platform_url`, `frontend_url`, `machine_name`.
+  `platform_url`, `frontend_url`, `machine_name`. Used by both `account setup`
+  and `account set-token`; the CLI relies on the response being identical for a
+  first and a repeat exchange (no `user`/owner field is required — the
+  same-account check works from the origin and the token's own `sub`).
+- `GET /.well-known/cinna-desktop` (unauthenticated, platform origin) — the
+  desktop discovery document; `local_dev.cinna_cli_version` is the cinna-cli
+  pin (`src/cinna/cli_version.py:fetch_required_cli_version()`). Absent block,
+  404 or no network → `unknown`, silently.
 - `GET /api/v1/cli/account/agents` — accessible agents (`list_account_agents`;
   also the token probe).
 - `POST /api/v1/cli/account/agents/{id}/mint` — mint a per-agent child token
@@ -221,7 +278,31 @@ All consumed by `src/cinna/client.py:AccountClient` with the account token
 - **Guard before burning the setup token** — `run_account_setup` checks the
   target dir exists-check *before* calling `_exchange_account_setup_token`, so a
   doomed run never spends the single-use token.
-  (`tests/test_account.py:test_account_setup_refuses_existing_workspace`)
+  (`tests/test_account.py:test_account_setup_refuses_existing_workspace`,
+  `tests/test_onboarding.py:test_setup_existing_absolute_dir_is_workspace_exists`)
+- **Absolute `--dir` is used as is, parents created** — `resolve_account_dir()`;
+  the `workspace` reported in JSON is the path the caller passed.
+  (`tests/test_onboarding.py:test_setup_absolute_dir_used_as_is_and_parents_created`)
+- **`set-token` never rebinds** — the origin / `sub` checks precede the write;
+  on mismatch `account.json` is byte-identical afterwards.
+  (`tests/test_onboarding.py:test_account_set_token_platform_mismatch_exits_11`,
+  `test_account_set_token_subject_mismatch_exits_11`)
+- **`set-token` preserves everything but the token** — active user workspace,
+  machine name and child configs survive.
+  (`tests/test_onboarding.py:test_account_set_token_swaps_token_in_place`)
+- **Exit codes are mapped centrally** — `src/cinna/main.py:CinnaGroup.invoke()`
+  wraps plain `ClickException`s, `httpx.TransportError`s and (in JSON mode)
+  unexpected exceptions into `CinnaExit`; `CinnaExit.show()` prints the JSON
+  error line instead of `Error: …` when `json_mode` is on.
+  (`tests/test_onboarding.py`, the "exit codes" block)
+- **`--json` stdout is JSON only** — `set_json_mode()` swaps the Rich console
+  for a quiet one; `spinner()` is a no-op; every stdout line must parse.
+  (`tests/test_onboarding.py:test_setup_json_progress_and_result`,
+  `test_status_json`)
+- **`--no-input` never blocks** — `_prompt_account_dir()` short-circuits, the
+  machine-name prompt takes its default, `console.confirm()` returns the
+  default. (`tests/test_onboarding.py:test_no_input_after_subcommand_skips_dir_prompt`,
+  `test_group_level_no_input_fails_needs_input`)
 - **Context refresh is non-destructive** — `_install_context_package(replace=True)`
   removes `context/` only after a successful download; the orchestrator/child
   `CLAUDE.md` regeneration is independent of the download.
@@ -252,4 +333,3 @@ All consumed by `src/cinna/client.py:AccountClient` with the account token
 - **Safe extraction** — the context tarball reuses the path-traversal/absolute/
   symlink-rejecting extractor.
   (`tests/test_account.py:test_context_extraction_rejects_malicious_members`)
-</content>

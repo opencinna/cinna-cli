@@ -85,9 +85,12 @@ without re-cloning.
   token is pasted, so agents on different platforms each refresh from their own dir.
 - **Account workspace:** `cinna login` (inside an account workspace) refreshes the
   account token with a browser device-authorization flow — no paste. Run from an
-  empty folder it instead bootstraps a *new* account workspace. Full behavior in
-  [Account Workspace](../account_workspace/account_workspace.md); after it, run
-  `cinna doctor` to re-mint the dependent per-agent tokens (see [Doctor](../doctor/doctor.md)).
+  empty folder it instead bootstraps a *new* account workspace. The paste
+  counterpart is `cinna account set-token <token>` (a fresh **account** setup
+  token, same in-place swap; this is what Cinna Desktop drives). Full behavior in
+  [Account Workspace](../account_workspace/account_workspace.md); after either,
+  run `cinna doctor` to re-mint the dependent per-agent tokens (see
+  [Doctor](../doctor/doctor.md)).
 
 ### See what's connected — `cinna list` / `cinna status`
 - `cinna list` reads the per-user registry and prints one row per agent: name +
@@ -123,6 +126,33 @@ without re-cloning.
   behind a typed confirmation. Use `cinna agent unsync` for an account-managed
   child (see [Agent Management](../agent_management/agent_management.md)).
 
+### Driven by another program — no terminal
+Cinna Desktop (and CI) run `cinna` as a child process with no TTY. Three
+CLI-wide switches make that safe; the account verbs the desktop uses are
+described in [Account Workspace](../account_workspace/account_workspace.md).
+1. `--no-input` (before or, on the account verbs, after the subcommand; also
+   `CINNA_NO_INPUT=1`): every prompt takes its default — machine name, folder
+   name, "Continue?" — and a prompt with no default fails with code
+   `needs_input`. A confirmation whose default is "No" aborts exactly as if
+   Enter had been pressed, so `disconnect` / `disconnect-all` / `redev`-style
+   prompts never hang. Mutagen's "run the install command, then press Enter"
+   wait becomes a structured `mutagen_missing` / `mutagen_mismatch` error.
+2. `--json` (on `account setup` / `set-token` / `status`): one JSON object per
+   line on stdout, Rich suppressed, spinners silent; the final line is always
+   `{"result": "ok"|"error", …}`. Implies `--no-input`.
+3. Stable exit codes, for every command: `0` ok · `10` setup token invalid /
+   expired / used · `11` token for another account · `12` platform unreachable
+   or 5xx · `1` anything else, carrying a specific machine `code` · `2` usage
+   error. Human output is unchanged.
+4. `CINNA_MUTAGEN_BIN=<absolute path>` makes every Mutagen invocation (version
+   check, session commands, the TUI monitor) use that binary instead of the
+   `mutagen` on PATH — the desktop ships its own pinned copy. A path that is not
+   executable counts as "not installed", never as a silent fallback.
+5. `cinna doctor` and `cinna account status` compare the running cinna-cli with
+   the version the platform pins (its `/.well-known/cinna-desktop` discovery
+   document) and say `uv tool install cinna-cli==<pin>` when behind; no pin
+   means "unknown", not an error.
+
 ### Shell completion — `cinna completion`
 - `cinna completion --install` auto-detects the shell (or takes `bash|zsh|fish`)
   and appends the activation snippet to the rc file (idempotent — skips if already
@@ -154,6 +184,10 @@ without re-cloning.
 - **Sync never outlives its process.** `setup` / `dev` / `redev` hold sync in the
   foreground; Ctrl-C terminates the session so the shared Mutagen daemon is left
   clean.
+- **Never block without a terminal.** The TTY heuristics (`curl | python3`
+  bootstrap, piped spawns) and the explicit `--no-input` flag behave the same:
+  defaults or a `needs_input` failure, never a hang. `--json` is a pure
+  stdout stream. Exit codes are a contract a driver can switch on.
 
 ## Architecture overview
 
@@ -171,12 +205,16 @@ Inspect path: `cinna list` / `cinna status` → read `~/.cinna/agents.json` / `.
 Teardown path: `cinna disconnect` → `sync_session.stop()` + `remove_agent_registry()`
 + `bootstrap.remove_workspace_artifacts()` → keep `workspace/`.
 
+Error path (every command): body raises `CinnaExit` / `ClickException` / transport error
+→ root group normalizes to `CinnaExit(exit_code, code, detail)` → human: `Error: …` on
+stderr; `--json`: `{"result": "error", "code", "detail"}` on stdout → process exit code.
+
 ## Integration points
 
 - **[Account Workspace](../account_workspace/account_workspace.md)** — `cinna login`
-  refreshes/bootstraps the account token; `cinna agent sync` is the account-driven
-  alternative to `setup` for checking out agents, and `status` falls back to the
-  account view.
+  / `cinna account set-token` refresh the account token; `cinna agent sync` is the
+  account-driven alternative to `setup` for checking out agents, `status` falls
+  back to the account view, and the desktop-driven `--json` verbs live there.
 - **[Agent Management](../agent_management/agent_management.md)** — `cinna agent
   sync` / `unsync` reuse the same provisioning + teardown helpers as `setup` /
   `disconnect`.

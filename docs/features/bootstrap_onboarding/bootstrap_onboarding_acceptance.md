@@ -20,7 +20,8 @@ assert the **Expected**, and watch for the **Watch for** failure modes.
   `python3 -c "import cinna,os;print(os.path.dirname(cinna.__file__))"` must point
   at this repo's `src/cinna`. Confirm `which cinna` resolves and `cinna --help`
   lists `setup`, `set-token`, `login`, `list`, `status`, `disconnect`,
-  `disconnect-all`, `completion`, `dev`, `redev`.
+  `disconnect-all`, `completion`, `dev`, `redev`, and `cinna --help` shows the
+  root `--no-input` option.
 - **Two agents** available to check out — ideally a pair whose names normalize to
   the **same slug** (for the collision scenario).
 - `mutagen` on `PATH`.
@@ -210,8 +211,51 @@ assert the **Expected**, and watch for the **Watch for** failure modes.
 - **Watch for:** a second `--install` duplicating the block; the zsh snippet missing
   the `compinit` guard (sourcing then fails with "command not found: compdef").
 
+### 14. No terminal: `--no-input` never hangs, exit codes are stable
+
+- **Goal:** a program (Cinna Desktop, CI) can drive any command without a TTY.
+- **Setup:** an agent dir from scenario 1; an empty scratch dir.
+- **Steps:**
+  ```
+  cd <empty-dir>; cinna --no-input login < /dev/null; echo "exit $?"
+  CINNA_NO_INPUT=1 cinna login < /dev/null; echo "exit $?"
+  cd <agent-dir>; cinna --no-input disconnect < /dev/null; echo "exit $?"; ls .cinna/config.json
+  cinna --no-input setup '<fresh URL>' < /dev/null      # machine name defaults, no prompt
+  ```
+- **Expected:** the two `login` runs exit `1` immediately with `Error: Input
+  required but --no-input is set: Platform domain…` (no hang, no partial
+  workspace). `disconnect` prints "Aborted!" and exits `1` with `.cinna/`
+  intact (the "Continue?" default is No). `setup` runs through with the
+  default machine name (`<user>'s <host>`).
+- **Watch for:** any command blocking on stdin (run each under `timeout 30`);
+  a prompt reaching `/dev/tty`; `disconnect` proceeding as if confirmed.
+
+### 15. `CINNA_MUTAGEN_BIN` selects the Mutagen binary
+
+- **Goal:** a privately shipped Mutagen is used for everything, PATH ignored.
+- **Setup:** a second Mutagen build at `/opt/cinna/mutagen` (or a copy of the
+  PATH one); optionally rename the PATH one away.
+- **Steps:**
+  ```
+  cd <agent-dir>
+  CINNA_MUTAGEN_BIN=/opt/cinna/mutagen cinna dev        # Ctrl-C after it attaches
+  CINNA_MUTAGEN_BIN=/nonexistent cinna --no-input dev < /dev/null; echo "exit $?"
+  ```
+- **Expected:** the first run starts sync through the override (with PATH's
+  `mutagen` removed it still works; `.cinna/config.json` records that binary's
+  version). The second exits `1` with `Error: Mutagen is required but was not
+  found on PATH. (required version: …)` — a structured `mutagen_missing`,
+  not a wait for Enter.
+- **Watch for:** the daemon / TUI still spawning PATH's `mutagen` (check
+  `ps`); the override falling back to PATH silently when unset-but-invalid.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
+- **Never blocks without a terminal** — with `--no-input` / `CINNA_NO_INPUT=1`
+  every command either proceeds on defaults or fails with `needs_input`.
+- **Exit codes are a contract** — 0 / 10 / 11 / 12 / 1(+code) / 2, see
+  [Account Workspace acceptance](../account_workspace/account_workspace_acceptance.md)
+  scenario 17.
 - **Two token stores stay in lockstep** — any command that writes the CLI token
   updates **both** `.cinna/config.json` and `~/.cinna/agents.json`; they never drift.
 - **No silent rebind / clobber** — `set-token` is agent-bound; `setup` refuses a

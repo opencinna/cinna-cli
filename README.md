@@ -26,7 +26,11 @@ Your Editor / Claude Code
 ## Prerequisites
 
 - **Python 3.10+**
-- **[Mutagen](https://mutagen.io)** (version pinned by the platform — `cinna setup` checks and prompts to install)
+- **[Mutagen](https://mutagen.io)** (version pinned by the platform — `cinna setup` checks and prompts to install; set `CINNA_MUTAGEN_BIN=/abs/path/mutagen` to use a specific binary instead of the one on PATH)
+
+### Cinna Desktop
+
+[Cinna Desktop](https://github.com/opencinna/cinna-desktop) installs its **own pinned copy** of cinna-cli (with `uv` and Mutagen alongside, inside its data folder) and drives it as a child process to create and keep alive an account workspace under `<AgentsHome>/Cloud/<host>/` right after you sign in — no `cinna login`, no token to paste. That private copy is not on your `PATH` unless you opt in from the desktop's settings; installing cinna-cli yourself (`uv tool install cinna-cli`) for terminal use is fine and both operate on the same workspace. The version the platform pins is reported by `cinna account status` / `cinna doctor`.
 
 ## Getting Started
 
@@ -98,7 +102,7 @@ cinna login app.example.com --dir my-cinna             # always into a named sub
 #   ✓ Account workspace ready.
 ```
 
-Use it when `cinna account status` or `cinna doctor` reports the account token has expired. Because the per-agent tokens minted from an account (`cinna agent sync`) can only be re-minted while the account token is valid, the flow is: `cinna login` (refresh the account), then `cinna doctor` (re-mint the dependent sub-agent tokens). If the platform doesn't expose the device-login endpoints yet, `cinna login` says so and points you at the `cinna account setup` paste fallback.
+Use it when `cinna account status` or `cinna doctor` reports the account token has expired. Because the per-agent tokens minted from an account (`cinna agent sync`) can only be re-minted while the account token is valid, the flow is: `cinna login` (refresh the account), then `cinna doctor` (re-mint the dependent sub-agent tokens). If the platform doesn't expose the device-login endpoints yet, `cinna login` says so and points you at the `cinna account set-token` paste fallback.
 
 ### `cinna account setup <token_or_url>`
 
@@ -108,7 +112,7 @@ Initialize an **account workspace** — a multi-agent root from which you can di
 curl -sL https://your-platform.com/api/cli-setup/account/TOKEN | python3 -
 ```
 
-Accepts the same input forms as `cinna setup` (full curl command, URL, or bare token — bare tokens need `CINNA_PLATFORM_URL`). Creates `my-cinna/` (override with `--dir`) containing:
+Accepts the same input forms as `cinna setup` (full curl command, URL, or bare token — bare tokens need `CINNA_PLATFORM_URL`). Creates a folder named after the platform domain (override with `--dir`: an absolute path is used as is with parents created, a relative one lands under the current directory; an existing account workspace there is refused before the token is spent) containing:
 
 ```
 my-cinna/
@@ -122,6 +126,17 @@ Setup also downloads the **context package** into `context/` — curated platfor
 
 The account token is only used for the account-level endpoints (listing agents, minting per-agent tokens, the context package). Per-agent work always runs on each child workspace's own token. Revoking the account session in Settings disconnects every agent synced from it.
 
+`account setup`, `account set-token` and `account status` take `--no-input` (never prompt: defaults, or fail with code `needs_input`; also `CINNA_NO_INPUT=1`, accepted before or after the subcommand) and `--json` (one JSON object per line on stdout — progress `{"step","total","status","message"}` lines, then a final `{"result":"ok"|"error",…}`; implies `--no-input`). Exit codes are stable for every command: `0` ok, `10` setup token invalid/expired/used, `11` token for another account, `12` platform unreachable or 5xx, `1` anything else (the JSON `code` says what), `2` usage.
+
+### `cinna account set-token <token_or_url>`
+
+Refresh the **account** token in place from a fresh account setup token — the account counterpart of `cinna set-token`, and the paste alternative to `cinna login`. Run inside the account workspace; it re-exchanges under the stored machine name and rewrites only `account_token` (plus a refreshed platform/frontend URL) in `.cinna/account.json`. The active user workspace, machine name, `context/` and every synced child under `agents/` are untouched; run `cinna doctor` afterwards to re-mint expired child tokens. A token for a different account is refused (exit `11`) and nothing is written. Bare tokens reuse the stored platform URL.
+
+```bash
+cd my-cinna/
+cinna account set-token 'curl -sL https://your-platform.com/api/cli-setup/account/TOKEN | python3 -'
+```
+
 ### `cinna account agents`
 
 List the agents your account can access (run from inside the account workspace). For each agent: display name + ID, building rights (`✓ can build`, `view-only`, or `foreign install` — installed bundles are publisher-managed and can't be synced), whether a remote environment is active, and whether a local workspace already exists under `agents/`.
@@ -130,7 +145,9 @@ List the agents your account can access (run from inside the account workspace).
 
 One-shot summary of the account workspace: platform/frontend URLs, machine name, synced-agent count, and an account-token probe (`valid token` / `expired token` / `no connection`) — the account-level counterpart of `cinna status`.
 
-Also reports the workspace's **context package version** against the platform's current one — the orchestrator guides ship in that tree, so a workspace set up before a guide existed silently lacks it. When it is behind, the command says so and points at `cinna account refresh-context`; `cinna improve list` prints the same nudge, since its playbook lives there.
+Also reports the workspace's **context package version** against the platform's current one — the orchestrator guides ship in that tree, so a workspace set up before a guide existed silently lacks it. When it is behind, the command says so and points at `cinna account refresh-context`; `cinna improve list` prints the same nudge, since its playbook lives there. Likewise it compares the installed **cinna-cli version** with the one the platform pins (its `/.well-known/cinna-desktop` discovery document) and suggests `uv tool install cinna-cli==<pin>` when behind; no pin means "unknown", not an error.
+
+With `--json` it prints a single line: `{"result":"ok","workspace",…,"token":"valid|expired|unreachable","synced_agents":N,"agents":[…],"context_package":{"local","remote","state"},"cli":{"installed","required","state"}}`.
 
 ### `cinna account refresh-context`
 
