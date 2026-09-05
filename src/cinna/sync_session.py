@@ -26,6 +26,7 @@ from cinna.config import (
     workspace_dir,
 )
 from cinna import console
+from cinna.mutagen_runtime import mutagen_binary
 
 logger = logging.getLogger("cinna.sync_session")
 
@@ -148,7 +149,7 @@ def _run_mutagen(
     capture: bool = True,
 ) -> subprocess.CompletedProcess:
     """Run `mutagen <args>` with the right env."""
-    cmd = ["mutagen", *args]
+    cmd = [mutagen_binary(), *args]
     logger.debug("exec: %s (cwd=%s)", " ".join(cmd), cwd)
     return subprocess.run(
         cmd,

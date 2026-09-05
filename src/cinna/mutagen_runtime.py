@@ -6,6 +6,7 @@ and gates `cinna setup` / `cinna sync start` on a version match.
 """
 
 import logging
+import os
 import platform
 import re
 import shutil
@@ -13,7 +14,6 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-import click
 
 from cinna.client import PlatformClient
 from cinna.config import CinnaConfig, save_config
@@ -36,9 +36,32 @@ class RequiredMutagen:
     platform_api_version: str
 
 
+MUTAGEN_BIN_ENV = "CINNA_MUTAGEN_BIN"
+
+
+def mutagen_binary() -> str:
+    """The ``mutagen`` executable every subprocess call uses.
+
+    ``CINNA_MUTAGEN_BIN`` (an absolute path) wins over the ``PATH`` lookup —
+    Cinna Desktop ships its own pinned Mutagen next to cinna-cli and points the
+    CLI at it without touching the user's PATH. Unset → plain ``mutagen``.
+    """
+    override = os.environ.get(MUTAGEN_BIN_ENV, "").strip()
+    return override or "mutagen"
+
+
 def detect_local_mutagen() -> InstalledMutagen | None:
-    """Locate `mutagen` on PATH and parse its version."""
-    path = shutil.which("mutagen")
+    """Locate `mutagen` (``CINNA_MUTAGEN_BIN`` first, then PATH) and parse its
+    version. An override that does not point at an executable counts as
+    "not installed" — never silently falls back to a different binary than
+    the one sync will run."""
+    override = os.environ.get(MUTAGEN_BIN_ENV, "").strip()
+    if override:
+        path = override if os.access(override, os.X_OK) else None
+        if path is None:
+            logger.warning("%s=%r is not an executable", MUTAGEN_BIN_ENV, override)
+    else:
+        path = shutil.which("mutagen")
     if not path:
         return None
 
@@ -122,16 +145,24 @@ def ensure_mutagen_ready(
 
     Updates `config.mutagen_version` and `last_sync_runtime_check_at` on success.
     Raises MutagenNotFoundError / MutagenVersionMismatchError on hard failures.
+
+    ``interactive`` is further gated by ``console.interactive()``: under
+    ``--no-input`` (or with no TTY) a missing Mutagen is a structured
+    ``mutagen_missing`` error and a minor-version mismatch a
+    ``mutagen_mismatch`` — the CLI never waits on stdin for an install.
     """
     required = fetch_required_mutagen(client, config.agent_id)
     installed = detect_local_mutagen()
 
+    interactive = interactive and console.interactive()
+
     if installed is None:
-        install_mutagen(required)
-        if interactive and click.confirm(
-            "Run the command above, then press Enter to continue.", default=True
-        ):
-            installed = detect_local_mutagen()
+        if interactive:
+            install_mutagen(required)
+            if console.confirm(
+                "Run the command above, then press Enter to continue.", default=True
+            ):
+                installed = detect_local_mutagen()
         if installed is None:
             raise MutagenNotFoundError(required.version)
 
@@ -153,7 +184,7 @@ def ensure_mutagen_ready(
                     f"Installed Mutagen {installed.version} does not match required "
                     f"{required.version}."
                 )
-                if not click.confirm("Continue anyway?", default=False):
+                if not console.confirm("Continue anyway?", default=False):
                     raise MutagenVersionMismatchError(
                         installed.version, required.version
                     )

@@ -45,6 +45,7 @@ from cinna.bootstrap import (
     workspace_agent_id_at,
     _maybe_autolink,
 )
+from cinna.cli_version import cli_version_hint, cli_version_status
 from cinna.client import AccountClient, PlatformClient
 from cinna.config import (
     CONFIG_DIR,
@@ -52,7 +53,14 @@ from cinna.config import (
     load_config,
     remove_agent_registry,
 )
-from cinna.errors import AccountConfigNotFoundError
+from cinna.errors import (
+    AccountConfigNotFoundError,
+    AccountMismatchError,
+    NetworkError,
+    PlatformError,
+    SetupTokenError,
+    WorkspaceExistsError,
+)
 
 logger = logging.getLogger("cinna.account")
 
@@ -131,13 +139,19 @@ def save_account_config(config: AccountConfig, account_root: Path) -> None:
 # ── Setup input parsing ─────────────────────────────────────────────────────
 
 
-def parse_account_setup_input(raw_input: str) -> tuple[str, str]:
+def parse_account_setup_input(
+    raw_input: str, fallback_platform_url: str | None = None
+) -> tuple[str, str]:
     """Parse account setup input into (platform_url, token).
 
     Accepts any of (paste directly from Settings → Local Development):
       - Full curl command: 'curl -sL http://host/api/cli-setup/account/TOKEN | python3 -'
       - URL:               'http://host/api/cli-setup/account/TOKEN'
-      - Raw token:         'TOKEN' (falls back to the CINNA_PLATFORM_URL env var)
+      - Raw token:         'TOKEN' (falls back to ``fallback_platform_url``,
+                           then the CINNA_PLATFORM_URL env var)
+
+    The returned ``platform_url`` is the base the exchange endpoint hangs off
+    (``…/api`` for the curl / URL forms).
     """
     text = raw_input.strip().strip("'\"")
 
@@ -158,7 +172,7 @@ def parse_account_setup_input(raw_input: str) -> tuple[str, str]:
             "Expected a URL containing /cli-setup/account/TOKEN."
         )
 
-    platform_url = os.environ.get("CINNA_PLATFORM_URL", "")
+    platform_url = fallback_platform_url or os.environ.get("CINNA_PLATFORM_URL", "")
     if not platform_url:
         raise click.ClickException(
             "Cannot determine platform URL from the provided token.\n"
@@ -188,11 +202,13 @@ def _prompt_account_dir(default: str) -> str:
     Works in the ``curl ... | python3 -`` bootstrap too: there stdin carries the
     installer script (not keystrokes), so when stdin is not a TTY we talk to the
     controlling terminal via ``/dev/tty`` as long as stdout is a TTY. With no
-    terminal attached (CI, captured output) we return ``default`` unchanged so
-    non-interactive runs stay non-interactive.
+    terminal attached (CI, captured output) — or under ``--no-input`` — we
+    return ``default`` unchanged so non-interactive runs stay non-interactive.
     """
+    if console.no_input:
+        return default
     if sys.stdin.isatty():
-        return click.prompt("Workspace folder name", default=default)
+        return console.prompt("Workspace folder name", default=default)
 
     if not sys.stdout.isatty():
         return default
@@ -212,24 +228,32 @@ def _exchange_account_setup_token(
     """POST /cli-setup/account/{token} and return the decoded payload.
 
     Mirrors the per-agent ``_exchange_setup_token`` — backend error details
-    are surfaced verbatim in a uniform ClickException.
+    are surfaced verbatim. Failures carry the stable exit codes a driver
+    switches on: any 4xx (invalid / expired / already-used token, wrong
+    token kind) → ``SetupTokenError`` (exit 10); 5xx → ``PlatformError``
+    (exit 12); no connection at all → ``NetworkError`` (exit 12).
     """
     setup_url = f"{platform_url.rstrip('/')}/cli-setup/account/{token}"
     machine_info = f"{platform.system()}/{platform.machine()}"
     logger.info("Exchanging account setup token at %s", setup_url)
 
-    response = httpx.post(
-        setup_url,
-        json={"machine_name": machine_name, "machine_info": machine_info},
-        timeout=30.0,
-    )
+    try:
+        response = httpx.post(
+            setup_url,
+            json={"machine_name": machine_name, "machine_info": machine_info},
+            timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        raise NetworkError(platform_url, exc) from exc
     logger.debug("Setup response: %s %s", response.status_code, response.text[:500])
     if response.status_code != 200:
         try:
             detail = response.json().get("detail", response.text)
         except Exception:
             detail = response.text
-        raise click.ClickException(f"Account setup failed: {detail}")
+        if response.status_code >= 500:
+            raise PlatformError(response.status_code, detail)
+        raise SetupTokenError(detail, response.status_code)
     return response.json()
 
 
@@ -482,7 +506,8 @@ def _login_start(platform_url: str, machine_name: str) -> dict:
             "This platform does not support 'cinna login' yet.\n"
             "Refresh from the UI instead: open Settings → Local Development to "
             "mint a new account setup token, then run\n"
-            "  cinna account setup <token>   (in the parent directory)."
+            "  cinna account set-token <token>   (inside this account workspace)\n"
+            "or 'cinna account setup <token>' in a fresh directory."
         )
     if response.status_code != 200:
         try:
@@ -661,7 +686,7 @@ def _login_new_account(
     """
     console.status("No cinna account workspace here — let's connect a new one.")
     if not domain:
-        domain = click.prompt("Platform domain to log in to (e.g. app.example.com)")
+        domain = console.prompt("Platform domain to log in to (e.g. app.example.com)")
     platform_url = _normalize_platform_url(domain)
 
     cwd = Path.cwd()
@@ -671,7 +696,7 @@ def _login_new_account(
         account_root = cwd
     else:
         default_sub = default_account_dir_name(platform_url)
-        sub = click.prompt(
+        sub = console.prompt(
             "This folder isn't empty — name a subfolder to create the account "
             "workspace in",
             default=default_sub,
@@ -919,6 +944,17 @@ def _write_account_files(config: AccountConfig, account_root: Path) -> None:
     _write_account_mcp_config(account_root)
 
 
+def resolve_account_dir(dir_name: str) -> Path:
+    """Where ``--dir`` points: an absolute path is used **as is**, a relative
+    one lands under the current directory. ``~`` is expanded. This is a
+    contract (Cinna Desktop passes ``<AgentsHome>/Cloud/<host>``), not a
+    pathlib accident — do not resolve symlinks here, the caller compares the
+    path it passed with the one reported back.
+    """
+    target = Path(dir_name).expanduser()
+    return target if target.is_absolute() else Path.cwd() / target
+
+
 def run_account_setup(
     setup_input: str, machine_name: str, dir_name: str | None = None
 ) -> None:
@@ -926,7 +962,9 @@ def run_account_setup(
 
     When ``dir_name`` is not given (no ``--dir``), the folder name defaults to
     the platform domain normalized (e.g. ``demo-core_opencinna_io``); the user
-    can accept it or type their own at the prompt.
+    can accept it or type their own at the prompt. With ``--dir`` the target
+    follows ``resolve_account_dir`` (absolute as is, relative under cwd) and
+    missing parents are created.
     """
     total = 3
 
@@ -938,10 +976,10 @@ def run_account_setup(
         dir_name = _prompt_account_dir(default_account_dir_name(platform_url))
 
     # Guard the target directory before burning the single-use setup token.
-    account_root = Path.cwd() / dir_name
+    account_root = resolve_account_dir(dir_name)
     if account_config_path(account_root).exists():
-        raise click.ClickException(
-            f"Directory '{dir_name}/' already contains a cinna account workspace.\n"
+        raise WorkspaceExistsError(
+            f"Directory '{account_root}' already contains a cinna account workspace.\n"
             f"Run account commands from inside it, or choose another --dir."
         )
 
@@ -961,11 +999,13 @@ def run_account_setup(
 
     # Step 3: Context package (best-effort — setup succeeds without it)
     console.step(3, total, "Downloading context package...")
-    _install_context_package(config, account_root)
+    context_ok = _install_context_package(config, account_root)
 
     console.status("Account workspace created!")
+    console.emit_result(**_account_result_fields(config, account_root, context_ok))
     console.console.print()
-    console.console.print(f"  cd {dir_name}/")
+    cd_target = account_root if Path(dir_name).is_absolute() else dir_name
+    console.console.print(f"  cd {cd_target}/")
     console.console.print(
         "  cinna account agents              # list agents you can build"
     )
@@ -976,6 +1016,108 @@ def run_account_setup(
         "  cinna account status              # account workspace + token info"
     )
     console.console.print()
+
+
+def _account_result_fields(
+    config: AccountConfig, account_root: Path, context_ok: bool | None
+) -> dict:
+    """The ``--json`` final-line fields shared by ``account setup`` and
+    ``account set-token``. ``context_ok`` None means the step was skipped."""
+    if context_ok is None:
+        context_package = "skipped"
+    else:
+        context_package = "ok" if context_ok else "failed"
+    return {
+        "workspace": str(account_root),
+        "platform_url": config.platform_url,
+        "frontend_url": config.frontend_url,
+        "machine_name": config.machine_name,
+        "context_package": context_package,
+    }
+
+
+def _jwt_claims(token: str) -> dict | None:
+    """Best-effort, *unverified* decode of a JWT's payload segment.
+
+    Used only to compare the ``sub`` of the stored and the freshly exchanged
+    account token — the CLI never trusts these claims for anything else, and
+    a token that is not a JWT simply yields ``None`` (no comparison).
+    """
+    import base64
+
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _same_origin(a: str, b: str) -> bool:
+    pa, pb = urlparse(a.strip()), urlparse(b.strip())
+    return (pa.scheme, pa.netloc.lower()) == (pb.scheme, pb.netloc.lower())
+
+
+def run_account_set_token(setup_input: str) -> None:
+    """Swap a fresh account token into the current account workspace — called
+    by `cinna account set-token <token_or_url>`.
+
+    The account counterpart of the per-agent ``run_set_token``: the exchange
+    runs under the **stored** machine name, and only ``account_token`` (plus a
+    server-refreshed ``platform_url`` / ``frontend_url``) is rewritten. The
+    active user workspace, the machine name, ``context/`` and the children
+    under ``agents/`` are untouched — the same in-place contract ``cinna
+    login`` gives. Refuses to write when the new token is for a different
+    account (platform origin differs, or both tokens carry a ``sub`` claim
+    and they differ) — exit 11, ``account_mismatch``.
+    """
+    total = 2
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    # The stored platform_url is the bare origin; the exchange lives under
+    # /api, so offer that as the bare-token fallback (like the per-agent verb).
+    stored_base = account_cfg.platform_url.rstrip("/")
+    fallback = stored_base if stored_base.endswith("/api") else f"{stored_base}/api"
+    platform_url, token = parse_account_setup_input(
+        setup_input, fallback_platform_url=fallback
+    )
+
+    console.step(1, total, "Authenticating...")
+    payload = _exchange_account_setup_token(
+        platform_url, token, account_cfg.machine_name
+    )
+
+    new_platform = payload.get("platform_url") or account_cfg.platform_url
+    if not _same_origin(new_platform, account_cfg.platform_url):
+        raise AccountMismatchError(
+            f"Token belongs to a different platform ({new_platform}) than this "
+            f"workspace ({account_cfg.platform_url}). Run 'cinna account setup' "
+            f"in a new directory to connect it."
+        )
+    old_sub = (_jwt_claims(account_cfg.account_token) or {}).get("sub")
+    new_sub = (_jwt_claims(payload["account_token"]) or {}).get("sub")
+    if old_sub and new_sub and old_sub != new_sub:
+        raise AccountMismatchError(
+            "Token belongs to a different account than this workspace. "
+            "Run 'cinna account setup' in a new directory to connect it."
+        )
+
+    console.step(2, total, "Updating account workspace...")
+    account_cfg.account_token = payload["account_token"]
+    account_cfg.platform_url = new_platform
+    if payload.get("frontend_url"):
+        account_cfg.frontend_url = payload["frontend_url"]
+    save_account_config(account_cfg, account_root)
+
+    console.status(f"Account token refreshed for {account_cfg.machine_name}.")
+    console.emit_result(**_account_result_fields(account_cfg, account_root, None))
+    console.console.print(
+        "  Re-mint expired sub-agent tokens with [bold]cinna doctor[/bold]."
+    )
 
 
 def run_account_refresh_context() -> None:
@@ -1148,6 +1290,42 @@ def run_account_status() -> None:
         token_status = probe_account_token(account_cfg)
 
     children = list_child_workspaces(account_root)
+    pkg_state, pkg_local, pkg_remote = context_package_status(account_cfg, account_root)
+    cli_status = cli_version_status(account_cfg.platform_url)
+
+    if console.json_mode:
+        console.emit_result(
+            workspace=str(account_root),
+            platform_url=account_cfg.platform_url,
+            frontend_url=account_cfg.frontend_url,
+            machine_name=account_cfg.machine_name,
+            active_workspace=(
+                {
+                    "id": account_cfg.user_workspace_id,
+                    "name": account_cfg.user_workspace_name,
+                }
+                if account_cfg.user_workspace_id
+                else None
+            ),
+            token=token_status,
+            synced_agents=len(children),
+            agents=[
+                {
+                    "agent_id": cfg.agent_id,
+                    "name": cfg.agent_name,
+                    "path": str(path),
+                    "last_sync_connected_at": cfg.last_sync_connected_at,
+                }
+                for path, cfg in children
+            ],
+            context_package={
+                "local": pkg_local,
+                "remote": pkg_remote,
+                "state": pkg_state,
+            },
+            cli=cli_status,
+        )
+        return
 
     table = Table(title="Account workspace")
     table.add_column("Property", style="dim")
@@ -1164,7 +1342,6 @@ def run_account_status() -> None:
     table.add_row("Synced agents", str(len(children)))
     table.add_row("Token", _format_token_label(token_status))
 
-    pkg_state, pkg_local, pkg_remote = context_package_status(account_cfg, account_root)
     if pkg_state == "current":
         pkg_cell = f"[green]{pkg_local}[/green] (up to date)"
     elif pkg_state == "stale":
@@ -1174,6 +1351,21 @@ def run_account_status() -> None:
     else:
         pkg_cell = "[dim]unknown (platform unreachable)[/dim]"
     table.add_row("Context package", pkg_cell)
+    if cli_status["state"] == "current":
+        cli_cell = f"[green]{cli_status['installed']}[/green] (matches platform pin)"
+    elif cli_status["state"] == "behind":
+        cli_cell = (
+            f"[yellow]{cli_status['installed']} → {cli_status['required']} "
+            f"pinned by platform[/yellow]"
+        )
+    elif cli_status["state"] == "ahead":
+        cli_cell = (
+            f"{cli_status['installed']} [dim](platform pins "
+            f"{cli_status['required']})[/dim]"
+        )
+    else:
+        cli_cell = f"{cli_status['installed']} [dim](no platform pin)[/dim]"
+    table.add_row("cinna-cli", cli_cell)
 
     console.console.print(table)
 
@@ -1185,6 +1377,10 @@ def run_account_status() -> None:
     if hint:
         console.console.print()
         console.console.print(hint)
+    version_hint = cli_version_hint(cli_status)
+    if version_hint:
+        console.console.print()
+        console.console.print(f"[yellow]![/yellow] {version_hint}")
 
     _print_token_reauth_hint(token_status)
 
@@ -1230,7 +1426,9 @@ def _print_token_reauth_hint(token_status: str) -> None:
     if token_status == "expired":
         console.console.print(
             "\n[red]Account token has expired.[/red] Re-authenticate with:\n"
-            "  [bold]cinna login[/bold]"
+            "  [bold]cinna login[/bold]\n"
+            "or paste a new setup token from Settings → Local Development:\n"
+            "  [bold]cinna account set-token <token>[/bold]"
         )
     elif token_status == "unreachable":
         console.console.print(
@@ -1317,7 +1515,7 @@ def run_agent_sync(agent_ref: str, machine_name: str | None) -> None:
             agent_client,
             config,
             workspace_root,
-            interactive=sys.stdin.isatty(),
+            interactive=console.interactive(),
             total=total,
             first_step=2,
         )
@@ -1362,7 +1560,7 @@ def run_agent_unsync(agent_ref: str) -> None:
         f"remove .cinna/ config, and delete generated files."
     )
     console.console.print("Workspace files will be preserved.")
-    if not click.confirm("Continue?"):
+    if not console.confirm("Continue?"):
         raise click.Abort()
 
     try:
@@ -1729,7 +1927,7 @@ def run_agent_restart_env(agent_ref: str) -> None:
                     "Run 'cinna sync push --agent "
                     f"{normalize_agent_dir_name(agent['name'])}' first to be safe."
                 )
-                if not click.confirm("Restart anyway?", default=False):
+                if not console.confirm("Restart anyway?", default=False):
                     raise click.Abort()
 
         with console.spinner(f"Restarting environment for {agent['name']}..."):
@@ -2063,7 +2261,7 @@ def run_schedule_logs(agent_ref: str, schedule_id: str) -> None:
 
 def run_schedule_delete(agent_ref: str, schedule_id: str, yes: bool) -> None:
     """Delete a schedule — `cinna agent schedule delete`."""
-    if not yes and not click.confirm(
+    if not yes and not console.confirm(
         f"Delete schedule {schedule_id}?", default=False
     ):
         raise click.Abort()
@@ -2623,7 +2821,7 @@ def run_credentials_delete(credential_id: str, force: bool, yes: bool) -> None:
             f"This will delete credential {credential_id} and unlink it from any "
             f"agents using it."
         )
-        if not click.confirm("Continue?"):
+        if not console.confirm("Continue?"):
             raise click.Abort()
 
     with console.spinner("Deleting credential..."):

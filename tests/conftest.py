@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 
 from cinna import config as config_module
+from cinna import console as console_module
 from cinna import sync_session as sync_session_module
 from cinna.config import CinnaConfig, KnowledgeSource, save_config
 
@@ -21,6 +22,15 @@ def isolate_global_state(tmp_path: Path, monkeypatch):
         sync_session_module, "MUTAGEN_SSH_DIR", fake_home / "mutagen-ssh"
     )
     yield
+
+
+@pytest.fixture(autouse=True)
+def reset_console_modes():
+    """``--json`` / ``--no-input`` flip process-wide switches; never let one
+    test's mode leak into the next."""
+    yield
+    console_module.set_json_mode(False)
+    console_module.set_no_input(False)
 
 
 @pytest.fixture

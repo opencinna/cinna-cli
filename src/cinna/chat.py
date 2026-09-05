@@ -167,7 +167,7 @@ def run_chat(
         if not sys.stdin.isatty():
             message = sys.stdin.read().strip()
         else:
-            message = click.prompt("Message", default="", show_default=False).strip()
+            message = console.prompt("Message", default="", show_default=False).strip()
     if not message and not file_paths:
         raise click.ClickException(
             "No message provided. Pass it as an argument, pipe it on stdin, or type it when prompted."

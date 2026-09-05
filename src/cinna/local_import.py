@@ -738,7 +738,7 @@ def run_agent_import(
         )
 
     if not yes:
-        click.confirm(
+        console.confirm(
             f"Import '{agent_name}' into {account_cfg.platform_url}?",
             abort=True,
         )

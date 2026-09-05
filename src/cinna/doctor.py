@@ -72,6 +72,7 @@ CATEGORY_ORDER: list[tuple[str, str]] = [
     ("token_remint", "Expired token — account re-mint"),
     ("account_token_expired", "Account token expired — renew it"),
     ("token_report", "Expired token — manual refresh needed"),
+    ("cli_outdated", "cinna-cli differs from the platform pin"),
 ]
 
 
@@ -375,11 +376,52 @@ def diagnose() -> list[Finding]:
                 account_root.name,
                 f"account token expired — {len(labels)} sub-agent token(s) "
                 f"can't be re-minted ({', '.join(labels)})",
-                f"renew the account: run 'cinna login' in {account_root}",
+                f"renew the account: run 'cinna login' in {account_root} "
+                f"(or 'cinna account set-token <token>' with a fresh setup token)",
                 None,
             )
         )
 
+    return findings
+
+
+def _cli_version_findings(entries: list[dict]) -> list[Finding]:
+    """Report-only findings for platforms whose cinna-cli pin differs from the
+    running version — one per platform, drawn from the registry entries and
+    the account workspace the command runs in (if any). Platforms that do
+    not publish a pin yield nothing."""
+    from cinna.account import find_account_root, load_account_config
+    from cinna.cli_version import cli_version_hint, cli_version_status
+    from cinna.errors import AccountConfigNotFoundError
+
+    platforms: dict[str, str] = {}
+    for entry in entries:
+        url = (entry.get("platform_url") or "").rstrip("/")
+        if url:
+            platforms.setdefault(url, url)
+    try:
+        root = find_account_root()
+        url = load_account_config(root).platform_url.rstrip("/")
+        platforms[url] = str(root)
+    except (AccountConfigNotFoundError, Exception):
+        pass
+
+    findings: list[Finding] = []
+    for url, label in sorted(platforms.items()):
+        status = cli_version_status(url)
+        hint = cli_version_hint(status)
+        if not hint:
+            continue
+        findings.append(
+            Finding(
+                "cli_outdated",
+                label,
+                f"cinna-cli {status['installed']} installed, platform pins "
+                f"{status['required']}",
+                f"uv tool install cinna-cli=={status['required']}",
+                None,
+            )
+        )
     return findings
 
 
@@ -491,7 +533,7 @@ def _apply_step(
     """
     if not findings:
         return 0
-    if not (yes or click.confirm(prompt, default=True)):
+    if not (yes or console.confirm(prompt, default=True)):
         console.warn(skip_message)
         return 0
     applied = 0
@@ -525,6 +567,7 @@ def run_doctor(dry_run: bool, yes: bool) -> None:
         findings = diagnose()
 
     entries = list_agent_registry()
+    findings.extend(_cli_version_findings(entries))
     cfg = _daemon_config(entries)
     live = _collect_cinna_sessions(entries, cfg)
 
@@ -588,7 +631,7 @@ def run_doctor(dry_run: bool, yes: bool) -> None:
 
     # Step 2 — terminate the healthy, no-longer-needed active sessions.
     if active:
-        if yes or click.confirm(
+        if yes or console.confirm(
             f"Terminate {len(active)} active session(s)?", default=True
         ):
             for s in active:

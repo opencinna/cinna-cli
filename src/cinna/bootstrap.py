@@ -4,7 +4,6 @@ import logging
 import os
 import platform
 import re
-import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -443,7 +442,7 @@ def run_setup(setup_input: str, machine_name: str) -> None:
             client,
             config,
             workspace_root,
-            interactive=sys.stdin.isatty(),
+            interactive=console.interactive(),
             total=total,
             first_step=2,
         )

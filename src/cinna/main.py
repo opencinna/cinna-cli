@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import click
+import httpx
 
 from cinna import __version__
 from cinna import console
@@ -21,15 +22,108 @@ from cinna.config import (
     load_config,
     remove_agent_registry,
 )
+from cinna.errors import EXIT_ERROR, CinnaExit, NetworkError
 from cinna.mcp_proxy import run_mcp_proxy
 from cinna.mutagen_runtime import ensure_mutagen_ready
 
 logger = logging.getLogger("cinna.exec")
 
 
-@click.group()
+class CinnaGroup(click.Group):
+    """Root group that maps every failure onto the stable exit-code contract.
+
+    Anything a command raises is normalized to a ``CinnaExit`` here, so the
+    process exit code and (in ``--json`` mode) the final error line are
+    uniform whether the body raised a ``CinnaExit`` itself, a plain
+    ``click.ClickException``, or an ``httpx`` transport error. Human output is
+    untouched: a ``ClickException`` still renders as ``Error: …`` on stderr,
+    and non-Click crashes keep their traceback outside JSON mode.
+    """
+
+    def invoke(self, ctx: click.Context):
+        try:
+            return super().invoke(ctx)
+        except (CinnaExit, click.exceptions.Exit):
+            raise
+        except click.Abort:
+            if console.json_mode:
+                raise CinnaExit(EXIT_ERROR, "aborted", "Aborted.") from None
+            raise
+        except click.UsageError as exc:
+            # Keep Click's usage rendering (and exit code 2) for humans.
+            if console.json_mode:
+                raise CinnaExit.from_click(exc) from exc
+            raise
+        except click.ClickException as exc:
+            raise CinnaExit.from_click(exc) from exc
+        except httpx.TransportError as exc:
+            try:
+                target = str(exc.request.url)
+            except RuntimeError:  # httpx: request not attached to this error
+                target = "the platform"
+            raise NetworkError(target, exc) from exc
+        except Exception as exc:
+            if console.json_mode:
+                raise CinnaExit(
+                    EXIT_ERROR, "internal_error", f"{type(exc).__name__}: {exc}"
+                ) from exc
+            raise
+
+
+def _no_input_callback(ctx, param, value):
+    if value:
+        console.set_no_input(True)
+
+
+def _json_callback(ctx, param, value):
+    if value:
+        console.set_json_mode(True)
+
+
+_NO_INPUT_HELP = (
+    "Never prompt: take every default, fail with code 'needs_input' where "
+    "there is none (also CINNA_NO_INPUT=1)."
+)
+
+
+def no_input_option(f):
+    """``--no-input`` as a per-command option (the root group has it too, but a
+    driver that puts it after the subcommand must be honored as well)."""
+    return click.option(
+        "--no-input",
+        is_flag=True,
+        expose_value=False,
+        is_eager=True,
+        callback=_no_input_callback,
+        help=_NO_INPUT_HELP,
+    )(f)
+
+
+def json_option(f):
+    """``--json``: one JSON object per line on stdout, Rich suppressed, no
+    prompts (implies ``--no-input``)."""
+    return click.option(
+        "--json",
+        is_flag=True,
+        expose_value=False,
+        is_eager=True,
+        callback=_json_callback,
+        help="Machine-readable output: one JSON object per line on stdout "
+        "(progress lines, then a final {\"result\": …} line). Implies --no-input.",
+    )(f)
+
+
+@click.group(cls=CinnaGroup)
 @click.version_option(version=__version__)
 @click.option("-v", "--verbose", is_flag=True, help="Show debug logs in terminal")
+@click.option(
+    "--no-input",
+    is_flag=True,
+    expose_value=False,
+    envvar="CINNA_NO_INPUT",
+    callback=_no_input_callback,
+    help=_NO_INPUT_HELP,
+)
 def cli(verbose: bool):
     """Local development CLI for Cinna Core agents."""
     from cinna.logging import setup_logging
@@ -59,12 +153,7 @@ def setup(setup_input: tuple[str, ...], name: str | None):
     """
     from cinna.bootstrap import run_setup
 
-    if name is None:
-        default_name = _default_machine_name()
-        if sys.stdin.isatty():
-            name = click.prompt("Machine name", default=default_name)
-        else:
-            name = default_name
+    name = _resolve_machine_name(name)
 
     run_setup(" ".join(setup_input), name)
 
@@ -97,12 +186,7 @@ def set_token(setup_input: tuple[str, ...], name: str | None):
     """
     from cinna.bootstrap import run_set_token
 
-    if name is None:
-        default_name = _default_machine_name()
-        if sys.stdin.isatty():
-            name = click.prompt("Machine name", default=default_name)
-        else:
-            name = default_name
+    name = _resolve_machine_name(name)
 
     run_set_token(" ".join(setup_input), name)
 
@@ -168,10 +252,13 @@ def account():
     "--dir",
     "dir_name",
     default=None,
-    help="Directory to create the account workspace in "
-    "(default: the platform domain, e.g. demo-core_opencinna_io; "
+    help="Directory to create the account workspace in. An absolute path is "
+    "used as is (parents created); a relative one is under the current "
+    "directory (default: the platform domain, e.g. demo-core_opencinna_io; "
     "you'll be prompted to accept or change it)",
 )
+@no_input_option
+@json_option
 def account_setup(setup_input: tuple[str, ...], name: str | None, dir_name: str | None):
     """Set up an account workspace from an account setup token.
 
@@ -182,17 +269,47 @@ def account_setup(setup_input: tuple[str, ...], name: str | None, dir_name: str 
       cinna account setup curl -sL http://host/api/cli-setup/account/TOKEN | python3 -
       cinna account setup http://host/api/cli-setup/account/TOKEN
       cinna account setup TOKEN
+
+    Refuses (exit 1, code ``workspace_exists``) when the target already holds
+    ``.cinna/account.json`` — before the single-use token is spent. Exit 10
+    means the token was rejected (invalid / expired / used); 12 means the
+    platform could not be reached.
     """
     from cinna.account import run_account_setup
 
-    if name is None:
-        default_name = _default_machine_name()
-        if sys.stdin.isatty():
-            name = click.prompt("Machine name", default=default_name)
-        else:
-            name = default_name
+    name = _resolve_machine_name(name)
 
     run_account_setup(" ".join(setup_input), name, dir_name)
+
+
+@account.command(name="set-token", context_settings={"ignore_unknown_options": True})
+@click.argument("setup_input", nargs=-1, type=click.UNPROCESSED, required=True)
+@no_input_option
+@json_option
+def account_set_token(setup_input: tuple[str, ...]):
+    """Refresh the account token in place from a new account setup token.
+
+    The account counterpart of ``cinna set-token``: run inside an existing
+    account workspace, it re-exchanges a fresh setup token (Settings → Local
+    Development, or minted by Cinna Desktop) under the **stored** machine name
+    and swaps only ``account_token`` (plus a refreshed platform / frontend URL)
+    into ``.cinna/account.json``. The active user workspace, the machine name,
+    ``context/`` and every synced child under ``agents/`` are left untouched —
+    afterwards ``cinna doctor`` re-mints expired child tokens as usual.
+
+    The exchanged token must belong to the same account as the workspace;
+    otherwise nothing is written and the command exits 11
+    (``account_mismatch``). Accepts the same inputs as ``cinna account setup``;
+    a bare token reuses the stored platform URL.
+
+    \b
+      cinna account set-token curl -sL http://host/api/cli-setup/account/TOKEN | python3 -
+      cinna account set-token http://host/api/cli-setup/account/TOKEN
+      cinna account set-token TOKEN
+    """
+    from cinna.account import run_account_set_token
+
+    run_account_set_token(" ".join(setup_input))
 
 
 @account.command(name="agents")
@@ -220,8 +337,15 @@ def account_agents(show_all: bool):
 
 
 @account.command(name="status")
+@no_input_option
+@json_option
 def account_status():
-    """Show account workspace info and account token validity."""
+    """Show account workspace info and account token validity.
+
+    With ``--json`` the summary is a single ``{"result": "ok", …}`` line
+    (platform / frontend URLs, machine name, token state, synced agents,
+    context-package and cinna-cli version freshness).
+    """
     from cinna.account import run_account_status
 
     run_account_status()
@@ -1779,7 +1903,7 @@ def _run_dev_session(favor_remote: bool) -> None:
     config = load_config(root)
 
     with PlatformClient(config) as client:
-        ensure_mutagen_ready(client, config, root, interactive=sys.stdin.isatty())
+        ensure_mutagen_ready(client, config, root, interactive=console.interactive())
 
     st = sync_session.start(config, root)
 
@@ -2343,7 +2467,7 @@ def disconnect():
         "This will stop sync, remove .cinna/ config, and delete generated files."
     )
     console.console.print("Workspace files will be preserved.")
-    if not click.confirm("Continue?"):
+    if not console.confirm("Continue?"):
         raise click.Abort()
 
     try:
@@ -2434,7 +2558,7 @@ def disconnect_all():
     )
     console.console.print()
 
-    if not click.confirm("Are you sure?"):
+    if not console.confirm("Are you sure?"):
         raise click.Abort()
 
     console.console.print()
@@ -2602,3 +2726,17 @@ def _install_target(shell: str, script: str) -> tuple[str, str]:
 
 def _default_machine_name() -> str:
     return f"{os.environ.get('USER', 'dev')}'s {platform.node()}"
+
+
+def _resolve_machine_name(name: str | None) -> str:
+    """``--name`` if given; else prompt on a real terminal, else the default.
+
+    The TTY check keeps ``curl … | python3 -`` and piped spawns non-interactive
+    even without ``--no-input``; with the flag the default is taken outright.
+    """
+    if name is not None:
+        return name
+    default_name = _default_machine_name()
+    if console.interactive():
+        return console.prompt("Machine name", default=default_name)
+    return default_name

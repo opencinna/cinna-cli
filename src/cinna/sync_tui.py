@@ -33,6 +33,7 @@ from textual.widgets import Footer, Header, OptionList, RichLog, Static, TabbedC
 from textual.widgets.option_list import Option
 
 from .config import CinnaConfig, workspace_dir
+from .mutagen_runtime import mutagen_binary
 from .sync_session import _safe_int, base_status
 
 logger = logging.getLogger(__name__)
@@ -404,7 +405,7 @@ class SyncApp(App):
             while not self._shutting_down:
                 try:
                     proc = await asyncio.create_subprocess_exec(
-                        "mutagen",
+                        mutagen_binary(),
                         "sync",
                         "monitor",
                         "--template",
@@ -473,7 +474,7 @@ class SyncApp(App):
     async def _run_mutagen(self, args: list[str]) -> str:
         try:
             proc = await asyncio.create_subprocess_exec(
-                "mutagen",
+                mutagen_binary(),
                 *args,
                 # Detach from the controlling tty — otherwise each spawn races
                 # textual's driver for stdin and leaks raw mouse/key escape
@@ -846,7 +847,7 @@ class SyncApp(App):
     async def _mutagen_sync_reset(self) -> bool:
         try:
             proc = await asyncio.create_subprocess_exec(
-                "mutagen", "sync", "reset", self.session_name,
+                mutagen_binary(), "sync", "reset", self.session_name,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
