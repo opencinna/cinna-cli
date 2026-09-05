@@ -20,15 +20,11 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import re
 import shlex
-import subprocess
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -164,7 +160,7 @@ def _state_pill(session: dict | None) -> str:
     last_error = session.get("lastError")
     status = (session.get("status") or "").lower()
     if last_error:
-        return f"[red]⬤  Error[/red]"
+        return "[red]⬤  Error[/red]"
     if not (alpha_conn and beta_conn):
         return "[red]⬤  Disconnected[/red]"
     if status in {"watching", "watching-changes", "ready"}:
