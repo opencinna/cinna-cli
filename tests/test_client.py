@@ -371,3 +371,101 @@ def test_plain_detail_still_raises_platform_error(account_client):
     with pytest.raises(PlatformError) as exc:
         account_client.get_skill_package("pkg-uuid")
     assert "Agent not found." in str(exc.value)
+
+
+# --- the skills lifecycle: bodies and paths that are silent when wrong ---
+
+
+@respx.mock
+def test_install_skill_sends_the_install_request_shape(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(200, json={"success": True}, headers={"X-Cinna-Proxied": "1"})
+
+    account_client.install_skill_on_agent(
+        "agent-123", "pkg-uuid", revision_number=2, building_mode=False
+    )
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["path"] == "agents/agent-123/skills/install"
+    assert sent["json_body"] == {
+        "package_id": "pkg-uuid",
+        "conversation_mode": True,
+        "building_mode": False,
+        "revision_number": 2,
+    }
+
+
+@respx.mock
+def test_update_agent_plugin_sends_disabled_not_enabled(account_client):
+    """The link stores the switch negatively (`AgentPluginLinkUpdate.disabled`).
+
+    A body carrying `enabled` is not a validation error — it is a field the
+    server ignores, so the link would come back unchanged while the CLI
+    reported success. Only an exact-body assertion catches that.
+    """
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(200, json={"success": True}, headers={"X-Cinna-Proxied": "1"})
+
+    account_client.update_agent_plugin("agent-123", "link-77", enabled=False)
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["method"] == "PUT"
+    assert sent["path"] == "llm-plugins/agents/agent-123/plugins/link-77"
+    assert sent["json_body"] == {"disabled": True}
+
+
+@respx.mock
+def test_update_agent_plugin_omits_the_switches_it_was_not_given(account_client):
+    """The PUT is partial: sending the mode defaults on an --enable would reset
+    a link whose author had turned building mode off."""
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(200, json={"success": True}, headers={"X-Cinna-Proxied": "1"})
+
+    account_client.update_agent_plugin("agent-123", "link-77", building_mode=False)
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["json_body"] == {"building_mode": False}
+
+
+@respx.mock
+def test_skill_catalog_sends_no_query_parameters(account_client):
+    """`GET /skills/catalog` takes none — it answers the whole visible
+    catalogue. Sending `search`/`mine` would look like filtering and do
+    nothing, which is why the narrowing happens on the rows."""
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(200, json={"data": [], "count": 0}, headers={"X-Cinna-Proxied": "1"})
+
+    account_client.list_skill_catalog()
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["path"] == "skills/catalog"
+    assert "query" not in sent
+
+
+@respx.mock
+def test_update_skill_package_carries_visibility_and_listing(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(200, json={"id": "pkg"}, headers={"X-Cinna-Proxied": "1"})
+
+    account_client.update_skill_package("pkg-uuid", is_listed=True)
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["method"] == "PATCH"
+    assert sent["json_body"] == {"is_listed": True}
+
+
+@respx.mock
+def test_a_bare_coded_body_is_still_a_coded_refusal(account_client):
+    """The install route answers its 409 as `{"code", "message"}` rather than
+    nesting under `detail`; without this the one refusal that most needs a
+    sentence would reach the user as a JSON dump."""
+    respx.post("https://platform.example.com/api/v1/cli/account/api-proxy").respond(
+        409,
+        json={"code": "already_installed", "message": "'x' is already added."},
+        headers={"X-Cinna-Proxied": "1"},
+    )
+
+    with pytest.raises(CodedRefusal) as exc_info:
+        account_client.install_skill_on_agent("agent-123", "pkg-uuid")
+    assert exc_info.value.code == "already_installed"
+    assert "already added" in exc_info.value.detail

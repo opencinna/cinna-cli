@@ -36,7 +36,9 @@ Each verb → its handler in `src/cinna/main.py` → the `run_*` in
 - `cinna connect mcp` → `src/cinna/main.py:connect_mcp()` →
   `src/cinna/account.py:run_connect_mcp()` (sibling — the MCP half)
 - `cinna api` → `src/cinna/main.py:api_cmd()` →
-  `src/cinna/account.py:run_api()`
+  `src/cinna/account.py:run_api()`, which calls
+  `src/cinna/account.py:_reject_elided_path()` before anything else and
+  `src/cinna/account.py:_resolve_api_agent_refs()` inside the client context.
 
 ## Key functions & flow
 

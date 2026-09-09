@@ -45,7 +45,7 @@ from cinna.bootstrap import (
     workspace_agent_id_at,
     _maybe_autolink,
 )
-from cinna.cli_version import cli_version_hint, cli_version_status
+from cinna.cli_version import cli_version_hint, cli_version_label, cli_version_status
 from cinna.client import AccountClient, PlatformClient
 from cinna.config import (
     CONFIG_DIR,
@@ -57,6 +57,7 @@ from cinna.errors import (
     AccountConfigNotFoundError,
     AccountMismatchError,
     CinnaExit,
+    CodedRefusal,
     NetworkError,
     PlatformError,
     SetupTokenError,
@@ -1242,7 +1243,11 @@ def run_account_agents(show_all: bool = False) -> None:
         show_lines=True,
     )
     table.add_column("#", style="dim", justify="right")
-    table.add_column("Agent")
+    # `fold`, not the default `ellipsis`: this cell carries the agent's UUID on
+    # its second line, and an id that renders as `f0506e24-3740-4fe3…` is a
+    # copy-paste trap — the API answers "404 not found" for it, which reads as
+    # a missing agent rather than a truncated id.
+    table.add_column("Agent", overflow="fold")
     table.add_column("Build")
     table.add_column("Env")
     table.add_column("Local workspace")
@@ -1352,7 +1357,15 @@ def run_account_status() -> None:
     else:
         pkg_cell = "[dim]unknown (platform unreachable)[/dim]"
     table.add_row("Context package", pkg_cell)
-    if cli_status["state"] == "current":
+    if cli_status.get("editable"):
+        # Not a version at all: an editable install's metadata is a snapshot of
+        # the day it was installed, so pinning it against the platform's number
+        # would report skew that does not exist. Say what it is and name the
+        # pin as context, not as a target.
+        cli_cell = f"[dim]{cli_version_label(cli_status)}[/dim]"
+        if cli_status.get("required"):
+            cli_cell += f" [dim](platform pins {cli_status['required']})[/dim]"
+    elif cli_status["state"] == "current":
         cli_cell = f"[green]{cli_status['installed']}[/green] (matches platform pin)"
     elif cli_status["state"] == "behind":
         cli_cell = (
@@ -1398,7 +1411,7 @@ def _synced_agents_table(account_root: Path, children: list[tuple[Path, CinnaCon
     agents = Table(title="Synced agents")
     agents.add_column("Agent")
     agents.add_column("Template", style="dim")
-    agents.add_column("Agent ID", style="dim")
+    agents.add_column("Agent ID", style="dim", overflow="fold")
     agents.add_column("Path")
     agents.add_column("Last sync", style="dim")
 
@@ -2026,7 +2039,7 @@ def _print_schedules(schedules: list[dict]) -> None:
 
     table = Table(title=f"Schedules ({len(schedules)})", title_style="bold", show_lines=True)
     table.add_column("#", style="dim", justify="right")
-    table.add_column("Name / id")
+    table.add_column("Name / id", overflow="fold")
     table.add_column("Type")
     table.add_column("Cron (UTC)")
     table.add_column("Enabled")
@@ -2404,6 +2417,73 @@ def _resolve_discoverable_connector(items: list[dict], producer_ref: str) -> dic
 _PROXIED_HEADER = "x-cinna-proxied"
 
 
+# A table cell that did not fit is rendered with one of these; an id copied
+# out of one is not an id. `cinna api` is where they land, because it is the
+# only verb that takes a raw platform path.
+_ELIDED_MARKERS = ("\u2026", "...")
+
+
+def _reject_elided_path(path: str) -> None:
+    """Refuse a path segment that was copied out of a truncated table cell.
+
+    A narrow terminal ellipsizes a UUID, and the result reaches the API as a
+    perfectly well-formed path — which answers ``404 Agent not found``. That
+    sentence sends the reader looking for a missing agent instead of a
+    mangled id, so the CLI answers first.
+    """
+    for segment in path.split("/"):
+        if any(marker in segment for marker in _ELIDED_MARKERS):
+            raise click.UsageError(
+                f"The path segment '{segment}' looks elided — an id copied out "
+                f"of a table cell that was too narrow to print it whole. The "
+                f"API would answer '404 not found' for it.\n"
+                f"Get the full id from 'cinna account agents --json', or pass "
+                f"the agent's name: cinna api accepts the same references "
+                f"'cinna skills list' does."
+            )
+
+
+def _resolve_api_agent_refs(client: "AccountClient", path: str) -> str:
+    """Let `cinna api` take the agent references every other verb takes.
+
+    Only the segment straight after ``agents/`` is considered, and only when it
+    is not already a UUID. A reference that resolves is substituted (announced
+    on stderr, so a ``--json`` stdout stream stays pure); one that does not is
+    **left alone** — ``agents/`` is a route prefix as well as a collection, and
+    turning a real sub-route into "no accessible agent matches 'search'" would
+    break the escape hatch to fix an ergonomic.
+
+    The same reasoning covers the lookup itself: every failure, including one
+    reaching the listing route, leaves the path exactly as typed. This is
+    sugar on the one verb whose job is to work when nothing else does.
+    """
+    parts = path.split("/")
+    candidates = [
+        i
+        for i, part in enumerate(parts)
+        if i and parts[i - 1] == "agents" and part and not _looks_like_uuid(part)
+    ]
+    if not candidates:
+        return path
+
+    try:
+        listing = client.list_account_agents().get("data", [])
+    except Exception as exc:  # noqa: BLE001 — the hatch still runs without this
+        logger.debug("agent-ref resolution for 'cinna api' skipped: %s", exc)
+        return path
+
+    changed = False
+    for i in candidates:
+        try:
+            agent = _resolve_account_agent(listing, parts[i])
+        except click.ClickException:
+            continue
+        click.echo(f"agents/{parts[i]} → agents/{agent['id']}", err=True)
+        parts[i] = str(agent["id"])
+        changed = True
+    return "/".join(parts) if changed else path
+
+
 def run_api(
     method: str,
     path: str,
@@ -2416,6 +2496,7 @@ def run_api(
     Exit codes: 0 for inner 2xx, 1 for inner 4xx/5xx (body still printed),
     2 for the escape hatch's own errors (policy denial, rate limit, size cap).
     """
+    _reject_elided_path(path)
     if json_text is not None and data_file is not None:
         raise click.ClickException("--json and --data are mutually exclusive.")
 
@@ -2453,6 +2534,7 @@ def run_api(
     account_cfg = load_account_config(account_root)
 
     with AccountClient(account_cfg) as client:
+        path = _resolve_api_agent_refs(client, path)
         response = client.api_proxy(
             method.upper(), path, query=query or None, json_body=json_body
         )
@@ -2555,7 +2637,7 @@ def run_user_workspace_list() -> None:
     )
     table.add_column("Active", justify="center")
     table.add_column("Workspace")
-    table.add_column("ID", style="dim")
+    table.add_column("ID", style="dim", overflow="fold")
 
     # The implicit Default workspace (no row on the server) is always available.
     table.add_row(
@@ -2662,7 +2744,7 @@ def run_credentials_list(workspace: str | None) -> None:
     table.add_column("Name")
     table.add_column("Type", style="dim")
     table.add_column("Status")
-    table.add_column("ID", style="dim")
+    table.add_column("ID", style="dim", overflow="fold")
 
     for c in items:
         table.add_row(
@@ -2948,24 +3030,72 @@ def _addon_name_cell(addon: dict) -> str:
         cell += " [cyan]· published[/cyan]"
     if addon.get("orphan"):
         cell += " [dim]· orphan[/dim]"
+    if _addon_link(addon).get("disabled"):
+        # Only visible here. A disabled link still lists, still reports its
+        # version, and is not an error — nothing else in the row would say the
+        # engine is not loading it.
+        cell += " [yellow]· disabled[/yellow]"
     return cell
 
 
+def _addon_link(addon: dict) -> dict:
+    """The ``link`` sub-object of an addon row, or an empty dict.
+
+    Everything true of an *install* rather than of a package lives here —
+    ``id`` (the link id the plugin routes address), ``installed_version``,
+    ``latest_version``, ``has_update``, ``disabled`` and the two mode
+    switches. The row's top-level ``version`` mirrors the installed one, which
+    is why reading only the top level makes a stale install look current.
+    """
+    link = addon.get("link")
+    return link if isinstance(link, dict) else {}
+
+
 def _addon_version_cell(addon: dict) -> str:
-    """The addon's version, or nothing at all.
+    """The addon's version, and whether a newer one is waiting.
 
     A skill's version is a line in its own ``SKILL.md``, so it is genuinely
     optional — an absent one renders blank rather than a bare ``v`` or a
     ``-``, the same way the web row shows no badge. See
     :func:`_print_addons` for why a *local* skill's blank can also be staleness
     rather than absence.
+
+    For an **installed** addon the platform reports three facts, not one, and
+    all three live on the row's ``link``: what the agent carries
+    (``installed_version``), what the catalog now has (``latest_version``), and
+    whether they differ (``has_update``). The row's top-level ``version`` is
+    the installed one alone, so a row rendered from it would make an agent
+    stuck two revisions back look exactly like a current one — which is the
+    whole reason anybody reads this column.
     """
-    version = addon.get("version")
-    return f"[dim]{_esc(version)}[/dim]" if version else ""
+    link = _addon_link(addon)
+    version = link.get("installed_version") or addon.get("version")
+    cell = f"[dim]{_esc(version)}[/dim]" if version else ""
+    if link.get("has_update"):
+        latest = link.get("latest_version")
+        marker = (
+            f"[yellow]→ {_esc(latest)}[/yellow]" if latest else "[yellow]→ update[/yellow]"
+        )
+        cell = f"{cell} {marker}" if cell else marker
+    return cell
 
 
-def _print_addons(payload: dict) -> None:
-    """Render an ``AgentAddonsPublic`` payload as one row per addon."""
+def _addon_source_cell(addon: dict) -> str:
+    """Where the addon came from, and — for an install — from which catalog."""
+    source = addon.get("source", "?")
+    marketplace = addon.get("marketplace_name")
+    if marketplace and str(marketplace) != str(source):
+        return f"{_esc(source)} [dim]({_esc(marketplace)})[/dim]"
+    return _esc(source)
+
+
+def _print_addons(payload: dict, agent_ref: str = "<agent>") -> None:
+    """Render an ``AgentAddonsPublic`` payload as one row per addon.
+
+    ``agent_ref`` is how the caller's agent should be spelled back in the
+    suggested commands under the table — a name the user can retype, not the
+    id the payload carries.
+    """
     from rich.table import Table
 
     addons = payload.get("addons") or []
@@ -2993,7 +3123,7 @@ def _print_addons(payload: dict) -> None:
             table.add_row(
                 str(i),
                 addon.get("kind", "?"),
-                addon.get("source", "?"),
+                _addon_source_cell(addon),
                 _addon_status_cell(addon),
                 _addon_name_cell(addon),
                 _addon_version_cell(addon),
@@ -3006,6 +3136,7 @@ def _print_addons(payload: dict) -> None:
             f"({counts.get('local_skills', 0)} of them this agent's own).[/dim]"
         )
         _print_addon_issues(addons)
+        _print_pending_update_hint(addons, agent_ref)
         _print_version_staleness_hint(addons)
 
     # The plugin half is returned even when the skill half could not be read —
@@ -3013,8 +3144,29 @@ def _print_addons(payload: dict) -> None:
     if payload.get("skills_error"):
         console.warn(
             f"The skill index could not be read ({payload['skills_error']}); "
-            f"only plugins are listed above."
+            f"only plugins are listed above.\n"
+            f"Rebuild it with: cinna skills refresh {agent_ref}"
         )
+
+
+def _print_pending_update_hint(addons: list[dict], agent_ref: str) -> None:
+    """Name the installed addons a newer revision is waiting for.
+
+    The arrow in the Version column is the glance; this is the answer to "so
+    what do I run". Printed only when something is actually stale, so a
+    current agent stays quiet.
+    """
+    stale = [str(a.get("name")) for a in addons if _addon_link(a).get("has_update")]
+    if not stale:
+        return
+    console.console.print()
+    console.console.print(
+        f"[yellow]![/yellow] {len(stale)} installed addon(s) have a newer "
+        f"revision: {_esc(', '.join(stale))}"
+    )
+    console.console.print(
+        f"[dim]Update with: cinna skills update {agent_ref} {_esc(stale[0])}[/dim]"
+    )
 
 
 def _print_version_staleness_hint(addons: list[dict]) -> None:
@@ -3056,7 +3208,7 @@ def run_skills_list(agent_ref: str, as_json: bool = False) -> None:
         return
 
     console.console.print(f"Agent: [bold]{_esc(agent['name'])}[/bold]")
-    _print_addons(payload)
+    _print_addons(payload, normalize_agent_dir_name(agent["name"]))
 
     publishable = [
         a.get("name")
@@ -3334,3 +3486,1203 @@ def run_skills_publish(
             + ", but the header still says what it said; the next publish "
             "continues the series from the catalog, not from the file."
         )
+
+
+# ── Skills lifecycle: install, update, catalog, sharing ─────────────────────
+#
+# Everything below turns a platform id into something a person types. Three
+# ids exist in this area and none of them belong in a command line: a package
+# has a UUID *and* a reverse-DNS string, and an install is a "plugin link" with
+# an id of its own. The resolvers here are what keep `cinna skills` speaking in
+# agent names, package names and skill names — the same references
+# `cinna skills list` already accepts.
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+
+def _looks_like_uuid(value) -> bool:
+    return bool(value) and bool(_UUID_RE.match(str(value)))
+
+
+def _rows(payload, *keys: str) -> list[dict]:
+    """The list inside a listing envelope, whichever key it arrived under.
+
+    The account routes answer ``{"data": [...]}``; the catalog and the
+    revision routes are plain platform routes reached through the hatch and
+    answer under their own names (or as a bare list). Guessing here is cheaper
+    than a wrong assumption that renders an empty table over a full response.
+    """
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("data", *keys, "items", "results"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [r for r in value if isinstance(r, dict)]
+    return []
+
+
+def _package_uuid(package: dict) -> str | None:
+    """The package's UUID — the id every route addresses it by.
+
+    Not to be confused with ``package_id``, which on a package payload is the
+    *reverse-DNS string* (``com.acme.report``). The two names are inverted
+    between payloads — a published revision calls the UUID ``package_id`` —
+    so this checks the shape rather than trusting either name.
+    """
+    for key in ("id", "uuid", "package_uuid"):
+        if _looks_like_uuid(package.get(key)):
+            return str(package[key])
+    if _looks_like_uuid(package.get("package_id")):
+        return str(package["package_id"])
+    return None
+
+
+def _package_label(package: dict) -> str:
+    """How to name a package in a sentence: its reverse-DNS id, else its name."""
+    for key in ("package_id", "display_name", "name"):
+        value = package.get(key)
+        if value and not _looks_like_uuid(value):
+            return str(value)
+    return str(_package_uuid(package) or "?")
+
+
+def _package_matches(package: dict, ref: str) -> bool:
+    """Does ``ref`` name this package exactly (id, reverse-DNS, or name)?"""
+    ref_low = ref.strip().lower()
+    for key in ("id", "package_id", "display_name", "name", "slug"):
+        value = package.get(key)
+        if value and str(value).lower() == ref_low:
+            return True
+    return False
+
+
+def _resolve_skill_package(client: "AccountClient", ref: str) -> dict:
+    """Resolve a package reference to its detail payload.
+
+    ``ref`` is a UUID, a reverse-DNS package id (``localhost.skill.dad-jokes``)
+    or a display name. Only the first is what the API wants, and it is the one
+    nobody has: a package id is what the catalog prints and what a publish
+    reports, so that is what the CLI accepts.
+
+    A name that matches nothing is a *sentence* naming the search that failed,
+    not a 404 — the id being wrong and the package not existing look identical
+    from the outside, and only one of them has a next step.
+
+    The returned payload always carries an addressable UUID, stamped in when
+    the detail route did not repeat one: every caller addresses a route with
+    it, and a `None` reaching a URL would fail as a 404 several calls later.
+    """
+    if _looks_like_uuid(ref):
+        try:
+            return _with_uuid(client.get_skill_package(ref), ref)
+        except CinnaExit as exc:
+            raise click.ClickException(
+                f"No catalog package with id {ref} ({exc.detail}).\n"
+                f"Run 'cinna skills catalog' to see what this account can install."
+            )
+
+    candidates = _rows(client.list_skill_catalog(), "packages", "catalog")
+
+    exact = [p for p in candidates if _package_matches(p, ref)]
+    matches = exact or [
+        p
+        for p in candidates
+        if ref.strip().lower() in str(p.get("package_id") or "").lower()
+        or ref.strip().lower() in str(p.get("display_name") or "").lower()
+    ]
+    if len(matches) > 1:
+        rows = ", ".join(f"{_package_label(p)} ({_package_uuid(p)})" for p in matches[:10])
+        raise click.ClickException(
+            f"Package reference '{ref}' is ambiguous — matches: {rows}.\n"
+            f"Use the full package id instead."
+        )
+    if not matches:
+        available = ", ".join(_package_label(p) for p in candidates[:10]) or "none"
+        raise click.ClickException(
+            f"No catalog package matches '{ref}'.\n"
+            f"Visible packages: {available}\n"
+            f"Run 'cinna skills catalog' to see the full list."
+        )
+
+    uuid = _package_uuid(matches[0])
+    if not uuid:
+        # A catalog row without a resolvable UUID cannot address any route;
+        # returning it would fail later with a worse message.
+        raise click.ClickException(
+            f"The catalog row for '{_package_label(matches[0])}' carries no "
+            f"package id the API can address. Pass the package UUID directly."
+        )
+    return _with_uuid(client.get_skill_package(uuid), uuid)
+
+
+def _with_uuid(package: dict, uuid: str) -> dict:
+    """The package detail, guaranteed to carry the UUID it was fetched by."""
+    if _package_uuid(package):
+        return package
+    return {**package, "id": uuid}
+
+
+def _resolve_installed_addon(payload: dict, agent_name: str, name: str) -> dict:
+    """The addon row an agent carries under ``name``.
+
+    ``name`` is what `cinna skills list` prints in the Name column — the
+    engine-facing folder name — because that is the string the user already
+    has. Everything else about the row (its link id, its package) is looked up
+    from here.
+    """
+    addons = payload.get("addons") or []
+    exact = [a for a in addons if a.get("name") == name]
+    matches = exact or [
+        a
+        for a in addons
+        if str(a.get("name") or "").lower() == name.strip().lower()
+        or str(a.get("display_name") or "").lower() == name.strip().lower()
+    ]
+    # The prose names the agent as the user sees it; a *command* has to name
+    # it as the user can type it — an unquoted display name ("MickyJoker -
+    # BundleTest") is not a runnable suggestion.
+    ref = normalize_agent_dir_name(agent_name) or agent_name
+    if len(matches) > 1:
+        raise click.ClickException(
+            f"'{name}' matches more than one addon on {agent_name}. "
+            f"Run 'cinna skills list {ref}' and use the exact name."
+        )
+    if not matches:
+        carried = ", ".join(str(a.get("name")) for a in addons) or "none"
+        raise click.ClickException(
+            f"{agent_name} carries no addon named '{name}'.\n"
+            f"It carries: {carried}\n"
+            f"Run 'cinna skills list {ref}' to see them."
+        )
+    return matches[0]
+
+
+def _addon_link_id(addon: dict) -> str | None:
+    """The plugin-link id behind an addon row, if it has one.
+
+    An install is a link row, and the routes that change one address it by that
+    id. It is ``link.id`` on the rows that have a link, and it is also encoded
+    in the row ``key`` (``plugin:<link id>``) — the fallback exists because the
+    key is the one field the dedupe rule guarantees.
+    """
+    link_id = _addon_link(addon).get("id")
+    if link_id:
+        return str(link_id)
+    key = str(addon.get("key") or "")
+    if key.startswith("plugin:"):
+        return key.split(":", 1)[1] or None
+    return None
+
+
+def _require_link_id(addon: dict, agent_name: str, verb: str) -> str:
+    """The link id, or the reason this verb does not apply to this row.
+
+    A local ``skills/<name>/`` folder is the common case here: it is the
+    agent's *own* skill, not an install, so there is nothing to uninstall,
+    upgrade or toggle — and saying so is more useful than a 404 from a route
+    that was never going to match.
+    """
+    link_id = _addon_link_id(addon)
+    if link_id:
+        return link_id
+    name = addon.get("name", "?")
+    if addon.get("source") == "local":
+        raise click.ClickException(
+            f"'{name}' is one of {agent_name}'s own skills — a skills/{name}/ "
+            f"folder in its workspace, not an install from the catalog, so "
+            f"there is nothing to {verb}.\n"
+            f"Edit or delete the folder and sync, or use 'cinna skills delist' "
+            f"to take its published package out of the catalog."
+        )
+    raise click.ClickException(
+        f"Could not determine the install id for '{name}' on {agent_name}. "
+        f"Run 'cinna skills list "
+        f"{normalize_agent_dir_name(agent_name) or agent_name} --json' to "
+        f"inspect the row."
+    )
+
+
+def _agent_ref_for_hint(agent: dict) -> str:
+    """How to spell this agent back at the user in a suggested command."""
+    return normalize_agent_dir_name(agent.get("name", "")) or str(agent.get("id", ""))
+
+
+def _print_plugin_sync(result: dict) -> None:
+    """The environment half of a plugin mutation, when it has something to say.
+
+    Every install / uninstall / upgrade / toggle answers a
+    ``PluginSyncResponse``: the link row is written, and then the change is
+    pushed into the agent's running environments — which can partly fail
+    (``partial_failures``, ``failed_syncs``) while the call still returns 200.
+    A command that printed only its own success would hide exactly the case
+    where the catalog and the running agent disagree.
+    """
+    if not isinstance(result, dict):
+        return
+    failed = result.get("failed_syncs") or 0
+    if result.get("partial_failures") or failed:
+        total = result.get("total_environments") or 0
+        console.warn(
+            f"The link is updated, but {failed} of {total} environment(s) did "
+            f"not pick it up. Restart the environment "
+            f"('cinna agent restart-env <agent>') or try again."
+        )
+    elif result.get("message"):
+        console.console.print(f"  [dim]{_esc(result['message'])}[/dim]")
+
+
+def _plugin_link(result: dict) -> dict:
+    """The link row a ``PluginSyncResponse`` carries back, or an empty dict."""
+    link = result.get("plugin_link") if isinstance(result, dict) else None
+    return link if isinstance(link, dict) else {}
+
+
+def _mode_cell(addon_or_link: dict) -> str:
+    """Where an installed skill is offered — conversation, building, or both."""
+    modes = []
+    if addon_or_link.get("conversation_mode"):
+        modes.append("conversation")
+    if addon_or_link.get("building_mode"):
+        modes.append("building")
+    return " + ".join(modes) if modes else "—"
+
+
+# ── install / uninstall / update / toggle ───────────────────────────────────
+
+
+def _already_installed_message(
+    client: "AccountClient", agent: dict, package: dict, detail: str
+) -> str:
+    """Turn the install route's 409 into a sentence with a next step.
+
+    The refusal is not a failure of the user's intent — the skill *is* on the
+    agent — so the only useful thing to add is which of the two states they are
+    in: carrying the newest revision, or carrying an older one that
+    `cinna skills update` would move. That answer is in the addons listing, and
+    a listing that cannot be read simply costs the extra clause.
+    """
+    label = _package_label(package)
+    lines = [detail or f"{label} is already installed on {agent['name']}."]
+    try:
+        addons = client.get_agent_addons(agent["id"])
+    except Exception as exc:  # noqa: BLE001 — the refusal is the message
+        logger.debug("addons lookup after already_installed failed: %s", exc)
+        return lines[0]
+
+    ref = _agent_ref_for_hint(agent)
+    for addon in addons.get("addons") or []:
+        if not _package_matches_addon(addon, package):
+            continue
+        link = _addon_link(addon)
+        if link.get("has_update"):
+            latest = link.get("latest_version") or "a newer revision"
+            lines.append(
+                f"A newer revision is available ({latest}). Update with: "
+                f"cinna skills update {ref} {addon.get('name')}"
+            )
+        else:
+            version = link.get("installed_version") or addon.get("version")
+            lines.append(
+                "It is already at the newest revision"
+                + (f" ({version})" if version else "")
+                + f". Run 'cinna skills list {ref}' to see it."
+            )
+        break
+    return "\n".join(lines)
+
+
+def _package_matches_addon(addon: dict, package: dict) -> bool:
+    """Is this addon row the install of this package?"""
+    uuid = _package_uuid(package)
+    label = _package_label(package)
+    # `link.skill_package_id` is the authoritative answer for a catalog
+    # install; `published_package_id` answers it for the publisher's own copy.
+    for value in (
+        _addon_link(addon).get("skill_package_id"),
+        addon.get("published_package_id"),
+    ):
+        if value and str(value) in (uuid, label):
+            return True
+    name = str(addon.get("name") or "").lower()
+    return bool(name) and label.lower().endswith(f".{name}")
+
+
+def run_skills_install(
+    agent_ref: str,
+    package_ref: str,
+    revision: int | None = None,
+    conversation_only: bool = False,
+    building_only: bool = False,
+    as_json: bool = False,
+) -> None:
+    """Install a catalog package onto an agent — `cinna skills install`."""
+    if conversation_only and building_only:
+        raise click.UsageError(
+            "--conversation-only and --building-only are opposites: naming both "
+            "would install a skill that is offered nowhere. Pick one, or "
+            "neither for both modes."
+        )
+    conversation_mode = not building_only
+    building_mode = not conversation_only
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+        package_uuid = _package_uuid(package)
+        label = _package_label(package)
+
+        try:
+            with console.spinner(f"Installing '{label}'..."):
+                result = client.install_skill_on_agent(
+                    agent["id"],
+                    package_uuid,
+                    revision_number=revision,
+                    conversation_mode=conversation_mode,
+                    building_mode=building_mode,
+                )
+        except CodedRefusal as exc:
+            if exc.code != "already_installed":
+                raise
+            # Re-raised rather than caught: the exit code and the machine code
+            # are the contract a --json driver reads, and both are the server's.
+            # Only the sentence grows a next step.
+            raise CodedRefusal(
+                exc.status_code,
+                exc.code,
+                _already_installed_message(client, agent, package, exc.detail),
+            )
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    console.status(f"Installed '{_esc(label)}' on {_esc(agent['name'])}")
+    link = _plugin_link(result)
+    version = link.get("installed_version")
+    if version:
+        console.console.print(f"  Version:    {_esc(version)}")
+    elif revision is not None:
+        console.console.print(f"  Revision:   {revision}")
+    console.console.print(f"  Modes:      {_mode_cell(link) if link else _mode_cell({'conversation_mode': conversation_mode, 'building_mode': building_mode})}")
+    _print_plugin_sync(result)
+    console.console.print(
+        f"  [dim]Verify with: cinna skills list {_agent_ref_for_hint(agent)}[/dim]"
+    )
+
+
+def _require_yes_for_json(as_json: bool, yes: bool, what: str) -> None:
+    """A destructive verb under ``--json`` has to be told to go ahead.
+
+    The confirmation cannot simply be skipped the way `publish` skips its
+    preview: publish *creates*, and a driver that meant it loses nothing by
+    proceeding. Here the default has to be "don't", and printing a prompt into
+    a JSON stream would corrupt it — so the flag is required rather than
+    assumed.
+    """
+    if as_json and not yes:
+        raise click.UsageError(
+            f"--json needs --yes for {what}: the confirmation cannot be asked "
+            f"without corrupting the JSON stream, and it is not assumed."
+        )
+
+
+def run_skills_uninstall(
+    agent_ref: str, name: str, yes: bool = False, as_json: bool = False
+) -> None:
+    """Remove an installed skill from an agent — `cinna skills uninstall`."""
+    _require_yes_for_json(as_json, yes, "uninstall")
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Fetching addons..."):
+            payload = client.get_agent_addons(agent["id"])
+        addon = _resolve_installed_addon(payload, agent["name"], name)
+        link_id = _require_link_id(addon, agent["name"], "uninstall")
+
+        if not yes:
+            if not console.confirm(
+                f"Remove '{addon.get('name')}' from {agent['name']}?", default=False
+            ):
+                raise click.Abort()
+
+        with console.spinner(f"Removing '{addon.get('name')}'..."):
+            result = client.uninstall_agent_plugin(agent["id"], link_id)
+
+    if as_json:
+        click.echo(json.dumps(result or {"removed": name}, indent=2, default=str))
+        return
+
+    console.status(f"Removed '{_esc(addon.get('name', name))}' from {_esc(agent['name'])}")
+    _print_plugin_sync(result)
+    console.console.print(
+        "  [dim]The package and its revisions are untouched — re-install with: "
+        f"cinna skills install {_agent_ref_for_hint(agent)} <package>[/dim]"
+    )
+
+
+def run_skills_update(agent_ref: str, name: str, as_json: bool = False) -> None:
+    """Move an installed skill to the newest revision — `cinna skills update`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Fetching addons..."):
+            payload = client.get_agent_addons(agent["id"])
+        addon = _resolve_installed_addon(payload, agent["name"], name)
+        link_id = _require_link_id(addon, agent["name"], "update")
+        before = _addon_link(addon).get("installed_version") or addon.get("version")
+
+        # The listing is the server's *cache*, so "no update available" here is
+        # a stale answer as often as a true one — reported, never used to skip
+        # the call. The upgrade route decides.
+        with console.spinner(f"Updating '{addon.get('name')}'..."):
+            result = client.upgrade_agent_plugin(agent["id"], link_id)
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    after = _plugin_link(result).get("installed_version")
+    console.status(f"Updated '{_esc(addon.get('name', name))}' on {_esc(agent['name'])}")
+    if before and after and before != after:
+        console.console.print(f"  Version:    {_esc(before)} → {_esc(after)}")
+    elif after:
+        console.console.print(f"  Version:    {_esc(after)}")
+    elif before:
+        console.console.print(
+            f"  [dim]Was {_esc(before)}; run 'cinna skills list "
+            f"{_agent_ref_for_hint(agent)}' for the new version.[/dim]"
+        )
+    _print_plugin_sync(result)
+
+
+def run_skills_toggle(
+    agent_ref: str,
+    name: str,
+    enable: bool | None = None,
+    conversation_mode: bool | None = None,
+    building_mode: bool | None = None,
+    as_json: bool = False,
+) -> None:
+    """Enable/disable an installed skill or move its modes — `cinna skills toggle`."""
+    if enable is None and conversation_mode is None and building_mode is None:
+        raise click.UsageError(
+            "Nothing to change. Name at least one of --enable/--disable, "
+            "--conversation-mode/--no-conversation-mode or "
+            "--building-mode/--no-building-mode."
+        )
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Fetching addons..."):
+            payload = client.get_agent_addons(agent["id"])
+        addon = _resolve_installed_addon(payload, agent["name"], name)
+        link_id = _require_link_id(addon, agent["name"], "toggle")
+
+        with console.spinner(f"Updating '{addon.get('name')}'..."):
+            result = client.update_agent_plugin(
+                agent["id"],
+                link_id,
+                enabled=enable,
+                conversation_mode=conversation_mode,
+                building_mode=building_mode,
+            )
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    console.status(f"Updated '{_esc(addon.get('name', name))}' on {_esc(agent['name'])}")
+
+    # The link the server wrote back, which carries all three switches — so
+    # the report is the resulting state, not a restatement of the request.
+    # Falls back to the request only when the response carries no link.
+    link = _plugin_link(result)
+    if link:
+        console.console.print(
+            f"  Enabled:    {'[yellow]no[/yellow]' if link.get('disabled') else 'yes'}"
+        )
+        console.console.print(f"  Modes:      {_mode_cell(link)}")
+    else:
+        if enable is not None:
+            console.console.print(
+                f"  Enabled:    {'yes' if enable else '[yellow]no[/yellow]'}"
+            )
+        if conversation_mode is not None:
+            console.console.print(
+                f"  Conversation: {'on' if conversation_mode else '[yellow]off[/yellow]'}"
+            )
+        if building_mode is not None:
+            console.console.print(
+                f"  Building:     {'on' if building_mode else '[yellow]off[/yellow]'}"
+            )
+    _print_plugin_sync(result)
+
+
+def run_skills_refresh(agent_ref: str, as_json: bool = False) -> None:
+    """Rebuild an agent's addon index — `cinna skills refresh`.
+
+    The recovery path behind every stale answer in this group: the addons route
+    is cache-only, so a skill added, edited or versioned since the last index
+    build is invisible until something refreshes it. This is that something.
+    """
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Refreshing skills..."):
+            skills_result = client.refresh_agent_skills(agent["id"])
+        # The plugin half is a second route and a second cache. A platform that
+        # does not have it is not a failed refresh — the skills half, which is
+        # the half people are waiting on, already succeeded.
+        addons_result: dict | None = None
+        try:
+            with console.spinner("Refreshing plugins..."):
+                addons_result = client.refresh_agent_addons(agent["id"])
+        except CinnaExit as exc:
+            logger.debug("addons refresh failed: %s", exc)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {"skills": skills_result, "addons": addons_result},
+                indent=2,
+                default=str,
+            )
+        )
+        return
+
+    # A refresh that could not read the index answers **200** with the reason
+    # in `error` — the rebuild ran, the environment did not answer it. Printing
+    # a green check for that would send the reader back to `list` to discover
+    # for themselves that nothing changed.
+    error = (skills_result or {}).get("error")
+    if error:
+        console.warn(
+            f"{agent['name']}'s skill index was rebuilt but still could not be "
+            f"read ({error}). The environment's skill adapter is not "
+            f"answering; restart it with 'cinna agent restart-env "
+            f"{_agent_ref_for_hint(agent)}' and try again."
+        )
+        return
+
+    indexed = len((skills_result or {}).get("skills") or [])
+    console.status(
+        f"Refreshed {_esc(agent['name'])}'s addon index — {indexed} skill(s) indexed"
+    )
+    if addons_result is None:
+        console.console.print(
+            "  [dim]The plugin half could not be refreshed; the skill index was.[/dim]"
+        )
+    console.console.print(
+        f"  [dim]cinna skills list {_agent_ref_for_hint(agent)}[/dim]"
+    )
+
+
+# ── catalog browsing ────────────────────────────────────────────────────────
+
+
+def _catalog_matches(package: dict, needle: str) -> bool:
+    """Does this package match a ``--search`` term?
+
+    Client-side because ``GET /skills/catalog`` takes no parameters: it answers
+    the whole visible catalogue. Matching the description too is what makes the
+    term useful — a package is found by what it does at least as often as by
+    what it is called.
+    """
+    needle = needle.strip().lower()
+    return any(
+        needle in str(package.get(key) or "").lower()
+        for key in ("package_id", "name", "display_name", "description")
+    )
+
+
+def run_skills_catalog(
+    search: str | None = None, mine: bool = False, as_json: bool = False
+) -> None:
+    """List the catalog packages this account can see — `cinna skills catalog`."""
+    from rich.table import Table
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with console.spinner("Fetching catalog..."):
+        with AccountClient(account_cfg) as client:
+            payload = client.list_skill_catalog()
+
+    packages = _rows(payload, "packages", "catalog")
+    if mine:
+        # `can_manage` is the server's own answer to "is this yours" — a
+        # publisher-id comparison would need a user id the account token does
+        # not carry.
+        packages = [p for p in packages if p.get("can_manage")]
+    if search:
+        packages = [p for p in packages if _catalog_matches(p, search)]
+
+    if as_json:
+        # The filtered rows, not the raw envelope: a driver that passed
+        # --search must not be handed the packages it excluded.
+        click.echo(json.dumps({"data": packages, "count": len(packages)}, indent=2, default=str))
+        return
+
+    if not packages:
+        scope = "you published" if mine else "this account can see"
+        console.console.print(
+            f"[dim]No catalog packages {scope}"
+            + (f" matching '{search}'." if search else ".")
+            + "[/dim]"
+        )
+        return
+
+    table = Table(title=f"Skills catalog ({len(packages)})", title_style="bold")
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("Package", overflow="fold")
+    table.add_column("Name")
+    table.add_column("Visibility")
+    table.add_column("Latest")
+
+    for i, pkg in enumerate(packages, 1):
+        display = pkg.get("display_name") or pkg.get("name") or ""
+        visibility = _esc(pkg.get("visibility") or "—")
+        if pkg.get("is_listed") is False:
+            # A delisted package still answers every route and still installs;
+            # it is simply not discoverable. Nothing else in the row says so.
+            visibility += " [yellow]· delisted[/yellow]"
+        table.add_row(
+            str(i),
+            _esc(_package_label(pkg)),
+            _esc(display),
+            visibility,
+            _esc(pkg.get("latest_version") or ""),
+        )
+
+    console.console.print(table)
+    console.console.print(
+        "[dim]Install with: cinna skills install <agent> <package>[/dim]"
+    )
+
+
+def _revision_rows(package: dict) -> list[dict]:
+    """A package's revisions, newest first.
+
+    Sorted here rather than trusted from the payload: the one question this
+    list answers is "what is the newest", and a route that happened to return
+    ascending order would put the answer at the bottom.
+    """
+    revisions = _rows(package.get("revisions"), "revisions")
+    return sorted(
+        revisions, key=lambda r: r.get("revision_number") or 0, reverse=True
+    )
+
+
+def _print_revisions(package: dict) -> None:
+    from rich.table import Table
+
+    revisions = _revision_rows(package)
+    if not revisions:
+        console.console.print("[dim]This package has no revisions yet.[/dim]")
+        return
+
+    table = Table(
+        title=f"{_package_label(package)} — revisions ({len(revisions)})",
+        title_style="bold",
+    )
+    table.add_column("Rev", style="dim", justify="right")
+    table.add_column("Version")
+    table.add_column("Released", style="dim")
+    table.add_column("Size", justify="right", style="dim")
+    table.add_column("Release notes")
+
+    for rev in revisions:
+        size = rev.get("size_bytes") or rev.get("size")
+        table.add_row(
+            str(rev.get("revision_number", "?")),
+            _esc(rev.get("version") or ""),
+            # `published_at`, not `created_at`: the payload carries both and
+            # only the first is ever filled.
+            str(rev.get("published_at") or rev.get("created_at") or "")[:19],
+            _format_size(size),
+            # `release_notes`, not `notes`: the field a publisher fills at
+            # publish time is the field this column has to read.
+            _esc(rev.get("release_notes") or ""),
+        )
+
+    console.console.print(table)
+
+
+def _format_size(size) -> str:
+    """A byte count as something readable, or blank when it was not reported."""
+    try:
+        value = float(size)
+    except (TypeError, ValueError):
+        return ""
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return ""
+
+
+def _pick_revision(package: dict, revision: int | None) -> dict | None:
+    """The revision to act on: the one asked for, else the newest."""
+    revisions = _revision_rows(package)
+    if not revisions:
+        return None
+    if revision is None:
+        return revisions[0]
+    for rev in revisions:
+        if rev.get("revision_number") == revision:
+            return rev
+    available = ", ".join(str(r.get("revision_number")) for r in revisions)
+    raise click.ClickException(
+        f"{_package_label(package)} has no revision {revision}.\n"
+        f"It has: {available}"
+    )
+
+
+def _revision_content(payload) -> str | None:
+    """The SKILL.md text out of a revision-content answer."""
+    if isinstance(payload, str):
+        return payload
+    if not isinstance(payload, dict):
+        return None
+    for key in ("content", "skill_md", "text", "body", "markdown"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def run_skills_show(
+    package_ref: str, revision: int | None = None, as_json: bool = False
+) -> None:
+    """Show one catalog package — `cinna skills show`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+        target = _pick_revision(package, revision)
+        content = None
+        _is_truncated = False
+        if target is not None:
+            try:
+                with console.spinner("Fetching SKILL.md..."):
+                    content_payload = client.get_skill_revision_content(
+                        _package_uuid(package), target.get("revision_number")
+                    )
+                content = _revision_content(content_payload)
+                _is_truncated = bool(
+                    isinstance(content_payload, dict)
+                    and content_payload.get("truncated")
+                )
+            except CinnaExit as exc:
+                # The package detail is the answer; its SKILL.md is a bonus.
+                logger.debug("revision content fetch failed: %s", exc)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {"package": package, "revision": target, "content": content},
+                indent=2,
+                default=str,
+            )
+        )
+        return
+
+    console.console.print(f"[bold]{_esc(_package_label(package))}[/bold]")
+    display = package.get("display_name") or package.get("name")
+    if display:
+        console.console.print(f"  Name:       {_esc(display)}")
+    if package.get("description"):
+        console.console.print(f"  About:      {_esc(package['description'])}")
+    publisher = (package.get("publisher_name") or "").strip()
+    if publisher:
+        console.console.print(f"  Publisher:  {_esc(publisher)}")
+    visibility = _esc(package.get("visibility") or "—")
+    if package.get("is_listed") is False:
+        visibility += " [yellow]· delisted (not discoverable)[/yellow]"
+    console.console.print(f"  Visibility: {visibility}")
+    if package.get("latest_version"):
+        console.console.print(f"  Latest:     {_esc(package['latest_version'])}")
+    uuid = _package_uuid(package)
+    if uuid:
+        console.console.print(f"  Id:         [dim]{uuid}[/dim]")
+    console.console.print()
+    _print_revisions(package)
+
+    if content:
+        console.console.print()
+        header = f"SKILL.md (revision {target.get('revision_number')})"
+        console.console.print(f"[dim]{header}[/dim]")
+        # Printed as plain text, not Rich markup: a SKILL.md is someone else's
+        # file and may hold anything, including square brackets.
+        console.console.print(content, markup=False, highlight=False)
+        if _is_truncated:
+            # The route caps what it returns. Printing the cap as if it were
+            # the file would misreport the one artifact this verb exists to
+            # show.
+            console.warn(
+                "The server truncated this SKILL.md — what is printed above is "
+                "not the whole file."
+            )
+
+
+def run_skills_revisions(package_ref: str, as_json: bool = False) -> None:
+    """List a package's revisions — `cinna skills revisions`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+
+    if as_json:
+        click.echo(json.dumps(_revision_rows(package), indent=2, default=str))
+        return
+
+    _print_revisions(package)
+    console.console.print(
+        "[dim]A revision is immutable — publishing again appends one. "
+        "Preview the next with: cinna skills publish <agent> <name> --dry-run[/dim]"
+    )
+
+
+def run_skills_files(
+    package_ref: str, revision: int | None = None, as_json: bool = False
+) -> None:
+    """List the files one revision ships — `cinna skills files`."""
+    from rich.table import Table
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+        target = _pick_revision(package, revision)
+        if target is None:
+            raise click.ClickException(
+                f"{_package_label(package)} has no revisions to list files for."
+            )
+        with console.spinner("Fetching file list..."):
+            payload = client.get_skill_revision_files(
+                _package_uuid(package), target.get("revision_number")
+            )
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, default=str))
+        return
+
+    files = _rows(payload, "files")
+    if not files:
+        console.console.print("[dim]This revision reports no files.[/dim]")
+        return
+
+    table = Table(
+        title=(
+            f"{_package_label(package)} rev {target.get('revision_number')} "
+            f"— files ({len(files)})"
+        ),
+        title_style="bold",
+    )
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("Path", overflow="fold")
+    table.add_column("Size", justify="right", style="dim")
+
+    for i, entry in enumerate(files, 1):
+        path = entry.get("path") or entry.get("name") or "?"
+        table.add_row(str(i), _esc(path), _format_size(entry.get("size_bytes") or entry.get("size")))
+
+    console.console.print(table)
+    total = payload.get("total_size_bytes") if isinstance(payload, dict) else None
+    if total:
+        console.console.print(f"[dim]{_format_size(total)} in total.[/dim]")
+    if isinstance(payload, dict) and payload.get("truncated"):
+        console.warn("The server truncated this file list; it is not complete.")
+
+
+# ── sharing: grants, visibility, delist ─────────────────────────────────────
+
+
+def _grant_email(grant: dict) -> str | None:
+    for key in ("email", "user_email"):
+        if grant.get(key):
+            return str(grant[key])
+    user = grant.get("user")
+    if isinstance(user, dict) and user.get("email"):
+        return str(user["email"])
+    return None
+
+
+def _grant_user_id(grant: dict) -> str | None:
+    """The **user** id on a grant row.
+
+    Deliberately not falling back to the row's own ``id``: a grant carries
+    both, and revoking addresses the user. Sending the grant id would delete
+    nothing and report success.
+    """
+    if grant.get("user_id"):
+        return str(grant["user_id"])
+    user = grant.get("user")
+    if isinstance(user, dict) and user.get("id"):
+        return str(user["id"])
+    return None
+
+
+def _print_grants(package: dict, grants: list[dict]) -> None:
+    from rich.table import Table
+
+    visibility = package.get("visibility")
+    if not grants:
+        console.console.print(
+            f"[dim]Nobody is named on {_esc(_package_label(package))}.[/dim]"
+        )
+    else:
+        table = Table(
+            title=f"{_package_label(package)} — grants ({len(grants)})",
+            title_style="bold",
+        )
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("User")
+        table.add_column("Granted", style="dim")
+        for i, grant in enumerate(grants, 1):
+            table.add_row(
+                str(i),
+                _esc(_grant_email(grant) or _grant_user_id(grant) or "?"),
+                str(grant.get("created_at") or "")[:19],
+            )
+        console.console.print(table)
+
+    # The grant list is real on any package; it only *does* anything on one
+    # whose visibility is `users`. Saying so here is what stops a publisher
+    # concluding they have shared something they have not.
+    console.console.print(f"[dim]Visibility: {_esc(visibility or '—')}[/dim]")
+    if grants and visibility != "users":
+        console.warn(
+            f"This package is '{visibility}', so its grant list is ignored — "
+            f"only a 'users' package consults it.\n"
+            f"Run: cinna skills visibility {_package_label(package)} users"
+        )
+
+
+def run_skills_grants(package_ref: str, as_json: bool = False) -> None:
+    """Who is named on a package — `cinna skills grants`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+        with console.spinner("Fetching grants..."):
+            payload = client.list_skill_grants(_package_uuid(package))
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, default=str))
+        return
+
+    _print_grants(package, _rows(payload, "grants"))
+
+
+def run_skills_grant(package_ref: str, email: str, as_json: bool = False) -> None:
+    """Name one person on a package — `cinna skills grant`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+        with console.spinner(f"Granting access to {email}..."):
+            result = client.grant_skill_access(_package_uuid(package), email)
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    console.status(f"Granted {_esc(email)} access to {_esc(_package_label(package))}")
+    if package.get("visibility") != "users":
+        console.warn(
+            f"The package is '{package.get('visibility')}', which ignores its "
+            f"grant list — the grant is stored but shares nothing.\n"
+            f"Run: cinna skills visibility {_package_label(package)} users"
+        )
+
+
+def run_skills_revoke(
+    package_ref: str, email: str, yes: bool = False, as_json: bool = False
+) -> None:
+    """Take one person's access away — `cinna skills revoke`."""
+    _require_yes_for_json(as_json, yes, "revoke")
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+        with console.spinner("Fetching grants..."):
+            grants = _rows(client.list_skill_grants(_package_uuid(package)), "grants")
+
+        # Revoke is addressed by user id; nobody has one. Resolving the email
+        # against the grant list also makes "they were never granted" a
+        # sentence instead of a 404.
+        target = next(
+            (
+                g
+                for g in grants
+                if (_grant_email(g) or "").lower() == email.strip().lower()
+            ),
+            None,
+        )
+        if target is None:
+            # "Named: nobody" beside an email address reads as a username, so
+            # an empty list gets a sentence rather than a placeholder.
+            named = [e for e in (_grant_email(g) for g in grants) if e]
+            detail = (
+                f"Named: {', '.join(named)}"
+                if named
+                else "Nobody is named on it."
+            )
+            raise click.ClickException(
+                f"{email} is not named on {_package_label(package)}.\n{detail}"
+            )
+        user_id = _grant_user_id(target)
+        if not user_id:
+            raise click.ClickException(
+                f"The grant for {email} carries no user id to revoke. "
+                f"Run 'cinna skills grants {package_ref} --json' to inspect it."
+            )
+
+        if not yes:
+            if not console.confirm(
+                f"Revoke {email}'s access to {_package_label(package)}?",
+                default=False,
+            ):
+                raise click.Abort()
+
+        with console.spinner(f"Revoking {email}..."):
+            result = client.revoke_skill_access(_package_uuid(package), user_id)
+
+    if as_json:
+        click.echo(json.dumps(result or {"revoked": email}, indent=2, default=str))
+        return
+
+    console.status(f"Revoked {_esc(email)} from {_esc(_package_label(package))}")
+
+
+def run_skills_visibility(
+    package_ref: str, visibility: str, as_json: bool = False
+) -> None:
+    """Change who may see a package — `cinna skills visibility`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+        before = package.get("visibility")
+        with console.spinner(f"Setting visibility to {visibility}..."):
+            result = client.update_skill_package(
+                _package_uuid(package), visibility=visibility
+            )
+        grants = []
+        if visibility == "users":
+            try:
+                grants = _rows(client.list_skill_grants(_package_uuid(package)), "grants")
+            except CinnaExit as exc:
+                logger.debug("grant lookup after visibility change failed: %s", exc)
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    console.status(
+        f"{_esc(_package_label(package))} is now [bold]{_esc(visibility)}[/bold]"
+        + (f" (was {_esc(before)})" if before and before != visibility else "")
+    )
+    if visibility == "users" and not grants:
+        # `users` with an empty grant list is the one visibility that shares
+        # with nobody while looking like sharing.
+        console.warn(
+            "Nobody is named on this package yet, so 'users' shares it with "
+            "nobody.\n"
+            f"Run: cinna skills grant {_package_label(package)} --user <email>"
+        )
+
+
+def run_skills_relist(package_ref: str, as_json: bool = False) -> None:
+    """Put a delisted package back in the catalog — `cinna skills relist`.
+
+    `delist` is a `POST` of its own and has no inverse route; the undo is the
+    package PATCH. Without this verb the only way back is `cinna api`, which
+    would make delist the one door in this group that opens only outwards.
+    """
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+        with console.spinner("Relisting..."):
+            result = client.update_skill_package(
+                _package_uuid(package), is_listed=True
+            )
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    console.status(f"Relisted {_esc(_package_label(package))}")
+    console.console.print(
+        f"  [dim]Discoverable again to whoever its visibility "
+        f"({_esc(package.get('visibility') or '—')}) allows.[/dim]"
+    )
+
+
+def run_skills_delist(
+    package_ref: str, yes: bool = False, as_json: bool = False
+) -> None:
+    """Take a package out of the catalog — `cinna skills delist`."""
+    _require_yes_for_json(as_json, yes, "delist")
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        with console.spinner(f"Resolving '{package_ref}'..."):
+            package = _resolve_skill_package(client, package_ref)
+
+        if not yes:
+            console.console.print(
+                f"Delisting [bold]{_esc(_package_label(package))}[/bold] hides it "
+                f"from the catalog. Agents that already installed it keep what "
+                f"they have."
+            )
+            if not console.confirm("Delist?", default=False):
+                raise click.Abort()
+
+        with console.spinner("Delisting..."):
+            result = client.delist_skill_package(_package_uuid(package))
+
+    if as_json:
+        click.echo(json.dumps(result or {"delisted": package_ref}, indent=2, default=str))
+        return
+
+    console.status(f"Delisted {_esc(_package_label(package))}")
+    console.console.print(
+        f"  [dim]Put it back with: cinna skills relist {_package_label(package)}[/dim]"
+    )

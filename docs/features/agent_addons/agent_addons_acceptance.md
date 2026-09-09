@@ -16,6 +16,8 @@ that a publish is visible to the person it was shared with.
   environment.
 - A second platform user (`OTHER`) whose email you can grant to, and whose
   catalog you can check.
+- A **consumer** agent (`CONSUMER`) on the same account — a second agent you can
+  install onto, so the publish → install → update loop runs end to end.
 - The editable install: `which cinna` resolves into this repo's `src/cinna`.
 
 > Reference agents by display name, slug, or id. An unresolved ref must fail
@@ -393,6 +395,202 @@ cinna skills publish definitely-not-an-agent some-skill
 
 **Watch for** — the ref resolved server-side after a publish attempt.
 
+### 14. Install a published skill on a second agent, by name
+
+**Goal** — the whole install path runs without a UUID and without `cinna api`.
+
+**Setup** — scenario 4 has published `acceptance-demo` from `AGENT`.
+
+**Steps**
+
+```bash
+cinna skills catalog --search acceptance
+cinna skills show <PACKAGE_ID>
+cinna skills install <CONSUMER> <PACKAGE_ID>
+cinna skills list <CONSUMER>
+```
+
+**Expected** — the catalog row prints the reverse-DNS package id; `show` prints
+the revisions and the newest revision's `SKILL.md`; the install succeeds naming
+the version it took (read from the link the server returns) and how the
+environments took it; the list shows the row with that version.
+
+**Watch for** — any step that only works with a UUID; a package id typed into
+`install` that is not accepted; the installed row appearing with a blank version.
+
+### 15. Installing twice is a sentence, not a 409 body
+
+**Steps**
+
+```bash
+cinna skills install <CONSUMER> <PACKAGE_ID>     # again
+```
+
+**Expected** — non-zero exit, the platform's own sentence, and a following line
+saying either that the install is already at the newest revision or naming
+`cinna skills update <CONSUMER> acceptance-demo`. No JSON on stdout.
+
+**Watch for** — a raw `{"code": "already_installed"}` reaching the user; the
+`--json` error code no longer being `already_installed`.
+
+### 16. A new revision is visible as a pending update, then closed
+
+**Goal** — the difference between a stale consumer and a current one is visible
+at a glance.
+
+**Steps**
+
+```bash
+# edit skills/acceptance-demo/SKILL.md on AGENT, then:
+cinna sync push --agent <slug>
+cinna skills publish <AGENT> acceptance-demo --yes
+cinna skills list <CONSUMER>
+cinna skills update <CONSUMER> acceptance-demo
+cinna skills list <CONSUMER>
+```
+
+**Expected** — after the publish, the consumer's row reads `1.0.0 → 1.0.1` and a
+line under the table names the update command. After `update`, the row shows the
+new version alone and the line is gone.
+
+**Watch for** — a stale consumer that looks identical to a current one (the
+regression this scenario exists for); the arrow appearing on a row that is
+current.
+
+### 17. Toggling changes only what was named
+
+**Steps**
+
+```bash
+cinna skills toggle <CONSUMER> acceptance-demo --no-building-mode
+cinna skills toggle <CONSUMER> acceptance-demo --disable
+cinna skills list <CONSUMER> --json | grep -A3 acceptance-demo
+```
+
+**Expected** — after the second call the link is disabled and
+`conversation_mode` / `building_mode` still hold what the first call set. Each
+call echoes the resulting state (`Enabled:` / `Modes:`) read from the link the
+server wrote back, and `cinna skills list` marks the row `· disabled`.
+
+**Watch for** — `--disable` resetting the mode flags to their defaults;
+`--disable` reporting success while the link stays enabled (the switch is
+stored as `disabled`, so a body carrying `enabled` is silently ignored);
+a disabled install that looks identical to an enabled one in `list`.
+
+### 18. Uninstall removes the copy, not the package
+
+**Steps**
+
+```bash
+cinna skills uninstall <CONSUMER> acceptance-demo --yes
+cinna skills list <CONSUMER>
+cinna skills revisions <PACKAGE_ID>
+```
+
+**Expected** — the row is gone from `CONSUMER`; the package still lists every
+revision it had.
+
+**Watch for** — a revision disappearing; the uninstall asking for a link id.
+
+### 19. `uninstall` on the publisher's own skill explains itself
+
+**Steps**
+
+```bash
+cinna skills uninstall <AGENT> acceptance-demo --yes
+```
+
+**Expected** — non-zero exit with a sentence saying `acceptance-demo` is one of
+`AGENT`'s own `skills/…` folders and there is nothing to uninstall. No route is
+called.
+
+**Watch for** — a 404 from the plugin route reaching the user as if the platform
+had failed.
+
+### 20. `revisions` answers the publisher's question without `cinna api`
+
+**Steps**
+
+```bash
+cinna skills revisions <PACKAGE_ID>
+```
+
+**Expected** — one row per revision, newest first, with number, version, release
+date, size and the `release_notes` given at publish time.
+
+**Watch for** — a permanently blank notes column (the field is `release_notes`,
+not `notes`); ascending order, which buries the answer at the bottom.
+
+### 21. Sharing changes after the publish
+
+**Steps**
+
+```bash
+cinna skills visibility <PACKAGE_ID> users
+cinna skills grant <PACKAGE_ID> --user <OTHER_EMAIL>
+cinna skills grants <PACKAGE_ID>
+cinna skills revoke <PACKAGE_ID> --user <OTHER_EMAIL> --yes
+cinna skills grants <PACKAGE_ID>
+cinna skills delist <PACKAGE_ID> --yes
+cinna skills catalog
+cinna skills relist <PACKAGE_ID>
+```
+
+**Expected** — `OTHER` can see the package in their catalog between the grant
+and the revoke, and not after. `grants` prints the visibility beside the list.
+Switching to `users` while nobody is named warns that it shares with nobody; a
+grant on a `private` package warns that the list is ignored.
+
+The delisted package shows `· delisted` beside its visibility in the catalog
+and is discoverable again after `relist`.
+
+**Watch for** — a revoke that needs a user id typed by hand; a revoke that
+addresses the *grant* row's id instead of the user's (it deletes nothing and
+reports success); a grant reported as shared access on a visibility that
+ignores it; `delist` with no way back except `cinna api`.
+
+### 22. `refresh` is the remedy for a stale index
+
+**Steps**
+
+```bash
+# with a skill whose SKILL.md version the list does not show yet:
+cinna skills refresh <AGENT>
+cinna skills list <AGENT>
+```
+
+**Expected** — the version (or the previously unreadable index) appears, and
+the refresh reports how many skills were indexed. A platform without the
+addons-refresh route still refreshes the skill half and says the plugin half
+could not be done.
+
+On an agent whose environment adapter is broken, the refresh answers **200 with
+`error: adapter_error`** — and must then say so and point at `cinna agent
+restart-env <AGENT>`, not print a green check. `cinna skills list` on the same
+agent names `cinna skills refresh` under its `skills_error` warning.
+
+**Watch for** — `refresh` failing outright because one of the two routes is
+missing; a refresh that changed nothing reported as a success (the failure
+arrives as a 200, so only reading `error` catches it).
+
+### 23. `cinna api` no longer swallows a truncated id
+
+**Steps**
+
+```bash
+cinna api GET "agents/f0506e24-3740-4fe3…/addons"
+cinna api GET agents/<AGENT_SLUG>/addons
+```
+
+**Expected** — the first is refused locally, naming the elided segment, with no
+request made. The second resolves the slug (announced on stderr) and returns the
+addons payload on stdout. `cinna account agents` prints ids that are never
+elided, at any terminal width.
+
+**Watch for** — the elided id reaching the API and coming back `404 Agent not
+found`; the resolution note landing on stdout and corrupting a JSON pipe; a
+non-agent sub-route under `agents/` being rejected instead of passed through.
+
 ## Cross-cutting invariants
 
 - No secret value is ever printed, and a skill folder that holds one cannot be
@@ -415,11 +613,20 @@ cinna skills publish definitely-not-an-agent some-skill
   above its predecessor's, whatever shape the label has.
 - Nothing but a real publish adds a revision — not a preview, not a refused
   `--version`, not a declined confirmation.
+- No verb in this group asks anyone for a UUID or a link id, and none prints an
+  id that a narrower terminal would elide.
+- An install is a copy: uninstalling, delisting or revoking never removes a
+  revision, and never breaks an agent that already holds one.
+- Only `cinna skills refresh` reaches the environment. Every other verb here is
+  safe against a sleeping agent.
 
 ## Cleanup
 
-- Delist or delete the acceptance package from the catalog through the web UI
-  (the CLI has no delete verb), and revoke the grant to `OTHER`.
+- `cinna skills uninstall <CONSUMER> acceptance-demo --yes`, then
+  `cinna skills revoke <PACKAGE_ID> --user <OTHER_EMAIL> --yes` and
+  `cinna skills delist <PACKAGE_ID> --yes` (reversible with
+  `cinna skills relist`). Deleting the package outright is still web-UI only —
+  delisting hides it, it does not remove it.
 - Remove `skills/acceptance-demo/` from the workspace and `cinna sync push
   --agent <slug>`.
 - Re-run `cinna skills list <AGENT>` to confirm the row is gone.

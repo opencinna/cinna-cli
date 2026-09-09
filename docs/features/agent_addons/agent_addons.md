@@ -1,10 +1,15 @@
-# Agent Addons (`cinna skills list`, `cinna skills publish`)
+# Agent Addons (`cinna skills`)
 
 ## Purpose
 
 See everything an agent carries beyond its prompt — installed plugins and its own
-`skills/<name>/` folders — as one list, and publish one of those folders to the
-instance skills catalog so other agents can install it.
+`skills/<name>/` folders — as one list, publish one of those folders to the
+instance skills catalog, and run the rest of that lifecycle from the same place:
+browse the catalog, install a package on another agent, keep an install current,
+and change who may see a package after it was published.
+
+The whole loop — publish → discover → install → re-publish → update — runs
+without `cinna api`, and without anyone typing a UUID.
 
 ## Mental model / core concepts
 
@@ -34,6 +39,26 @@ instance skills catalog so other agents can install it.
   list is read from the **platform's cache** of the environment's skill index,
   not from local disk. What `cinna skills list` shows is what the engine sees,
   which is the question worth asking after an edit.
+- **Install / plugin link** — installing a catalog package onto an agent creates
+  a *link* row tying one revision to one agent. That is why an install can be
+  uninstalled, upgraded and toggled while the package it came from is untouched:
+  what the agent holds is a copy, not a reference. The link has an id of its own,
+  which the CLI resolves from the addon's name and never asks anyone to type.
+- **Three versions, not one** — an installed addon has a version it *carries*
+  (`installed_version`), a version the catalog *now holds* (`latest_version`),
+  and a flag saying they differ (`has_update`). All three live on the row's
+  `link`, not at its top level, where only the installed one appears; a row
+  rendered from the top level would make an agent two revisions behind look
+  exactly like a current one.
+- **Grant** — a named person on a package. Grants are stored on any package but
+  only consulted on one whose visibility is `users`; every other visibility
+  ignores the list entirely.
+- **Delist / relist** — hiding a package from the catalog, and putting it back.
+  Delisting does not reach the agents that already installed it: they hold
+  copies.
+- **Refresh** — the one verb here that talks to the environment. Everything else
+  in this group reads the platform's cache, which is what makes it safe to run
+  against a sleeping agent — and what makes a stale index possible.
 
 ## User flows
 
@@ -71,6 +96,48 @@ instance skills catalog so other agents can install it.
    `skills/<name>/SKILL.md` now carries the version, since a file in the synced
    workspace changed without the user editing it.
 
+### Install a published skill on another agent
+
+1. `cinna skills catalog --search jokes` — the package id, display name,
+   visibility and newest version of everything this account may see. The
+   reverse-DNS package id (`localhost.skill.dad-jokes`) is what the next command
+   takes; nobody needs the UUID underneath it.
+2. `cinna skills show <package>` for the revisions and the newest revision's
+   `SKILL.md` before committing an agent to it.
+3. `cinna skills install <consumer-agent> <package>` — the newest revision
+   unless `--revision N` names another. `--conversation-only` /
+   `--building-only` narrow where the skill is offered; by default it is both.
+4. `cinna skills list <consumer-agent>` shows the row with the version it now
+   carries.
+5. Installing something the agent already has is answered as a sentence, not a
+   409 body: it says so, and points at `cinna skills update` when a newer
+   revision is waiting.
+
+### Keep an install current
+
+1. `cinna skills list <consumer-agent>`. A row whose catalog has moved reads
+   `1.0.0 → 1.1.0`, and the line under the table names the update command.
+2. `cinna skills update <consumer-agent> <name>` moves the link to the newest
+   revision and prints the version it moved from and to.
+3. `cinna skills uninstall <consumer-agent> <name>` removes the agent's copy;
+   the package and its revisions are untouched.
+4. `cinna skills toggle <consumer-agent> <name> --disable` (or
+   `--no-building-mode`, …) changes where an install is offered without removing
+   it. Every switch left unnamed keeps its stored value.
+
+### Recover from a stale or unreadable index
+
+1. `cinna skills list <agent>` reports `adapter_error` / `env_not_running` /
+   `parse_error`, or shows a local skill with no version although its `SKILL.md`
+   has one. Both are the cache, not the agent.
+2. `cinna skills refresh <agent>` — the only verb here that reaches the
+   environment. It rebuilds the skill index and, where the platform has it, the
+   plugin half too, and reports how many skills were indexed.
+3. If the index still cannot be read, the refresh says so rather than claiming
+   success: the environment's skill adapter is not answering, and the next step
+   is `cinna agent restart-env <agent>`, not another refresh.
+4. `cinna skills list <agent>` again.
+
 ### Share a private skill with named people
 
 1. `cinna skills publish <agent> <name> --visibility users --grant a@x.com
@@ -79,6 +146,20 @@ instance skills catalog so other agents can install it.
 2. Each address is resolved to a platform user in the same transaction as the
    publish.
 3. A later publish adds more addresses; it never takes access away.
+
+### Change sharing after the fact
+
+Visibility and grants belong to the *package*, not to a revision, so they can
+change without cutting a new one:
+
+1. `cinna skills grants <package>` — who is named, and the visibility that
+   decides whether that list is consulted at all.
+2. `cinna skills grant <package> --user ana@example.com` /
+   `cinna skills revoke <package> --user ana@example.com`.
+3. `cinna skills visibility <package> users|public|private`.
+4. `cinna skills delist <package>` takes it out of the catalog and
+   `cinna skills relist <package>` puts it back; agents that already installed
+   it keep what they have either way.
 
 ## Business rules
 
@@ -139,7 +220,48 @@ instance skills catalog so other agents can install it.
   the code as its own `--json` error code. Two places wording the same refusal
   would be two places to keep true.
 - **Listing is read-only and cache-only.** It never wakes a container, so it is
-  safe to run against a sleeping environment and safe to run repeatedly.
+  safe to run against a sleeping environment and safe to run repeatedly. The
+  price is staleness, and `cinna skills refresh` is the remedy — the only verb
+  in this group that reaches the environment.
+- **A pending update is a visible fact.** `has_update` puts an arrow in the
+  Version column and names the update command under the table. An agent whose
+  installs are all current says nothing, so the marker means something when it
+  appears.
+- **Already installed is a refusal with a next step.** Installing a package the
+  agent carries answers 409 `already_installed`. The CLI prints the server's
+  sentence and adds which state the agent is in — at the newest revision, or one
+  `cinna skills update` behind — because the user's intent has already been
+  satisfied and the only open question is what to do now.
+- **Only an install can be uninstalled.** An agent's own `skills/<name>/` folder
+  is part of its workspace, not a link; `uninstall`, `update` and `toggle` say
+  so and call nothing rather than 404ing on a route that could never match.
+- **Toggling is partial.** `--enable/--disable` and the two mode switches
+  default to "leave it alone", so disabling an install cannot silently reset the
+  modes a previous call set. A disabled install still lists, still reports its
+  version and is not an error, so the list marks it `· disabled` — nothing else
+  in the row would say the engine is not loading it.
+- **A refresh that changed nothing says so.** The route answers 200 even when
+  the index still could not be read, so the verb reports the reason and points
+  at restarting the environment. A green check there would send the reader back
+  to `list` to discover for themselves that nothing moved.
+- **A change to a link is not the same as a change to a running agent.** Every
+  install / uninstall / update / toggle also pushes into the agent's live
+  environments, and that push can partly fail while the call succeeds. When it
+  does, the CLI says which environments did not take it.
+- **A grant on the wrong visibility is a warning, not a refusal.** After the
+  fact, `grant` and `grants` still work on a private or public package (the row
+  is real), but they say the list is ignored and name the command that would
+  make it count. Only at *publish* time is the combination refused outright —
+  there the mistake costs a permanent revision.
+- **`users` with nobody named shares with nobody.** Switching visibility to
+  `users` on a package with an empty grant list is the one setting that looks
+  like sharing and is not, so it says so.
+- **Delisting does not reach installed copies.** A revision an agent holds is a
+  copy; hiding the package from discovery leaves every install working.
+- **References, not ids, everywhere.** An agent is a name, slug or id; a package
+  is a reverse-DNS id, a display name or a UUID; an installed skill is the name
+  `cinna skills list` prints. The link id and the package UUID exist and are
+  resolved internally.
 
 ## Architecture overview
 
@@ -158,11 +280,50 @@ cinna skills publish <agent> <name> [--dry-run]
       → api-proxy → POST /api/v1/agents/{id}/skills/{name}/publish
     → AccountClient.get_skill_package()               (for the catalog line)
       → api-proxy → GET /api/v1/skills/packages/{id}
+
+cinna skills install <agent> <package> [--revision N]
+  → account.py:run_skills_install()
+    → _resolve_skill_package()                        (name / id → package UUID)
+      → api-proxy → GET /api/v1/skills/catalog, GET /skills/packages/{id}
+    → AccountClient.install_skill_on_agent()
+      → api-proxy → POST /api/v1/agents/{id}/skills/install
+      → 409 already_installed → the server's sentence + the update command
+
+cinna skills update|uninstall|toggle <agent> <name>
+  → account.py:run_skills_update() / _uninstall() / _toggle()
+    → get_agent_addons() → _resolve_installed_addon() → _addon_link_id()
+      → api-proxy → POST   /api/v1/llm-plugins/agents/{id}/plugins/{link}/upgrade
+                  → DELETE /api/v1/llm-plugins/agents/{id}/plugins/{link}
+                  → PUT    /api/v1/llm-plugins/agents/{id}/plugins/{link}
+
+cinna skills refresh <agent>
+  → account.py:run_skills_refresh()
+    → api-proxy → POST /api/v1/agents/{id}/skills/refresh
+                → POST /api/v1/agents/{id}/addons/refresh   (best effort)
+
+cinna skills catalog|show|revisions|files [<package>]
+  → account.py:run_skills_catalog() / _show() / _revisions() / _files()
+    → api-proxy → GET /api/v1/skills/catalog
+                → GET /api/v1/skills/packages/{id}
+                → GET /api/v1/skills/packages/{id}/revisions/{n}/content|files
+
+cinna skills grants|grant|revoke|visibility|delist|relist <package>
+  → account.py:run_skills_grants() / _grant() / _revoke() / _visibility()
+                                   / _delist() / _relist()
+    → api-proxy → GET|POST /api/v1/skills/packages/{id}/grants
+                → DELETE   /api/v1/skills/packages/{id}/grants/{user_id}
+                → PATCH    /api/v1/skills/packages/{id}   (visibility, relist)
+                → POST     /api/v1/skills/packages/{id}/delist
 ```
 
-Both verbs ride the account escape hatch rather than a dedicated `/cli/account/*`
-route: these are ordinary platform routes, and an account token cannot satisfy a
-user-scoped dependency directly. See the tech doc for why.
+Every verb rides the account escape hatch rather than a dedicated
+`/cli/account/*` route: these are ordinary platform routes, and an account token
+cannot satisfy a user-scoped dependency directly. See the tech doc for why.
+
+There is deliberately no `download`. An install lands the skill in the agent's
+own workspace, which sync brings down to the local mirror — the bytes arrive
+that way, not through a verb. (The archive routes are also binary, which the
+JSON-only hatch could not carry in any case.)
 
 ## Integration points
 

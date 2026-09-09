@@ -1240,13 +1240,22 @@ def agent_api_call(
 
 @cli.group(name="skills")
 def skills():
-    """Inspect an agent's addons and publish one of its skills.
+    """The skills lifecycle: what an agent carries, and what the catalog holds.
 
     A **skill** is a ``skills/<name>/`` folder with a ``SKILL.md`` the engine
     loads on demand; an **addon** is that or an installed plugin. ``list``
     shows both halves as the platform deduplicates them (a catalog install
-    appears once, as a skill); ``publish`` shares one of the agent's own skills
-    to the instance skills catalog. Run from the account workspace.
+    appears once, as a skill).
+
+    \b
+    On one agent:   list · install · uninstall · update · toggle · refresh
+    On the catalog: catalog · show · revisions · files · publish
+    On sharing:     grants · grant · revoke · visibility · delist · relist
+
+    Every verb takes the references a person has rather than the ids the API
+    wants: an agent by name, slug or id, a package by its reverse-DNS id or
+    name, an installed skill by the name ``list`` prints. Run from the account
+    workspace.
     """
 
 
@@ -1360,6 +1369,320 @@ def skills_publish(
         yes=yes,
         as_json=as_json,
     )
+
+
+@skills.command(name="install")
+@click.argument("agent_ref")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.option(
+    "--revision",
+    type=int,
+    default=None,
+    help="Install this revision number (default: the newest release).",
+)
+@click.option(
+    "--conversation-only",
+    is_flag=True,
+    help="Offer the skill in conversation mode only.",
+)
+@click.option(
+    "--building-only", is_flag=True, help="Offer the skill in building mode only."
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_install(
+    agent_ref: str,
+    package_ref: str,
+    revision: int | None,
+    conversation_only: bool,
+    building_only: bool,
+    as_json: bool,
+):
+    """Install catalog package PACKAGE onto AGENT_REF.
+
+    PACKAGE is the reverse-DNS package id ``cinna skills catalog`` prints
+    (``com.acme.pdf-report``), a package's display name, or its UUID. AGENT_REF
+    is a name, slug or id, as everywhere else.
+
+    A revision is immutable, so an install pins bytes that will not change
+    under the agent; omitting ``--revision`` takes whatever the catalog calls
+    latest *now*, and `cinna skills update` is how it moves later. Both modes
+    are on unless one of the ``--*-only`` flags narrows it.
+
+    \b
+      cinna skills install crm-agent com.acme.pdf-report
+      cinna skills install crm-agent pdf-report --revision 2 --conversation-only
+    """
+    from cinna.account import run_skills_install
+
+    run_skills_install(
+        agent_ref,
+        package_ref,
+        revision=revision,
+        conversation_only=conversation_only,
+        building_only=building_only,
+        as_json=as_json,
+    )
+
+
+@skills.command(name="uninstall")
+@click.argument("agent_ref")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_uninstall(agent_ref: str, name: str, yes: bool, as_json: bool):
+    """Remove installed skill NAME from AGENT_REF.
+
+    NAME is the name ``cinna skills list`` prints. Only an *install* can be
+    uninstalled: an agent's own ``skills/<name>/`` folder is part of its
+    workspace, and the command says so rather than failing on a route that was
+    never going to match.
+
+    The package and its revisions are untouched — this removes one agent's
+    copy, not the thing that was published. Asks first; ``--yes`` skips that,
+    and ``--json`` requires ``--yes`` rather than assuming it.
+    """
+    from cinna.account import run_skills_uninstall
+
+    run_skills_uninstall(agent_ref, name, yes=yes, as_json=as_json)
+
+
+@skills.command(name="update")
+@click.argument("agent_ref")
+@click.argument("name")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_update(agent_ref: str, name: str, as_json: bool):
+    """Move AGENT_REF's installed skill NAME to the newest revision.
+
+    The version an agent carries and the version the catalog holds are two
+    different facts; ``cinna skills list`` marks a row where they differ, and
+    this is the verb that closes the gap.
+    """
+    from cinna.account import run_skills_update
+
+    run_skills_update(agent_ref, name, as_json=as_json)
+
+
+@skills.command(name="toggle")
+@click.argument("agent_ref")
+@click.argument("name")
+@click.option(
+    "--enable/--disable",
+    "enable",
+    default=None,
+    help="Turn the installed skill on or off for this agent.",
+)
+@click.option(
+    "--conversation-mode/--no-conversation-mode",
+    "conversation_mode",
+    default=None,
+    help="Offer (or stop offering) the skill in conversation mode.",
+)
+@click.option(
+    "--building-mode/--no-building-mode",
+    "building_mode",
+    default=None,
+    help="Offer (or stop offering) the skill in building mode.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_toggle(
+    agent_ref: str,
+    name: str,
+    enable: bool | None,
+    conversation_mode: bool | None,
+    building_mode: bool | None,
+    as_json: bool,
+):
+    """Enable, disable, or re-scope AGENT_REF's installed skill NAME.
+
+    Every switch defaults to "leave it alone": the update is partial, so
+    ``--disable`` cannot silently reset the two mode flags a previous call set.
+
+    \b
+      cinna skills toggle crm-agent pdf-report --disable
+      cinna skills toggle crm-agent pdf-report --no-building-mode
+    """
+    from cinna.account import run_skills_toggle
+
+    run_skills_toggle(
+        agent_ref,
+        name,
+        enable=enable,
+        conversation_mode=conversation_mode,
+        building_mode=building_mode,
+        as_json=as_json,
+    )
+
+
+@skills.command(name="refresh")
+@click.argument("agent_ref")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_refresh(agent_ref: str, as_json: bool):
+    """Rebuild AGENT_REF's addon index.
+
+    ``cinna skills list`` reads a server-side cache so it never wakes a
+    sleeping environment. This is the other half of that bargain: the verb to
+    run when the list reports an unreadable index, or shows a skill without the
+    version its SKILL.md carries.
+    """
+    from cinna.account import run_skills_refresh
+
+    run_skills_refresh(agent_ref, as_json=as_json)
+
+
+@skills.command(name="catalog")
+@click.option("--search", default=None, metavar="Q", help="Filter by name or id.")
+@click.option("--mine", is_flag=True, help="Only packages this account published.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
+def skills_catalog(search: str | None, mine: bool, as_json: bool):
+    """Browse the instance skills catalog.
+
+    Prints the reverse-DNS package id, display name, visibility and newest
+    version of every package this account may see — the id being the thing
+    `cinna skills install` takes.
+    """
+    from cinna.account import run_skills_catalog
+
+    run_skills_catalog(search=search, mine=mine, as_json=as_json)
+
+
+@skills.command(name="show")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.option(
+    "--revision",
+    type=int,
+    default=None,
+    help="Show this revision's SKILL.md (default: the newest).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON payload.")
+def skills_show(package_ref: str, revision: int | None, as_json: bool):
+    """Show catalog package PACKAGE — its revisions and one revision's SKILL.md.
+
+    PACKAGE is a package id, a display name, or a UUID.
+    """
+    from cinna.account import run_skills_show
+
+    run_skills_show(package_ref, revision=revision, as_json=as_json)
+
+
+@skills.command(name="revisions")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
+def skills_revisions(package_ref: str, as_json: bool):
+    """List PACKAGE's revisions, newest first.
+
+    Number, version, release date, size and release notes. A publisher's
+    question before every publish — what is already out there — answered
+    without a UUID.
+    """
+    from cinna.account import run_skills_revisions
+
+    run_skills_revisions(package_ref, as_json=as_json)
+
+
+@skills.command(name="files")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.option(
+    "--revision", type=int, default=None, help="Which revision (default: the newest)."
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
+def skills_files(package_ref: str, revision: int | None, as_json: bool):
+    """List the files one revision of PACKAGE ships."""
+    from cinna.account import run_skills_files
+
+    run_skills_files(package_ref, revision=revision, as_json=as_json)
+
+
+@skills.command(name="grants")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
+def skills_grants(package_ref: str, as_json: bool):
+    """Who is named on PACKAGE.
+
+    A grant list exists on any package but is only consulted on one whose
+    visibility is ``users``; the listing prints the visibility beside it so a
+    stored grant is never mistaken for shared access.
+    """
+    from cinna.account import run_skills_grants
+
+    run_skills_grants(package_ref, as_json=as_json)
+
+
+@skills.command(name="grant")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.option("--user", "email", required=True, metavar="EMAIL", help="Who to name.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_grant(package_ref: str, email: str, as_json: bool):
+    """Grant EMAIL access to PACKAGE.
+
+    The post-publish half of ``cinna skills publish --grant``: sharing is a
+    property of the package, so it can change without cutting a revision.
+    """
+    from cinna.account import run_skills_grant
+
+    run_skills_grant(package_ref, email, as_json=as_json)
+
+
+@skills.command(name="revoke")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.option("--user", "email", required=True, metavar="EMAIL", help="Whose access.")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_revoke(package_ref: str, email: str, yes: bool, as_json: bool):
+    """Revoke EMAIL's access to PACKAGE.
+
+    Revoking removes the grant, not the copy: an agent that already installed
+    the package keeps the revision it holds. Asks first; ``--json`` requires
+    ``--yes`` rather than assuming it.
+    """
+    from cinna.account import run_skills_revoke
+
+    run_skills_revoke(package_ref, email, yes=yes, as_json=as_json)
+
+
+@skills.command(name="visibility")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.argument("visibility", type=click.Choice(["public", "private", "users"]))
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_visibility(package_ref: str, visibility: str, as_json: bool):
+    """Set who may see PACKAGE: public, private, or users.
+
+    ``users`` consults the package's grant list; the other two ignore it
+    entirely. Switching to ``users`` with nobody named shares the package with
+    nobody, and says so.
+    """
+    from cinna.account import run_skills_visibility
+
+    run_skills_visibility(package_ref, visibility, as_json=as_json)
+
+
+@skills.command(name="relist")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_relist(package_ref: str, as_json: bool):
+    """Put delisted PACKAGE back in the catalog.
+
+    The undo for ``delist``, which has no inverse route of its own — without
+    this verb the only way back would be ``cinna api``.
+    """
+    from cinna.account import run_skills_relist
+
+    run_skills_relist(package_ref, as_json=as_json)
+
+
+@skills.command(name="delist")
+@click.argument("package_ref", metavar="PACKAGE")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_delist(package_ref: str, yes: bool, as_json: bool):
+    """Take PACKAGE out of the catalog.
+
+    Delisting hides it from discovery. Agents that already installed it keep
+    what they have — a revision they hold is a copy, not a reference. Asks
+    first; ``--json`` requires ``--yes`` rather than assuming it.
+    """
+    from cinna.account import run_skills_delist
+
+    run_skills_delist(package_ref, yes=yes, as_json=as_json)
 
 
 # ─── api (escape hatch) ────────────────────────────────────────────────────

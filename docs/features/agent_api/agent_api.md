@@ -103,6 +103,9 @@ to test a producer endpoint — use `cinna agent-api call`.
   root (no `/api/v1` prefix). The catalogue of callable routes lives in the
   account workspace's `context/api_reference/`. `--data @file.json` reads a body
   from a file; `--query k=v` is repeatable.
+- `cinna api GET agents/crm-agent/addons` — the segment after `agents/` takes
+  the same references every other verb does, so the escape hatch is not the one
+  place that demands a UUID.
 
 ## Business rules / guardrails
 
@@ -130,6 +133,20 @@ to test a producer endpoint — use `cinna agent-api call`.
 - **Escape-hatch deny-list.** `cinna api` cannot reach credentials, user
   management, admin, CLI, MFA/auth, or streaming routes — the platform denies
   them; don't waste calls.
+- **An elided id is refused locally.** A path segment carrying `…` or `...` is
+  an id copied out of a table cell too narrow to print it whole. It reaches the
+  API as a well-formed path and comes back `404 Agent not found` — a sentence
+  that sends the reader hunting for a missing agent instead of a mangled id, so
+  the CLI answers first and calls nothing. (The id columns themselves fold
+  rather than ellipsize, so the truncation should not happen at all.)
+- **Agent-ref resolution is sugar that may never break the hatch.** Only the
+  segment straight after `agents/` is considered, only when it is not already a
+  UUID, and every failure — an unresolvable ref, an unreachable agent listing —
+  leaves the path exactly as typed: `agents/` is a route prefix as well as a
+  collection, and turning a real sub-route into "no accessible agent matches
+  'search'" would break the one verb whose job is to work when nothing else
+  does. A substitution is announced on **stderr**, so a JSON stdout stream
+  stays pure.
 - **No secret round-trip.** `connect agent-api` mints the producer token
   server-side and attaches it as a consumer credential; the secret value never
   passes through the CLI as something the user pastes or stores locally.

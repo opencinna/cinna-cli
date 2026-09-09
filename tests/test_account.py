@@ -4013,3 +4013,877 @@ def test_skills_list_empty_is_stated_not_celebrated(
     assert result.exit_code == 0, result.output
     assert "no plugins or skills yet" in result.output
     assert "✓" not in result.output
+
+
+def _proxied_response(status: int, body: dict) -> httpx.Response:
+    """A mirrored api-proxy answer.
+
+    The marker header is the whole distinction the hatch draws: present means
+    the inner route ran, absent means the hatch itself refused.
+    """
+    return httpx.Response(status, json=body, headers={"X-Cinna-Proxied": "1"})
+
+
+# --- cinna skills: install / uninstall / update / toggle / refresh ---
+
+
+# The shapes below mirror the platform's own payloads (SkillPackagesPublic,
+# SkillPackageDetailPublic, AgentAddonsPublic, PluginSyncResponse) — in
+# particular that an install's version, update flag and link id live on the
+# row's `link`, and that a revision is dated by `published_at`. Flattening any
+# of that here would make the tests agree with a CLI that cannot read the API.
+
+CATALOG_LISTING = {
+    "count": 2,
+    "data": [
+        {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "package_id": "localhost.skill.dad-jokes",
+            "name": "dad-jokes",
+            "display_name": "Dad Jokes",
+            "description": "Groan-worthy one-line puns.",
+            "visibility": "public",
+            "latest_version": "1.1.0",
+            "publisher_name": "Ana Publisher",
+            "is_listed": True,
+            "can_manage": True,
+        },
+        {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "package_id": "localhost.skill.pdf-report",
+            "name": "pdf-report",
+            "display_name": "PDF Report",
+            "description": "Renders a report.",
+            "visibility": "private",
+            "latest_version": "2.0.0",
+            "publisher_name": "Someone Else",
+            "is_listed": True,
+            "can_manage": False,
+        },
+    ],
+}
+
+PACKAGE_DETAIL = {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "package_id": "localhost.skill.dad-jokes",
+    "display_name": "Dad Jokes",
+    "visibility": "users",
+    "latest_version": "1.1.0",
+    "is_listed": True,
+    "can_manage": True,
+    "revisions": [
+        {
+            "revision_number": 1,
+            "version": "1.0.0",
+            "published_at": "2026-01-02T10:00:00",
+            "created_at": None,
+            "release_notes": "first cut",
+            "size_bytes": 2048,
+        },
+        {
+            "revision_number": 2,
+            "version": "1.1.0",
+            "published_at": "2026-02-03T10:00:00",
+            "created_at": None,
+            "release_notes": "punchline fixes",
+            "size_bytes": 4096,
+        },
+    ],
+}
+
+INSTALLED_ADDONS = {
+    "agent_id": "agent-123",
+    "addons": [
+        {
+            "key": "plugin:link-77",
+            "kind": "skill",
+            "source": "catalog",
+            "marketplace_name": "Instance catalog",
+            "name": "dad-jokes",
+            "display_name": "Dad Jokes",
+            # The row's own `version` is the installed one; everything about
+            # the *install* lives on `link`, which is where the CLI has to
+            # read it from.
+            "version": "1.0.0",
+            "link": {
+                "id": "link-77",
+                "installed_version": "1.0.0",
+                "latest_version": "1.1.0",
+                "has_update": True,
+                "disabled": False,
+                "conversation_mode": True,
+                "building_mode": True,
+                "skill_package_id": "11111111-1111-4111-8111-111111111111",
+            },
+            "status": "ok",
+            "published_package_id": None,
+        },
+        {
+            "key": "skill:local:report",
+            "kind": "skill",
+            "source": "local",
+            "name": "report",
+            "version": "1.0.1",
+            "status": "ok",
+            "can_share": True,
+        },
+    ],
+    "counts": {"plugins": 1, "skills": 2, "local_skills": 1},
+    "skills_error": None,
+}
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_install_takes_a_package_id_not_a_uuid(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The id a publish reports and the catalog prints is the reverse-DNS one;
+    the route wants a UUID. Resolving between them is the CLI's job."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+    mock_client.install_skill_on_agent.return_value = {
+        "success": True,
+        "message": "Skill installed",
+        "plugin_link": {"id": "link-77", "installed_version": "1.1.0"},
+    }
+
+    result = runner.invoke(
+        cli, ["skills", "install", "CRM Agent", "localhost.skill.dad-jokes"]
+    )
+    assert result.exit_code == 0, result.output + result.stderr
+    mock_client.install_skill_on_agent.assert_called_once_with(
+        "agent-123",
+        "11111111-1111-4111-8111-111111111111",
+        revision_number=None,
+        conversation_mode=True,
+        building_mode=True,
+    )
+    assert "1.1.0" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_install_conversation_only_turns_the_other_mode_off(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+    mock_client.install_skill_on_agent.return_value = {}
+
+    result = runner.invoke(
+        cli,
+        ["skills", "install", "CRM Agent", "dad-jokes", "--conversation-only"],
+    )
+    assert result.exit_code == 0, result.output + result.stderr
+    _, kwargs = mock_client.install_skill_on_agent.call_args
+    assert kwargs["conversation_mode"] is True
+    assert kwargs["building_mode"] is False
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_install_refuses_both_only_flags(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """Both flags together would install a skill offered nowhere."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+
+    result = runner.invoke(
+        cli,
+        [
+            "skills", "install", "CRM Agent", "dad-jokes",
+            "--conversation-only", "--building-only",
+        ],
+    )
+    assert result.exit_code != 0
+    mock_client.install_skill_on_agent.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_install_already_installed_is_a_sentence_with_a_next_step(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A 409 is not a failure of intent — the skill IS on the agent. The one
+    useful addition is which state they are in, and what moves it."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+    mock_client.get_agent_addons.return_value = INSTALLED_ADDONS
+    mock_client.install_skill_on_agent.side_effect = CodedRefusal(
+        409, "already_installed", "Dad Jokes is already installed on CRM Agent."
+    )
+
+    result = runner.invoke(
+        cli, ["skills", "install", "CRM Agent", "localhost.skill.dad-jokes"]
+    )
+    combined = result.output + result.stderr
+    assert result.exit_code == 1
+    assert "already installed" in combined
+    # The row says a newer revision exists, so the next step is the update verb.
+    assert "cinna skills update crm-agent dad-jokes" in combined
+    # And never the raw body.
+    assert '"code"' not in combined
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_uninstall_resolves_the_link_id_from_the_row(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A user should never learn that a link id exists."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = INSTALLED_ADDONS
+    mock_client.uninstall_agent_plugin.return_value = {}
+
+    result = runner.invoke(
+        cli, ["skills", "uninstall", "CRM Agent", "dad-jokes", "--yes"]
+    )
+    assert result.exit_code == 0, result.output + result.stderr
+    mock_client.uninstall_agent_plugin.assert_called_once_with("agent-123", "link-77")
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_uninstall_explains_that_a_local_skill_is_not_an_install(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`report` is a folder in the agent's workspace. A 404 from a route that
+    was never going to match is a worse answer than the reason."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = INSTALLED_ADDONS
+
+    result = runner.invoke(cli, ["skills", "uninstall", "CRM Agent", "report", "--yes"])
+    combined = result.output + result.stderr
+    assert result.exit_code != 0
+    assert "own skills" in combined
+    mock_client.uninstall_agent_plugin.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_uninstall_unknown_name_lists_what_the_agent_carries(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = INSTALLED_ADDONS
+
+    result = runner.invoke(cli, ["skills", "uninstall", "CRM Agent", "ghost", "--yes"])
+    combined = result.output + result.stderr
+    assert result.exit_code != 0
+    assert "dad-jokes" in combined and "report" in combined
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_update_reports_the_version_it_moved(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = INSTALLED_ADDONS
+    mock_client.upgrade_agent_plugin.return_value = {
+        "success": True,
+        "message": "Plugin upgraded",
+        "plugin_link": {"id": "link-77", "installed_version": "1.1.0"},
+    }
+
+    result = runner.invoke(cli, ["skills", "update", "CRM Agent", "dad-jokes"])
+    assert result.exit_code == 0, result.output + result.stderr
+    mock_client.upgrade_agent_plugin.assert_called_once_with("agent-123", "link-77")
+    assert "1.0.0" in result.output and "1.1.0" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_toggle_sends_only_the_switches_that_were_named(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The update is partial: --disable must not reset the mode flags."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = INSTALLED_ADDONS
+    mock_client.update_agent_plugin.return_value = {
+        "success": True,
+        "message": "Plugin updated",
+        "plugin_link": {
+            "id": "link-77",
+            "disabled": True,
+            "conversation_mode": True,
+            "building_mode": True,
+        },
+    }
+
+    result = runner.invoke(
+        cli, ["skills", "toggle", "CRM Agent", "dad-jokes", "--disable"]
+    )
+    assert result.exit_code == 0, result.output + result.stderr
+    mock_client.update_agent_plugin.assert_called_once_with(
+        "agent-123",
+        "link-77",
+        enabled=False,
+        conversation_mode=None,
+        building_mode=None,
+    )
+    # The link is stored `disabled`, so what the client sends is the inverse —
+    # a body carrying `enabled` is a field the server ignores, not an error.
+    assert "no" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_marks_a_disabled_install(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A disabled link still lists, still reports a version, and is not an
+    error — nothing else in the row would say the engine is not loading it."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = {
+        **INSTALLED_ADDONS,
+        "addons": [
+            {
+                **INSTALLED_ADDONS["addons"][0],
+                "link": {**INSTALLED_ADDONS["addons"][0]["link"], "disabled": True},
+            },
+            INSTALLED_ADDONS["addons"][1],
+        ],
+    }
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "disabled" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_toggle_with_no_switch_changes_nothing(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = INSTALLED_ADDONS
+
+    result = runner.invoke(cli, ["skills", "toggle", "CRM Agent", "dad-jokes"])
+    assert result.exit_code != 0
+    mock_client.update_agent_plugin.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_refresh_survives_a_platform_without_the_plugin_half(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The skill index is the half people are waiting on; refreshing it is not
+    undone by a second route that is not there."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.refresh_agent_skills.return_value = {"status": "ok"}
+    mock_client.refresh_agent_addons.side_effect = PlatformError(404, "no such route")
+
+    result = runner.invoke(cli, ["skills", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output + result.stderr
+    mock_client.refresh_agent_skills.assert_called_once_with("agent-123")
+    assert "Refreshed" in result.output
+
+
+# --- cinna skills list: the pending-update signal ---
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_marks_an_addon_with_a_newer_revision(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """An agent stuck at 1.0.0 with 1.1.0 available must not look identical to
+    an up-to-date one — the whole reason the Version column exists."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = INSTALLED_ADDONS
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "1.0.0" in result.output and "1.1.0" in result.output
+    assert "→" in result.output
+    # And the glance is followed by the command that closes the gap.
+    assert "cinna skills update crm-agent dad-jokes" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_stays_quiet_when_everything_is_current(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = {
+        **INSTALLED_ADDONS,
+        "addons": [
+            {
+                **INSTALLED_ADDONS["addons"][0],
+                "link": {**INSTALLED_ADDONS["addons"][0]["link"], "has_update": False},
+            },
+            INSTALLED_ADDONS["addons"][1],
+        ],
+    }
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "newer" not in result.output
+    assert "cinna skills update" not in result.output
+
+
+# --- cinna skills: catalog browsing ---
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_catalog_lists_package_ids(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+
+    result = runner.invoke(cli, ["skills", "catalog"])
+    assert result.exit_code == 0, result.output
+    assert "localhost.skill.dad-jokes" in result.output
+    assert "Dad Jokes" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_revisions_reads_release_notes_not_notes(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The publisher fills `release_notes`; a column reading `notes` would be
+    permanently blank."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+
+    result = runner.invoke(cli, ["skills", "revisions", "localhost.skill.dad-jokes"])
+    assert result.exit_code == 0, result.output
+    assert "punchline fixes" in result.output
+    # Newest first: the answer people came for is the top row.
+    top = result.output.index("punchline fixes")
+    assert top < result.output.index("first cut")
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_show_falls_back_to_the_package_when_content_is_unreachable(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The SKILL.md is a bonus; the package detail is the answer."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+    mock_client.get_skill_revision_content.side_effect = PlatformError(500, "boom")
+
+    result = runner.invoke(cli, ["skills", "show", "dad-jokes"])
+    assert result.exit_code == 0, result.output
+    assert "localhost.skill.dad-jokes" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_show_names_a_revision_that_does_not_exist(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+
+    result = runner.invoke(cli, ["skills", "show", "dad-jokes", "--revision", "9"])
+    combined = result.output + result.stderr
+    assert result.exit_code != 0
+    assert "no revision 9" in combined
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_unknown_package_is_a_sentence_with_a_next_command(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = {"count": 0, "data": []}
+
+    result = runner.invoke(cli, ["skills", "revisions", "ghost"])
+    combined = result.output + result.stderr
+    assert result.exit_code != 0
+    assert "No catalog package matches 'ghost'" in combined
+    assert "cinna skills catalog" in combined
+
+
+# --- cinna skills: sharing ---
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_grants_warns_when_the_visibility_ignores_them(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A grant on a private package is stored and shares nothing."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = {
+        **PACKAGE_DETAIL,
+        "visibility": "private",
+    }
+    mock_client.list_skill_grants.return_value = {
+        "data": [{"user_id": "user-1", "email": "ana@example.com"}]
+    }
+
+    result = runner.invoke(cli, ["skills", "grants", "dad-jokes"])
+    assert result.exit_code == 0, result.output
+    assert "ana@example.com" in result.output
+    assert "ignored" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_revoke_resolves_the_email_to_a_user_id(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """Revoke is addressed by user id; nobody has one."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+    mock_client.list_skill_grants.return_value = {
+        # A grant row carries its own `id` as well as the `user_id`; revoking
+        # addresses the user, and sending the grant id would delete nothing
+        # and report success.
+        "data": [
+            {
+                "id": "grant-row-9",
+                "user_id": "user-1",
+                "user_email": "ana@example.com",
+            }
+        ]
+    }
+    mock_client.revoke_skill_access.return_value = {}
+
+    result = runner.invoke(
+        cli,
+        ["skills", "revoke", "dad-jokes", "--user", "ana@example.com", "--yes"],
+    )
+    assert result.exit_code == 0, result.output + result.stderr
+    mock_client.revoke_skill_access.assert_called_once_with(
+        "11111111-1111-4111-8111-111111111111", "user-1"
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_revoke_says_who_is_actually_named(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+    mock_client.list_skill_grants.return_value = {
+        "data": [{"user_id": "user-1", "email": "ana@example.com"}]
+    }
+
+    result = runner.invoke(
+        cli, ["skills", "revoke", "dad-jokes", "--user", "bob@example.com", "--yes"]
+    )
+    combined = result.output + result.stderr
+    assert result.exit_code != 0
+    assert "ana@example.com" in combined
+    mock_client.revoke_skill_access.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_visibility_users_with_nobody_named_shares_nothing(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = {
+        **PACKAGE_DETAIL,
+        "visibility": "private",
+    }
+    mock_client.update_skill_package.return_value = {"visibility": "users"}
+    mock_client.list_skill_grants.return_value = {"data": []}
+
+    result = runner.invoke(cli, ["skills", "visibility", "dad-jokes", "users"])
+    assert result.exit_code == 0, result.output
+    mock_client.update_skill_package.assert_called_once_with(
+        "11111111-1111-4111-8111-111111111111", visibility="users"
+    )
+    assert "shares it with" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_delist_asks_before_it_hides_a_package(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+
+    # No TTY under the runner, so the confirmation takes its default: No.
+    result = runner.invoke(cli, ["skills", "delist", "dad-jokes"])
+    assert result.exit_code != 0
+    mock_client.delist_skill_package.assert_not_called()
+
+    result = runner.invoke(cli, ["skills", "delist", "dad-jokes", "--yes"])
+    assert result.exit_code == 0, result.output + result.stderr
+    mock_client.delist_skill_package.assert_called_once_with(
+        "11111111-1111-4111-8111-111111111111"
+    )
+
+
+# --- cinna api: ids that were never valid, and refs that are ---
+
+
+@patch("cinna.account.AccountClient")
+def test_api_refuses_an_elided_id_before_calling_anything(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """An id copied out of a truncated cell reaches the API as a well-formed
+    path and comes back '404 Agent not found' — which reads as a missing agent
+    rather than a mangled id."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+
+    result = runner.invoke(
+        cli, ["api", "GET", "agents/f0506e24-3740-4fe3…/addons"]
+    )
+    combined = result.output + result.stderr
+    assert result.exit_code != 0
+    assert "elided" in combined
+    mock_client.api_proxy.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_api_accepts_the_agent_references_every_other_verb_takes(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.api_proxy.return_value = _proxied_response(200, {"addons": []})
+
+    result = runner.invoke(cli, ["api", "GET", "agents/crm-agent/addons"])
+    assert result.exit_code == 0, result.output + result.stderr
+    args, kwargs = mock_client.api_proxy.call_args
+    assert args[1] == "agents/agent-123/addons"
+
+
+@patch("cinna.account.AccountClient")
+def test_api_leaves_a_path_it_cannot_resolve_exactly_as_typed(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`agents/` is a route prefix as well as a collection: resolution is
+    sugar, and sugar may never break the escape hatch."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.side_effect = RuntimeError("listing is down")
+    mock_client.api_proxy.return_value = _proxied_response(200, {"data": []})
+
+    result = runner.invoke(cli, ["api", "GET", "agents/search"])
+    assert result.exit_code == 0, result.output + result.stderr
+    args, _ = mock_client.api_proxy.call_args
+    assert args[1] == "agents/search"
+
+
+@patch("cinna.account.cli_version_status")
+@patch("cinna.account.probe_account_token")
+def test_account_status_labels_an_editable_checkout(
+    mock_probe, mock_cli_status, runner, account_root, monkeypatch
+):
+    """A `uv tool install -e` checkout reports the version it was installed at
+    forever. Flagging that as 'behind the pin' explains missing features with
+    version skew that does not exist — the misdiagnosis this label prevents."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_probe.return_value = "valid"
+    mock_cli_status.return_value = {
+        "installed": "0.2.5",
+        "required": "0.4.0",
+        "state": "unknown",
+        "editable": "/Users/dev/cinna-cli",
+    }
+
+    result = runner.invoke(cli, ["account", "status"])
+    assert result.exit_code == 0, result.output
+    assert "editable checkout" in result.output
+    assert "platform pins 0.4.0" in result.output
+    assert "behind the platform pin" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_a_destructive_verb_under_json_has_to_be_told_to_go_ahead(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`publish` may skip its preview under --json — it creates. Here the
+    default has to be "don't", and a prompt would corrupt the stream."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = INSTALLED_ADDONS
+
+    result = runner.invoke(
+        cli, ["skills", "uninstall", "CRM Agent", "dad-jokes", "--json"]
+    )
+    combined = result.output + result.stderr
+    assert result.exit_code != 0
+    assert "--yes" in combined
+    mock_client.uninstall_agent_plugin.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_a_package_resolved_by_uuid_stays_addressable(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The detail route need not repeat the id it was called with; a `None`
+    reaching a URL would fail as a 404 several calls later."""
+    monkeypatch.chdir(account_root)
+    uuid = "11111111-1111-4111-8111-111111111111"
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.get_skill_package.return_value = {
+        "package_id": "localhost.skill.dad-jokes",
+        "visibility": "users",
+        "revisions": [],
+    }
+    mock_client.list_skill_grants.return_value = {"data": []}
+
+    result = runner.invoke(cli, ["skills", "grants", uuid])
+    assert result.exit_code == 0, result.output + result.stderr
+    mock_client.list_skill_grants.assert_called_once_with(uuid)
+    mock_client.list_skill_catalog.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_catalog_filters_on_the_rows_not_the_route(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`GET /skills/catalog` takes no parameters, so --search/--mine narrow the
+    rows. Passing them to the route would look like filtering and do nothing."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+
+    result = runner.invoke(cli, ["skills", "catalog", "--search", "pdf"])
+    assert result.exit_code == 0, result.output
+    mock_client.list_skill_catalog.assert_called_once_with()
+    assert "pdf-report" in result.output
+    assert "dad-jokes" not in result.output
+
+    # --mine keeps only what this account can manage.
+    result = runner.invoke(cli, ["skills", "catalog", "--mine"])
+    assert result.exit_code == 0, result.output
+    assert "dad-jokes" in result.output
+    assert "pdf-report" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_catalog_search_matches_the_description_too(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A package is looked for by what it does as often as by what it is called."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+
+    result = runner.invoke(cli, ["skills", "catalog", "--search", "puns"])
+    assert result.exit_code == 0, result.output
+    assert "dad-jokes" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_refresh_that_could_not_read_the_index_is_not_a_success(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The route answers **200** with the reason in `error`. A green check
+    there sends the reader back to `list` to discover for themselves that
+    nothing changed."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.refresh_agent_skills.return_value = {
+        "agent_id": "agent-123",
+        "skills": [],
+        "error": "adapter_error",
+    }
+    mock_client.refresh_agent_addons.return_value = {}
+
+    result = runner.invoke(cli, ["skills", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "adapter_error" in result.output
+    assert "restart-env" in result.output
+    assert "✓" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_points_a_stale_index_at_the_refresh_verb(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = {
+        **INSTALLED_ADDONS,
+        "skills_error": "adapter_error",
+    }
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "cinna skills refresh crm-agent" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_relist_is_the_undo_delist_has_no_route_for(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = {**PACKAGE_DETAIL, "is_listed": False}
+    mock_client.update_skill_package.return_value = {"is_listed": True}
+
+    result = runner.invoke(cli, ["skills", "relist", "dad-jokes"])
+    assert result.exit_code == 0, result.output + result.stderr
+    mock_client.update_skill_package.assert_called_once_with(
+        "11111111-1111-4111-8111-111111111111", is_listed=True
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_a_partial_environment_sync_is_not_hidden_by_a_green_check(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The link row is written and the call returns 200 while the running
+    environments did not pick the change up — exactly the case where the
+    catalog and the live agent disagree."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+    mock_client.install_skill_on_agent.return_value = {
+        "success": True,
+        "message": "Skill added",
+        "plugin_link": {"id": "link-77", "installed_version": "1.1.0"},
+        "total_environments": 2,
+        "failed_syncs": 1,
+        "partial_failures": True,
+    }
+
+    result = runner.invoke(cli, ["skills", "install", "CRM Agent", "dad-jokes"])
+    assert result.exit_code == 0, result.output
+    assert "1 of 2 environment(s) did not pick it up" in result.output
+    assert "restart-env" in result.output

@@ -2,12 +2,19 @@
 
 ## File locations
 
-- `src/cinna/main.py` — the `skills` Click group and its two verbs.
-- `src/cinna/account.py` — `run_skills_list()` / `run_skills_publish()` and the
-  rendering helpers.
-- `src/cinna/client.py` — `AccountClient.get_agent_addons()`,
-  `AccountClient.get_skill_publish_preview()`,
-  `AccountClient.publish_agent_skill()`, `AccountClient.get_skill_package()`,
+- `src/cinna/main.py` — the `skills` Click group and its verbs.
+- `src/cinna/account.py` — `run_skills_*()` (list, publish, install, uninstall,
+  update, toggle, refresh, catalog, show, revisions, files, grants, grant,
+  revoke, visibility, delist), the resolvers (`_resolve_skill_package()`,
+  `_resolve_installed_addon()`, `_addon_link_id()`) and the rendering helpers.
+- `src/cinna/client.py` — the `AccountClient` skills methods
+  (`get_agent_addons()`, `get_skill_publish_preview()`,
+  `publish_agent_skill()`, `get_skill_package()`, `install_skill_on_agent()`,
+  `uninstall_agent_plugin()`, `upgrade_agent_plugin()`,
+  `update_agent_plugin()`, `refresh_agent_skills()`, `refresh_agent_addons()`,
+  `list_skill_catalog()`, `get_skill_revision_content()`,
+  `get_skill_revision_files()`, `list_skill_grants()`, `grant_skill_access()`,
+  `revoke_skill_access()`, `update_skill_package()`, `delist_skill_package()`)
   and the `_coded_refusal()` helper.
 - `src/cinna/errors.py` — `CodedRefusal`, the exception that carries a
   platform-authored code and sentence.
@@ -15,8 +22,8 @@
   exists in the local mirror.
 - `src/cinna/templates/ACCOUNT_CLAUDE.md.template` — the account workspace's
   command map, which teaches a coding assistant these verbs.
-- `tests/test_account.py` — command-level tests (`skills list` / `skills
-  publish`).
+- `tests/test_account.py` — command-level tests for every `skills` verb, plus
+  `cinna api`'s elided-id refusal and agent-ref resolution.
 - `tests/test_client.py` — client-level tests (proxy path shape, name quoting,
   coded refusals).
 
@@ -28,6 +35,27 @@
   [--notes] [--package-id] [--dry-run] [--yes] [--json]` →
   `src/cinna/main.py:skills_publish()` →
   `src/cinna/account.py:run_skills_publish()`.
+- `cinna skills install <agent_ref> <package> [--revision N]
+  [--conversation-only|--building-only] [--json]` → `run_skills_install()`.
+- `cinna skills uninstall <agent_ref> <name> [--yes] [--json]` →
+  `run_skills_uninstall()`.
+- `cinna skills update <agent_ref> <name> [--json]` → `run_skills_update()`.
+- `cinna skills toggle <agent_ref> <name> [--enable|--disable]
+  [--conversation-mode/--no-conversation-mode]
+  [--building-mode/--no-building-mode] [--json]` → `run_skills_toggle()`.
+- `cinna skills refresh <agent_ref> [--json]` → `run_skills_refresh()`.
+- `cinna skills catalog [--search Q] [--mine] [--json]` → `run_skills_catalog()`.
+- `cinna skills show <package> [--revision N] [--json]` → `run_skills_show()`.
+- `cinna skills revisions <package> [--json]` → `run_skills_revisions()`.
+- `cinna skills files <package> [--revision N] [--json]` → `run_skills_files()`.
+- `cinna skills grants <package> [--json]` → `run_skills_grants()`.
+- `cinna skills grant <package> --user EMAIL [--json]` → `run_skills_grant()`.
+- `cinna skills revoke <package> --user EMAIL [--yes] [--json]` →
+  `run_skills_revoke()`.
+- `cinna skills visibility <package> <public|private|users> [--json]` →
+  `run_skills_visibility()`.
+- `cinna skills delist <package> [--yes] [--json]` → `run_skills_delist()`.
+- `cinna skills relist <package> [--json]` → `run_skills_relist()`.
 
 ## Key functions & flow
 
@@ -54,9 +82,61 @@
   style tag and swallows (`1.0[beta]` renders as `1.0`). Applied to every
   name / display name / version / package id the addon table and the publish
   output interpolate.
-- `src/cinna/account.py:_addon_version_cell()` — the addon's `version` or an
-  empty cell; an absent version renders as nothing, never as a bare `v` or a
-  dash, matching the web row's "no badge at all".
+- `src/cinna/account.py:_addon_version_cell()` — the version the agent carries
+  (`installed_version`, else `version`) or an empty cell; an absent version
+  renders as nothing, never as a bare `v` or a dash, matching the web row's "no
+  badge at all". With `has_update` set it appends `→ {latest_version}`, which is
+  the difference between seeing and not seeing that a consumer is stale.
+- `src/cinna/account.py:_print_pending_update_hint()` — under the table, names
+  the stale addons and the `cinna skills update <agent> <name>` that moves the
+  first of them. Silent when nothing is stale, so the marker means something.
+- `src/cinna/account.py:_addon_source_cell()` — `source`, plus
+  `marketplace_name` in parentheses when the payload carries one and it differs.
+- `src/cinna/account.py:_resolve_skill_package()` — a package reference (UUID,
+  reverse-DNS id, or display name) to its detail payload: a UUID is fetched
+  directly, anything else goes through `GET /skills/catalog?search=`, falls back
+  to the unfiltered listing (the search index is the server's, and a package it
+  does not index under that string may still be listed), then matches exactly
+  before substring. Ambiguity and no-match are both sentences naming what was
+  found and the command that lists the rest.
+- `src/cinna/account.py:_package_uuid()` — the UUID out of a package payload,
+  matched by **shape** rather than by key: `package_id` is the reverse-DNS
+  string on a package and the UUID on a published revision, so trusting either
+  name would silently address the wrong thing.
+- `src/cinna/account.py:_resolve_installed_addon()` / `_addon_link_id()` /
+  `_require_link_id()` — the addon row for a name, then the plugin-link id from
+  it (`link_id` / `plugin_link_id` / `agent_plugin_id`, else the row `key`,
+  which the platform composes as `plugin:<link id>`). A row with no link is
+  explained rather than attempted: for a `local` skill it is the agent's own
+  folder, and there is nothing to uninstall.
+- `src/cinna/account.py:_already_installed_message()` — the 409's own sentence
+  plus one clause saying whether the install is current or one update behind,
+  read from the addons listing. The listing lookup is best-effort: a failure
+  costs the clause, not the message.
+- `src/cinna/account.py:_rows()` — the list inside a listing envelope
+  (`data` / a named key / a bare list). The account routes answer `{"data": …}`;
+  the catalog and revision routes are platform routes reached through the hatch
+  and answer under their own names.
+- `src/cinna/account.py:_revision_rows()` — revisions sorted newest first. The
+  question this list answers is "what is the newest"; a payload that happened to
+  be ascending would put the answer at the bottom.
+- `src/cinna/account.py:_addon_link()` — the row's `link` sub-object. Every
+  fact about an *install* rather than a package lives there: `id` (the link id
+  the plugin routes address), `installed_version`, `latest_version`,
+  `has_update`, `disabled` and the two mode switches. The row's top-level
+  `version` mirrors the installed one, which is why a cell rendered from the
+  top level cannot tell a stale install from a current one.
+- `src/cinna/account.py:_print_plugin_sync()` / `_plugin_link()` — the
+  `PluginSyncResponse` every plugin mutation answers with. The link row is
+  written and *then* pushed into the agent's running environments, which can
+  partly fail (`partial_failures`, `failed_syncs`) while the call still returns
+  200; that is reported as a warning, and the link it carries back is what the
+  install / update / toggle output reports rather than the request.
+- `src/cinna/account.py:_catalog_matches()` — the `--search` filter, applied to
+  `package_id` / `name` / `display_name` / `description` **client-side**,
+  because the catalog route takes no parameters.
+- `src/cinna/account.py:_reject_elided_path()` / `_resolve_api_agent_refs()` —
+  `cinna api`'s two ergonomics; see the guardrails below.
 - `src/cinna/account.py:_print_version_staleness_hint()` — printed only when a
   *local* skill has no version: on that agent a blank can mean the index was
   built before skills carried versions, and this route is cache-only so the
@@ -113,11 +193,16 @@ uuid}`).
 All four routes are ordinary platform routes reached through the account escape
 hatch, `POST /api/v1/cli/account/api-proxy`:
 
-- `GET /api/v1/agents/{agent_id}/addons` — the deduplicated projection.
-  Consumed fields: `addons[]` (`kind`, `source`, `name`, `display_name`,
-  `version`, `status`, `status_code`, `orphan`, `can_share`,
-  `published_package_id`), `counts` (`plugins`, `skills`, `local_skills`), and
-  `skills_error`.
+- `GET /api/v1/agents/{agent_id}/addons` — the deduplicated projection
+  (`AgentAddonsPublic`). Consumed fields: `addons[]` (`AddonPublic`: `key`,
+  `kind`, `source`, `name`, `display_name`, `version`, `marketplace_name`,
+  `status`, `status_code`, `orphan`, `can_share`, `published_package_id`, and
+  **`link`**), `counts` (`plugins`, `skills`, `local_skills`), and
+  `skills_error`. `link` is an `AgentPluginLinkWithUpdateInfo`: `id`,
+  `installed_version`, `latest_version`, `has_update`, `disabled`,
+  `conversation_mode`, `building_mode`, `skill_package_id`. **None of those
+  five install facts exist at the top level of the row** — reading `version`
+  alone is what made a two-revisions-behind agent look current.
 - `GET /api/v1/agents/{agent_id}/skills/{name}/publish-preview` — the version
   and package id a publish would take, from the same code that will take them.
   Consumed fields: `version`, `header_version`, `latest_published_version`,
@@ -132,7 +217,39 @@ hatch, `POST /api/v1/cli/account/api-proxy`:
   `frontmatter` (the last one only to tell whether the version reached the
   workspace's `SKILL.md`).
 - `GET /api/v1/skills/packages/{package_id}` — consumed fields are the
-  reverse-DNS `package_id` string and `visibility`.
+  reverse-DNS `package_id` string, `display_name`, `visibility`,
+  `latest_version` and `revisions[]` (`revision_number`, `version`,
+  `created_at`, `release_notes` — **not** `notes` — and `size_bytes`).
+- `POST /api/v1/agents/{agent_id}/skills/install` — `SkillInstallRequest`:
+  `package_id` (the package **UUID**), optional `revision_number`,
+  `conversation_mode`, `building_mode`. Answers `PluginSyncResponse`; 409
+  `already_installed` is the coded refusal this route is expected to answer,
+  as a **bare** `{code, message}` body.
+- `POST|DELETE|PUT /api/v1/llm-plugins/agents/{agent_id}/plugins/{link_id}` —
+  `/upgrade` moves the link to the newest revision, `DELETE` removes it, `PUT`
+  takes `AgentPluginLinkUpdate` = `{conversation_mode?, building_mode?,
+  disabled?}`. All three answer `PluginSyncResponse` (`success`, `message`,
+  `plugin_link`, `total_environments`, `failed_syncs`, `partial_failures`).
+- `POST /api/v1/agents/{agent_id}/skills/refresh` (→ `AgentSkillsPublic`) and
+  `POST /api/v1/agents/{agent_id}/addons/refresh` (→ `AgentAddonsPublic`) —
+  rebuild the two caches. The first reports a failure to read the index as
+  **200 with `error`**, not as an error status.
+- `GET /api/v1/skills/catalog` — **no parameters**; answers
+  `SkillPackagesPublic` (`data`, `count`) of `SkillPackageEntry`: `id` (the
+  UUID), the reverse-DNS `package_id`, `name`, `display_name`, `description`,
+  `visibility`, `is_listed`, `latest_version`, `publisher_name`, `can_manage`.
+- `GET /api/v1/skills/packages/{id}/revisions/{n}/content` →
+  `SkillRevisionContentPublic` (`content`, `truncated`) and `/files` →
+  `SkillRevisionFilesPublic` (`data[]` of `{path, size_bytes}`, `count`,
+  `total_size_bytes`, `truncated`). Both caps are reported to the user.
+- `GET|POST /api/v1/skills/packages/{id}/grants` —
+  `SkillPackageAccessGrantPublic` carries `id` (the **grant row**), `user_id`,
+  `user_email`, `created_at`; the POST body is `{email}`.
+  `DELETE …/grants/{user_id}`, `PATCH /api/v1/skills/packages/{id}`
+  (`SkillPackageUpdate`: `display_name`, `description`, `visibility`,
+  `is_listed`), `POST /api/v1/skills/packages/{id}/delist` — the sharing half.
+- `GET …/revisions/{n}/download` and `/archive` exist and are **not** used; see
+  the guardrail below.
 
 **Why the proxy and not a dedicated `/cli/account/*` verb.** An account CLI JWT
 carries the `CLIToken` row id in `sub`, not a user id, so it can never satisfy a
@@ -213,5 +330,79 @@ downstream still runs, unchanged.
 - **`ensure_workspace_dirs()` creates `skills/`.** The local mirror should hold
   the folder a new skill is written into and the file a publish's version
   write-back lands in, even on an agent that carries no skills yet.
-- **An unresolved agent ref never reaches a route.** Both verbs resolve through
-  the account agent listing first, so a typo cannot publish anything.
+- **An unresolved agent ref never reaches a route.** Every verb resolves through
+  the account agent listing first, so a typo cannot publish or install anything.
+- **`_package_uuid()` matches on shape, not on a key name.** `package_id` means
+  the reverse-DNS string on a package payload and the UUID on a revision
+  payload. A helper that trusted the name would address the wrong package
+  roughly half the time, and the failure would look like a 404.
+- **A local skill is not an install.** `uninstall` / `update` / `toggle` refuse
+  a `source: local` row with the reason, and call nothing. The plugin routes
+  would answer 404 for it, which reads as a platform fault rather than a
+  category error.
+- **The link-id fallback reads the row `key`.** `plugin:<link id>` is the shape
+  the dedupe rule guarantees; the explicit fields are preferred when present.
+  A row with neither is a sentence pointing at `--json`, never a guessed id.
+- **A destructive verb under `--json` requires `--yes`.** `uninstall`,
+  `revoke` and `delist` ask first, and `_require_yes_for_json()` refuses the
+  combination rather than assuming consent: `publish` may skip its confirmation
+  under `--json` because it creates, but here the default has to be "don't",
+  and printing a prompt into a JSON stream would corrupt it.
+- **`_resolve_skill_package()` guarantees an addressable UUID.** `_with_uuid()`
+  stamps in the id the package was fetched by when the detail payload does not
+  repeat one; otherwise a `None` would reach a URL and fail as a 404 several
+  calls later, in a place that has nothing to do with the cause.
+- **`toggle` reports the switches it was given, not a cell derived from the
+  response.** The PUT is partial, so a payload that omits the untouched switch
+  would render as "off" and report a change that did not happen.
+- **`update_agent_plugin()` sends only what was named.** The PUT is a partial
+  update, so including the mode defaults on an `--enable` would silently reset a
+  link whose author had turned building mode off.
+- **The `already_installed` refusal keeps the server's code and exit code.** It
+  is re-raised as a `CodedRefusal` with the same status and code and only the
+  sentence extended, so a `--json` driver still switches on
+  `already_installed` while a human gets the next command.
+- **`_coded_refusal()` also accepts a bare `{code, message}` body.** The install
+  route answers its 409 that way rather than nesting under `detail`; without
+  this the one refusal that most needs a sentence would render as a JSON dump.
+- **`cinna api` grew the two ergonomics this feature needed** — an elided id is
+  refused locally, and an agent reference after `agents/` is resolved — plus
+  Rich `overflow="fold"` on every id column so a UUID is never printed
+  truncated. Both live in
+  [agent_api](../agent_api/agent_api.md#business-rules--guardrails); they are
+  noted here because the workflow that exposed them is this one.
+- **`cinna skills download` is deliberately absent**, for two independent
+  reasons. It is not *reachable*: a revision archive is a binary body and the
+  account escape hatch is JSON-only and buffered — the same constraint that
+  gives `cinna improve download` a dedicated account route. And it is not
+  *wanted*: an install lands the skill in the agent's own workspace, which
+  Mutagen brings down to the local mirror, so the bytes arrive through sync
+  rather than through a download verb.
+- **The install switch is stored negatively.** `AgentPluginLinkUpdate` carries
+  `disabled`, not `enabled`, and `update_agent_plugin()` inverts the caller's
+  flag. A body carrying `enabled` is not a validation error — it is a field the
+  server ignores, so `--disable` would report success and change nothing.
+  `tests/test_client.py` pins the exact body for that reason.
+- **`--search` / `--mine` filter the rows, not the route.**
+  `GET /skills/catalog` takes no parameters; sending them would look like
+  filtering and do nothing. `--mine` uses `can_manage`, the server's own answer
+  to "is this yours" — a publisher-id comparison would need a user id the
+  account token does not carry. Under `--json` the *filtered* rows are printed,
+  never the raw envelope: a driver that asked for a subset must not be handed
+  the packages it excluded.
+- **A refresh that could not read the index answers 200.** The reason arrives in
+  `AgentSkillsPublic.error` (`adapter_error`, …), so the verb inspects it and
+  warns instead of printing a green check; the remedy it names is
+  `cinna agent restart-env`, because the failing part is the environment's
+  adapter, not the cache. `cinna skills list` names `cinna skills refresh` in
+  the same spirit — the `skills_error` warning previously had no next step.
+- **A grant's `id` is the grant row, never the user.** Revoking addresses
+  `user_id`; falling back to `id` would delete nothing and report success.
+- **A plugin mutation can half-succeed.** `PluginSyncResponse` reports the
+  environment push separately from the link write, and a 200 with
+  `partial_failures` means the catalog and the running agent now disagree —
+  reported as a warning rather than absorbed into the success line.
+- **Field names the payloads are read for.** `release_notes` (not `notes`),
+  `installed_version` / `latest_version` / `has_update` (not `version` alone),
+  and `marketplace_name`. Each was in the API and missing from the CLI, which is
+  the failure mode this feature exists to close.

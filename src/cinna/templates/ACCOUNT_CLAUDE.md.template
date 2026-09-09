@@ -121,10 +121,18 @@ Refresh after platform updates with `cinna account refresh-context`.
 
 | Command | What it does |
 |---------|--------------|
-| `cinna skills list <agent>` | Every addon the agent carries, deduplicated (kind / source / status / name / version); marks the local skills already published to the catalog |
+| `cinna skills list <agent>` | Every addon the agent carries, deduplicated (kind / source / status / name / version); marks the local skills already published to the catalog, and marks an install whose catalog has moved as `1.0.0 → 1.1.0` |
 | `cinna skills publish <agent> <name> [--visibility public\|private\|users] [--grant EMAIL …] [--notes T] [--dry-run]` | Publish one of the agent's own skills to the instance skills catalog; a re-publish appends a revision. `--grant` is repeatable and only ever **adds** access. `--dry-run` shows the version and package id a publish would take |
+| `cinna skills catalog [--search Q] [--mine]` | Browse the instance catalog — package id, name, visibility, newest version. The package id is what `install` takes |
+| `cinna skills show <package> [--revision N]` · `revisions <package>` · `files <package>` | One package's detail + a revision's `SKILL.md`; its revisions (number, version, date, size, release notes); the files a revision ships |
+| `cinna skills install <agent> <package> [--revision N] [--conversation-only\|--building-only]` | Install a catalog package onto an agent. Already installed answers with a sentence and points at `update` |
+| `cinna skills update <agent> <name>` · `uninstall <agent> <name>` · `toggle <agent> <name> [--enable\|--disable] [--no-building-mode]` | Move an install to the newest revision; remove it; enable/disable it or change where it is offered. Unnamed switches keep their stored value |
+| `cinna skills refresh <agent>` | Rebuild the agent's addon index — the remedy when `list` reports `adapter_error` / `env_not_running`, or shows no version for a skill whose `SKILL.md` has one |
+| `cinna skills grants <package>` · `grant <package> --user EMAIL` · `revoke <package> --user EMAIL` · `visibility <package> <public\|private\|users>` · `delist <package>` · `relist <package>` | Sharing after the publish: visibility and grants belong to the package, not to a revision, so changing them costs no new revision |
 
 > A **skill** is a `skills/<name>/` folder with a `SKILL.md` the engine loads on demand — never a synonym for "a thing the agent can do". A skill worth sharing reaches other people through the catalog — `cinna skills publish <agent> <name> --visibility public`, which reads the agent's **cloud** workspace, so the skill must have travelled there (`cinna sync push --agent <slug>` first). Without a visibility the package is private and nobody else sees it; `--visibility users --grant <email>` shares it with named people instead. Never by copying folders between agents.
+>
+> **A package is referenced by its id, never its UUID.** Every verb above takes the reverse-DNS package id (`com.acme.report`) or the display name, and every agent argument takes a name, slug or id. If you find yourself reaching for `cinna api` with a raw UUID for anything in this table, the verb exists — check `cinna skills --help`.
 >
 > **Do not invent a version.** The platform derives it from `version:` in the skill's own `SKILL.md` — continuing the series past the newest release, `1.0.0` for a skill nobody has versioned — and writes the resolved value back into that file. Publish without `--version`; run `cinna skills publish <agent> <name> --dry-run` first if you want to see which version and package id the press would take. Use `--version` only when the user names a specific one. Publishing is not interactive under `--json` / `--no-input`, and `--yes` skips the confirmation at a terminal.
 

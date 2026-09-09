@@ -353,8 +353,15 @@ the silent-secret and scope-drift bugs live.
   as a `cinna-cli` table row and a `uv tool install cinna-cli==<pin>` hint when
   behind; `doctor` lists the platform under "manual action needed" only when
   the pin differs.
+- **Editable install:** on a `uv tool install -e` checkout, `cli.editable` is
+  the checkout path, `cli.state` is `unknown` even though the platform publishes
+  a pin, the human row reads `0.2.5 (editable checkout of …) (platform pins
+  0.4.0)`, and neither `status` nor `doctor` suggests an upgrade. This is the
+  common case for anyone developing cinna-cli, and the "behind the pin" warning
+  it used to raise explained missing features with skew that did not exist.
 - **Watch for:** a missing discovery document turning into an error; `doctor`
-  nagging when no pin is published; the JSON line missing `cli`.
+  nagging when no pin is published; the JSON line missing `cli`; an editable
+  checkout reported as `behind`.
 
 ## Cross-cutting invariants (must hold across all scenarios)
 

@@ -168,7 +168,13 @@ Related (documented here as integration points): `cinna agent sync` →
   to `cinna login`).
 - `src/cinna/cli_version.py:cli_version_status()` — `GET
   {origin}/.well-known/cinna-desktop` → `local_dev.cinna_cli_version`, compared
-  with the running `__version__` (`current` / `behind` / `ahead` / `unknown`).
+  with the running `__version__` (`current` / `behind` / `ahead` / `unknown`),
+  plus `editable`: the checkout path when this is an editable install
+  (`editable_install_source()`), which forces `state` to `unknown` and renders
+  as `0.2.5 (editable checkout of <path>)` with the pin named as context. An
+  editable install's version is the day it was installed, so comparing it would
+  report skew that does not exist — and invite missing features to be
+  misdiagnosed as version skew.
 - `src/cinna/account.py:probe_account_token()` — cheap `GET /account/agents`;
   2xx → valid, 401 → expired, else → unreachable.
 - `src/cinna/account.py:run_agent_sync()` — resolve via `_resolve_account_agent`,

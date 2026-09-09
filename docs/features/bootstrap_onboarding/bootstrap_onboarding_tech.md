@@ -142,9 +142,21 @@ package version.
   {origin}/.well-known/cinna-desktop` → `local_dev.cinna_cli_version`
   (`required_cli_version_from()` also accepts a top-level `cinna_cli_version`,
   the shape a future `sync-runtime` could carry) → `compare_cli_version()`.
+- `src/cinna/cli_version.py:editable_install_source()` — the checkout behind an
+  editable install (PEP 610 `direct_url.json` → `dir_info.editable`), or `None`.
+  An editable install's metadata records the version it was installed at and
+  never changes again, so `cli_version_status()` forces `state` to `unknown`
+  there — the same answer a bare source tree (`0.0.0+unknown`) already gets, and
+  for the same reason: the recorded number is not the version of the code that
+  runs. Every unreadable case returns `None` (an ordinary install), because a
+  false *editable* would silence a warning a real deployment needs.
+- `src/cinna/cli_version.py:cli_version_label()` — `0.2.5 (editable checkout of
+  <path>)` for a report; the plain version otherwise.
 - `src/cinna/doctor.py:_cli_version_findings()` — one report-only
   `cli_outdated` finding per platform (registry entries + the current account
-  workspace) whose pin differs; nothing when no pin is published.
+  workspace) whose pin differs; nothing when no pin is published, and nothing
+  for an editable install, since it derives the finding from
+  `cli_version_hint()`.
 
 ### Set-token (refresh)
 - `src/cinna/bootstrap.py:run_set_token()` — `find_workspace_root()` → `load_config()`

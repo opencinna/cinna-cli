@@ -139,13 +139,13 @@ cinna account set-token 'curl -sL https://your-platform.com/api/cli-setup/accoun
 
 ### `cinna account agents`
 
-List the agents your account can access (run from inside the account workspace). For each agent: display name + ID, building rights (`✓ can build`, `view-only`, or `foreign install` — installed bundles are publisher-managed and can't be synced), whether a remote environment is active, and whether a local workspace already exists under `agents/`.
+List the agents your account can access (run from inside the account workspace). Ids are printed in full at any terminal width (the column folds rather than ellipsizing — a truncated UUID is a copy-paste trap that the API answers `404 not found` for). For each agent: display name + ID, building rights (`✓ can build`, `view-only`, or `foreign install` — installed bundles are publisher-managed and can't be synced), whether a remote environment is active, and whether a local workspace already exists under `agents/`.
 
 ### `cinna account status`
 
 One-shot summary of the account workspace: platform/frontend URLs, machine name, synced-agent count, and an account-token probe (`valid token` / `expired token` / `no connection`) — the account-level counterpart of `cinna status`.
 
-Also reports the workspace's **context package version** against the platform's current one — the orchestrator guides ship in that tree, so a workspace set up before a guide existed silently lacks it. When it is behind, the command says so and points at `cinna account refresh-context`; `cinna improve list` prints the same nudge, since its playbook lives there. Likewise it compares the installed **cinna-cli version** with the one the platform pins (its `/.well-known/cinna-desktop` discovery document) and suggests `uv tool install cinna-cli==<pin>` when behind; no pin means "unknown", not an error.
+Also reports the workspace's **context package version** against the platform's current one — the orchestrator guides ship in that tree, so a workspace set up before a guide existed silently lacks it. When it is behind, the command says so and points at `cinna account refresh-context`; `cinna improve list` prints the same nudge, since its playbook lives there. Likewise it compares the installed **cinna-cli version** with the one the platform pins (its `/.well-known/cinna-desktop` discovery document) and suggests `uv tool install cinna-cli==<pin>` when behind; no pin means "unknown", not an error. An **editable install** (`uv tool install -e`, `pip install -e`) is detected and labelled instead of compared — its metadata records the version it was installed at and never changes again, so pinning that number against the platform's would report skew that does not exist and explain missing features with a version that is not the code being run. It renders as `0.2.5 (editable checkout of /path/to/cinna-cli)`, with the pin named as context, and neither `cinna account status` nor `cinna doctor` nudges an upgrade.
 
 With `--json` it prints a single line: `{"result":"ok","workspace",…,"token":"valid|expired|unreachable","synced_agents":N,"agents":[…],"context_package":{"local","remote","state"},"cli":{"installed","required","state"}}`.
 
@@ -269,14 +269,18 @@ cinna skills list crm-agent
 ```
 Agent: CRM Agent
                                 Addons (3)
-┏━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
-┃ # ┃ Kind   ┃ Source      ┃ Status    ┃ Name                  ┃ Version ┃
-┡━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
-│ 1 │ plugin │ marketplace │ ● ok      │ pdf-tools (PDF Tools) │ 2.1.0   │
-│ 2 │ skill  │ local       │ ● ok      │ report · published    │ 1.0.1   │
-│ 3 │ skill  │ local       │ ! secrets │ draft                 │         │
-└───┴────────┴─────────────┴───────────┴───────────────────────┴─────────┘
-1 plugin(s), 2 skill(s) (2 of them this agent's own).
+┏━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+┃ # ┃ Kind   ┃ Source      ┃ Status    ┃ Name                  ┃ Version       ┃
+┡━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+│ 1 │ plugin │ marketplace │ ● ok      │ pdf-tools (PDF Tools) │ 2.1.0         │
+│ 2 │ skill  │ catalog     │ ● ok      │ dad-jokes (Dad Jokes) │ 1.0.0 → 1.1.0 │
+│ 3 │ skill  │ local       │ ● ok      │ report · published    │ 1.0.1         │
+│ 4 │ skill  │ local       │ ! secrets │ draft                 │               │
+└───┴────────┴─────────────┴───────────┴───────────────────────┴───────────────┘
+1 plugin(s), 3 skill(s) (2 of them this agent's own).
+
+! 1 installed addon(s) have a newer revision: dad-jokes
+Update with: cinna skills update crm-agent dad-jokes
 
 ! draft (secrets): This skill holds files that look like key material.
     .env
@@ -285,7 +289,7 @@ A blank version means no `version:` in the skill's SKILL.md — or an index buil
 before skills carried one, which fills in after the next refresh or publish.
 ```
 
-`Name` is the engine-facing folder name — the string `cinna skills publish` takes back — with the display name beside it when they differ. `· published` marks a local skill that already has a catalog package, so a re-publish appends a revision instead of creating a second package. The status column carries the server's own code (`secrets`, `oversized`, `shadowed` for warnings; `missing_description`, `name_mismatch`, `source_unavailable`, `orphan` for errors), and the platform's own sentence for each flagged row — with the offending files for `secrets` — follows under the table. Reads the server's cache, so it never wakes a sleeping environment: when the skill half could not be read the plugin rows still list and the reason is printed (`env_not_running`, `adapter_error`, `parse_error`) instead of a short list looking complete. `--json` prints the raw payload (`addons`, `counts`, `skills_error`) for a script or a local coding agent.
+The **Version** column is what the agent carries (`installed_version`), and an installed addon whose catalog has moved since reads `1.0.0 → 1.1.0` with the update command named under the table — an agent sitting two revisions back must not look identical to a current one. `Name` is the engine-facing folder name — the string `cinna skills publish` takes back — with the display name beside it when they differ. `· published` marks a local skill that already has a catalog package, so a re-publish appends a revision instead of creating a second package. The status column carries the server's own code (`secrets`, `oversized`, `shadowed` for warnings; `missing_description`, `name_mismatch`, `source_unavailable`, `orphan` for errors), and the platform's own sentence for each flagged row — with the offending files for `secrets` — follows under the table. Reads the server's cache, so it never wakes a sleeping environment: when the skill half could not be read the plugin rows still list and the reason is printed (`env_not_running`, `adapter_error`, `parse_error`) instead of a short list looking complete. `--json` prints the raw payload (`addons`, `counts`, `skills_error`) for a script or a local coding agent.
 
 ### `cinna skills publish <agent> <name> [--visibility public|private|users] [--grant EMAIL ...] [--version V] [--notes TEXT] [--package-id ID] [--dry-run] [--yes] [--json]`
 
@@ -315,7 +319,79 @@ Publish? [Y/n]:
 
 At a terminal that preview is shown and confirmed before the press; `--yes`, `--json` and `--no-input` publish straight away. `--package-id` is optional too — omitted, it is derived as `<reversed host>.skill.<name>`, with your own publisher slug appended when that id is already taken on the instance (`--dry-run` says when that happened, since a hex tail in your own package id has no other explanation).
 
-A re-publish appends a revision to the same package, so `--package-id` (the reverse-DNS id, e.g. `com.acme.report`) is only for a first publish — a mismatch on a later one is refused rather than silently ignored. `--visibility` is likewise honoured on a first publish and on an explicit change; omitting it leaves the package as it is. `--grant` requires `--visibility users` and the CLI refuses the combination otherwise, before anything is written. The server would accept it — it stores the grant either way — but a package that is private or public never consults its grant list, so the publish would report success and share nothing, and a revision cannot be taken back. Within a `users` package `--grant` is strictly **additive**: it adds the addresses it names and never revokes the ones it omits (revoking is its own verb in the web UI), and an unknown address fails the whole publish rather than half-sharing it. On success the package id, revision and its version, visibility and catalog URL are printed, plus a line saying the version landed in `skills/<name>/SKILL.md` — and a warning instead when it could not be written there, because the header and the catalog have then diverged and the next publish continues from the catalog. A refusal is printed as the platform's own sentence with its code (`not_developer`, `foreign_install`, `no_environment`, `workspace_unavailable`, `package_id_immutable`, `skill_contains_secrets` — which also lists the offending files), and `--json` prints `{revision, package, catalog_url, skill_md_updated}` instead of the human block (`--dry-run --json` prints the preview payload).
+A re-publish appends a revision to the same package, so `--package-id` (the reverse-DNS id, e.g. `com.acme.report`) is only for a first publish — a mismatch on a later one is refused rather than silently ignored. `--visibility` is likewise honoured on a first publish and on an explicit change; omitting it leaves the package as it is. `--grant` requires `--visibility users` and the CLI refuses the combination otherwise, before anything is written. The server would accept it — it stores the grant either way — but a package that is private or public never consults its grant list, so the publish would report success and share nothing, and a revision cannot be taken back. Within a `users` package `--grant` is strictly **additive**: it adds the addresses it names and never revokes the ones it omits (revoking is `cinna skills revoke`, so a stale publish cannot silently remove access), and an unknown address fails the whole publish rather than half-sharing it. On success the package id, revision and its version, visibility and catalog URL are printed, plus a line saying the version landed in `skills/<name>/SKILL.md` — and a warning instead when it could not be written there, because the header and the catalog have then diverged and the next publish continues from the catalog. A refusal is printed as the platform's own sentence with its code (`not_developer`, `foreign_install`, `no_environment`, `workspace_unavailable`, `package_id_immutable`, `skill_contains_secrets` — which also lists the offending files), and `--json` prints `{revision, package, catalog_url, skill_md_updated}` instead of the human block (`--dry-run --json` prints the preview payload).
+
+### `cinna skills catalog [--search Q] [--mine] [--json]`
+
+Browse the instance skills catalog: one row per package this account may see, with its reverse-DNS **package id**, display name, visibility and newest version. The package id — `com.acme.pdf-report`, not a UUID — is the reference every other package verb takes. A delisted package is marked as such beside its visibility.
+
+The route takes no parameters — it answers the whole visible catalogue — so `--search` (matching the id, name and description) and `--mine` (packages this account can manage) narrow the rows locally. `--json` prints the filtered rows, not the raw envelope.
+
+### `cinna skills show <package> [--revision N] [--json]`
+
+One package in full: its display name, visibility, newest version and package UUID, then the revision table, then the `SKILL.md` of the newest revision (or the one `--revision` names). `<package>` is a package id, a display name, or a UUID. The `SKILL.md` is printed as plain text — it is someone else's file and may contain anything — and a content fetch that fails degrades the output rather than the command, because the package detail is the answer.
+
+### `cinna skills revisions <package> [--json]`
+
+A package's revisions, **newest first**: number, version, release date, size and the release notes given at publish time. A revision is immutable, so this is the question a publisher has before every publish — what is already out there — and the answer to it no longer requires `cinna api` and a UUID. Pair it with `cinna skills publish <agent> <name> --dry-run`, which says what the *next* one would be.
+
+### `cinna skills files <package> [--revision N] [--json]`
+
+The files one revision ships, with sizes and the total. A file list the server truncated says so.
+
+There is no `download` verb, for two reasons: installing a skill lands it in the agent's own workspace, which sync brings down to the local mirror — so the bytes already arrive that way — and the archive routes are binary, which the JSON-only escape hatch could not carry anyway.
+
+### `cinna skills install <agent> <package> [--revision N] [--conversation-only|--building-only] [--json]`
+
+Install a catalog package onto an agent. `<agent>` is a name, slug or id; `<package>` is a package id, display name or UUID — the CLI resolves both, so neither a raw UUID nor a hand-built JSON body is needed.
+
+```bash
+cinna skills catalog --search jokes
+cinna skills install crm-agent localhost.skill.dad-jokes
+cinna skills install crm-agent localhost.skill.dad-jokes --revision 2 --conversation-only
+```
+
+Omitting `--revision` installs whatever the catalog calls latest *now*; because a revision is immutable, the install pins bytes that will not change under the agent until `cinna skills update` moves it. Both modes are on unless `--conversation-only` / `--building-only` narrows where the skill is offered (naming both is refused — it would install a skill offered nowhere).
+
+Installing something the agent already carries is answered as a sentence, not a JSON body: the platform's own `already_installed` refusal followed by either "already at the newest revision" or the `cinna skills update` that closes the gap. The `--json` error code stays `already_installed`.
+
+### `cinna skills update <agent> <name> [--json]`
+
+Move an installed skill to the package's newest revision, printing the version it moved from and to. `<name>` is the name `cinna skills list` prints; the plugin-link id the route actually addresses is resolved internally. The listing's `has_update` is *reported*, never used to skip the call — it comes from a cache, and the upgrade route is what decides.
+
+Every install / uninstall / update / toggle also pushes the change into the agent's running environments, and that push can partly fail while the call itself succeeds. When it does, the command says how many environments did not take it and points at `cinna agent restart-env` — a green check alone would hide the one case where the catalog and the live agent disagree.
+
+### `cinna skills uninstall <agent> <name> [--yes] [--json]`
+
+Remove an agent's copy of an installed skill. The package and its revisions are untouched — what the agent held was a copy, not a reference. Asks first unless `--yes`. An agent's *own* `skills/<name>/` folder is not an install, and the command says so rather than failing on a route that could never match it.
+
+### `cinna skills toggle <agent> <name> [--enable|--disable] [--conversation-mode|--no-conversation-mode] [--building-mode|--no-building-mode] [--json]`
+
+Enable or disable an installed skill, or change where it is offered, without removing it. Every switch defaults to "leave it alone" and only the ones named are sent, so `--disable` cannot silently reset the mode flags a previous call set. Naming no switch at all is a usage error rather than a no-op call. A disabled install still lists and still reports its version — it is not an error — so `cinna skills list` marks it `· disabled`.
+
+### `cinna skills refresh <agent> [--json]`
+
+Rebuild the agent's addon index, reporting how many skills were indexed. Everything else in this group reads the platform's cache — which is what makes it safe against a sleeping environment, and what makes a stale index possible. This is the remedy when `cinna skills list` reports `adapter_error` / `env_not_running` / `parse_error`, or shows no version for a skill whose `SKILL.md` has one. The plugin half is refreshed too where the platform offers that route; a platform without it still refreshes the skill half and says so.
+
+A refresh that still could not read the index answers **200 with the reason** — so this prints the reason and points at `cinna agent restart-env <agent>` rather than a green check. The failing part is the environment's skill adapter, and running the refresh again will not move it.
+
+### `cinna skills grants <package> [--json]` · `grant <package> --user EMAIL` · `revoke <package> --user EMAIL [--yes]`
+
+Who is named on a package, and adding or removing one. Visibility and grants belong to the *package*, not to a revision, so changing them costs no new revision — this is the post-publish half of `cinna skills publish --grant`.
+
+A grant list is stored on any package but only *consulted* on one whose visibility is `users`, so `grants` prints the visibility beside the rows and both verbs warn when the list is being ignored. `revoke` takes the same email `grant` did and resolves it to the user id the route actually addresses; an address that was never granted is a sentence naming who actually is.
+
+### `cinna skills visibility <package> <public|private|users> [--json]`
+
+Change who may see a package after it was published. Switching to `users` with nobody named warns that it shares the package with nobody — the one setting that looks like sharing and is not.
+
+### `cinna skills delist <package> [--yes] [--json]`
+
+Take a package out of the catalog. Agents that already installed it keep what they have: a revision they hold is a copy, not a reference. Asks first unless `--yes`. Deleting a package outright is still web-UI only.
+
+### `cinna skills relist <package> [--json]`
+
+Put a delisted package back. `delist` has no inverse route of its own — without this verb the only way back would be `cinna api`, which would make delisting the one door in this group that opens only outwards.
 
 ### `cinna connect agent-api --producer <agent> --consumer <agent> [--label TEXT] [--read-only]`
 
@@ -341,8 +417,13 @@ Generic escape hatch into the platform API, authenticated with the account token
 - The inner response is passed through verbatim: the body prints to stdout (pretty-printed for JSON) and the exit code is `0` for 2xx and `1` for an inner 4xx/5xx — so it composes in shell pipelines.
 - When the escape hatch itself refuses the call, the detail prints to stderr and the exit code is `2`: policy denials (credentials, user management, admin, CLI, MFA/auth, and streaming routes are excluded — shown as `blocked by platform policy: …`), rate limiting (429, with the Retry-After delay), and request/response size caps (413/502).
 
+`<path>` accepts the same **agent references** the rest of the CLI does: a segment straight after `agents/` that is not already a UUID is resolved against the account's agent listing, and the substitution is announced on stderr so a `--json` stdout stream stays pure. Resolution is sugar and never breaks the hatch — a reference that does not resolve (or an agent listing that cannot be reached) leaves the path exactly as typed, because `agents/` is a route prefix as well as a collection.
+
+A path segment carrying an **elided id** (`agents/f0506e24-3740-4fe3…/addons`, copied out of a table cell too narrow to print it whole) is refused locally, before any request. The API would answer `404 Agent not found` for it, which reads as a missing agent rather than a mangled id.
+
 ```bash
 cinna api GET agents
+cinna api GET agents/crm-agent/addons      # resolved to agents/<uuid>/addons
 cinna api GET agents --query limit=5
 cinna api PATCH agents/3fa85f64-5717-4562-b3fc-2c963f66afa6 --json '{"description": "updated"}'
 cinna api POST tasks --data @task.json
@@ -439,6 +520,7 @@ It detects and fixes:
 - **Orphaned sessions** — `cinna-*` sessions with no registry entry at all. Terminated.
 - **Active sessions** — the healthy, still-watching sessions left over from past `cinna dev` runs. They are not broken, but they keep the shared Mutagen daemon busy and are recreated on demand, so doctor offers to clear them as a separate step.
 - **Expired tokens** — for **account-managed** workspaces (those under an account root), the CLI token is re-minted automatically through the parent account token, no pasting required. **Standalone** workspaces (set up via `cinna setup`) can only be refreshed with a pasted setup token, so they are reported with a `cinna set-token` hint rather than changed.
+- **cinna-cli behind the platform pin** — one report-only finding per platform whose discovery document pins a different version. An **editable install** raises none: its recorded version is a snapshot of the day it was installed, not the code that runs, so "behind the pin" would be a confident wrong answer — and one that invites missing features to be misdiagnosed as version skew.
 - **Expired account token** — a sub-agent token can only be re-minted while the **account** token that mints it is still valid. When the account token has itself expired, doctor probes it once and surfaces a single _"renew the account token — run `cinna login`"_ finding (listing the blocked sub-agents) instead of a pile of re-mints that would all fail with 401. Run `cinna login`, then re-run `cinna doctor` to re-mint the dependents.
 
 ```bash

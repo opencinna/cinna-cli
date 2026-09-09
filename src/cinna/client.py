@@ -30,11 +30,21 @@ def _coded_refusal(response: httpx.Response) -> CodedRefusal | None:
     Returns ``None`` when the body is not that shape, so the caller can fall
     back to the ordinary ``PlatformError`` rendering rather than inventing a
     code for a route that never sent one.
+
+    A **bare** ``{"code", "message"}`` body counts too: the skills-install
+    route answers its 409 that way rather than nesting under ``detail``, and a
+    ``already_installed`` the client could not switch on would reach the user
+    as a JSON dump — the one rendering this whole path exists to avoid.
     """
     try:
-        detail = response.json().get("detail")
+        body = response.json()
     except Exception:
         return None
+    if not isinstance(body, dict):
+        return None
+    detail = body.get("detail")
+    if not isinstance(detail, dict) and body.get("code"):
+        detail = body
     if not isinstance(detail, dict) or not detail.get("code"):
         return None
     return CodedRefusal(
@@ -994,6 +1004,221 @@ class AccountClient:
         and ``revisions[]``.
         """
         return self._proxy_json("GET", f"skills/packages/{package_id}", coded=True)
+
+    # --- Skills lifecycle: install / upgrade / uninstall (the plugin-link half)
+    #
+    # A catalog install is stored as a *plugin link* — one row tying one
+    # package revision to one agent — so everything after `install` is a plugin
+    # verb addressed by link id, on a different route prefix. That is a
+    # platform detail, not a user-facing one: `cinna skills` resolves the link
+    # id out of the addons listing so a name is the only thing anyone types.
+
+    def install_skill_on_agent(
+        self,
+        agent_id: str,
+        package_id: str,
+        revision_number: int | None = None,
+        conversation_mode: bool = True,
+        building_mode: bool = True,
+    ) -> dict:
+        """POST /api/v1/agents/{id}/skills/install — install a catalog package.
+
+        ``SkillInstallRequest``: ``package_id`` is the package's **UUID** (not
+        the reverse-DNS string — the CLI resolves one to the other), an omitted
+        ``revision_number`` takes the newest release, and the two mode flags
+        decide where the installed skill is offered. Both default to true
+        server-side and are always sent, so a caller that turns one off is not
+        relying on a default it cannot see.
+
+        Installing what the agent already carries answers **409
+        ``already_installed``** — a refusal with a next step (upgrade), which
+        is why this route is ``coded``.
+        """
+        body: dict = {
+            "package_id": package_id,
+            "conversation_mode": conversation_mode,
+            "building_mode": building_mode,
+        }
+        if revision_number is not None:
+            body["revision_number"] = revision_number
+        return self._proxy_json(
+            "POST", f"agents/{agent_id}/skills/install", json_body=body, coded=True
+        )
+
+    def uninstall_agent_plugin(self, agent_id: str, link_id: str) -> dict:
+        """DELETE /api/v1/llm-plugins/agents/{id}/plugins/{link_id} — remove a link.
+
+        Removing the link is what "uninstall" means for a catalog skill; the
+        package and its revisions are untouched, and re-installing is a fresh
+        link rather than an undo.
+        """
+        return self._proxy_json(
+            "DELETE", f"llm-plugins/agents/{agent_id}/plugins/{link_id}", coded=True
+        )
+
+    def upgrade_agent_plugin(self, agent_id: str, link_id: str) -> dict:
+        """POST /api/v1/llm-plugins/agents/{id}/plugins/{link_id}/upgrade.
+
+        Moves the link to the package's newest revision. Nothing to send: the
+        target is whatever the catalog now calls latest, which is why the CLI
+        cannot promise a version before the call returns.
+        """
+        return self._proxy_json(
+            "POST",
+            f"llm-plugins/agents/{agent_id}/plugins/{link_id}/upgrade",
+            coded=True,
+        )
+
+    def update_agent_plugin(
+        self,
+        agent_id: str,
+        link_id: str,
+        enabled: bool | None = None,
+        conversation_mode: bool | None = None,
+        building_mode: bool | None = None,
+    ) -> dict:
+        """PUT /api/v1/llm-plugins/agents/{id}/plugins/{link_id} — link settings.
+
+        ``AgentPluginLinkUpdate`` is ``{conversation_mode?, building_mode?,
+        disabled?}`` — the switch is stored **negatively**, so the caller's
+        ``enabled`` is inverted here rather than at the call sites: a body
+        carrying ``enabled`` is not a validation error, it is a field the
+        server ignores, and the link would come back unchanged while the CLI
+        reported success.
+
+        Only the switches the caller named are sent. That is load-bearing
+        rather than tidy: the body is a partial update, so an ``--enable`` that
+        also carried the two mode defaults would quietly reset a link whose
+        author had turned building mode off.
+        """
+        body: dict = {}
+        if enabled is not None:
+            body["disabled"] = not enabled
+        if conversation_mode is not None:
+            body["conversation_mode"] = conversation_mode
+        if building_mode is not None:
+            body["building_mode"] = building_mode
+        return self._proxy_json(
+            "PUT",
+            f"llm-plugins/agents/{agent_id}/plugins/{link_id}",
+            json_body=body,
+            coded=True,
+        )
+
+    def refresh_agent_skills(self, agent_id: str) -> dict:
+        """POST /api/v1/agents/{id}/skills/refresh — re-read the skill index.
+
+        The addons route is cache-only, so this is the one verb that actually
+        talks to the environment. It is the remedy for a ``skills_error`` and
+        for a version the cache has not backfilled.
+        """
+        return self._proxy_json("POST", f"agents/{agent_id}/skills/refresh")
+
+    def refresh_agent_addons(self, agent_id: str) -> dict:
+        """POST /api/v1/agents/{id}/addons/refresh — re-read the plugin half."""
+        return self._proxy_json("POST", f"agents/{agent_id}/addons/refresh")
+
+    # --- Skills catalog: browsing, revisions, sharing ---
+
+    def list_skill_catalog(self) -> dict:
+        """GET /api/v1/skills/catalog — the packages this account may see.
+
+        The route takes **no parameters** — it answers the whole visible
+        catalogue — so the ``--search`` / ``--mine`` narrowing is done by the
+        caller on the rows. Sending them as query parameters would look like
+        filtering and silently do nothing.
+
+        Visibility is the server's business: a private package someone else
+        owns is simply not in the answer.
+        """
+        return self._proxy_json("GET", "skills/catalog", coded=True)
+
+    def get_skill_revision_content(self, package_id: str, revision_number: int) -> dict:
+        """GET /api/v1/skills/packages/{id}/revisions/{n}/content — the SKILL.md."""
+        return self._proxy_json(
+            "GET",
+            f"skills/packages/{package_id}/revisions/{revision_number}/content",
+            coded=True,
+        )
+
+    def get_skill_revision_files(self, package_id: str, revision_number: int) -> dict:
+        """GET /api/v1/skills/packages/{id}/revisions/{n}/files — what it ships."""
+        return self._proxy_json(
+            "GET",
+            f"skills/packages/{package_id}/revisions/{revision_number}/files",
+            coded=True,
+        )
+
+    def list_skill_grants(self, package_id: str) -> dict:
+        """GET /api/v1/skills/packages/{id}/grants — who was named on it.
+
+        A grant only *does* anything on a ``users`` package: every other
+        visibility ignores the list. The listing is still real on a private
+        package, which is why `cinna skills grants` prints the visibility
+        beside it rather than the rows alone.
+        """
+        return self._proxy_json(
+            "GET", f"skills/packages/{package_id}/grants", coded=True
+        )
+
+    def grant_skill_access(self, package_id: str, email: str) -> dict:
+        """POST /api/v1/skills/packages/{id}/grants — name one person on it.
+
+        The body carries the person's email, the same identifier
+        ``grant_emails`` takes at publish time: the platform resolves it to a
+        user, so a typo is a refusal rather than a grant nobody holds.
+        """
+        return self._proxy_json(
+            "POST",
+            f"skills/packages/{package_id}/grants",
+            json_body={"email": email},
+            coded=True,
+        )
+
+    def revoke_skill_access(self, package_id: str, user_id: str) -> dict:
+        """DELETE /api/v1/skills/packages/{id}/grants/{user_id} — take it back.
+
+        Addressed by user id, not email; the CLI resolves the email against the
+        grant listing so revoking uses the same identifier granting did.
+        """
+        return self._proxy_json(
+            "DELETE", f"skills/packages/{package_id}/grants/{user_id}", coded=True
+        )
+
+    def update_skill_package(
+        self,
+        package_id: str,
+        visibility: str | None = None,
+        is_listed: bool | None = None,
+    ) -> dict:
+        """PATCH /api/v1/skills/packages/{id} — change the package itself.
+
+        Visibility and listing are properties of the *package*, not of a
+        revision, so they can be changed after the fact — unlike the bytes of a
+        revision, which never move. Only the named fields are sent.
+
+        ``is_listed`` is how a delisted package comes back: ``POST …/delist``
+        is one-way, and the undo is this field.
+        """
+        body: dict = {}
+        if visibility is not None:
+            body["visibility"] = visibility
+        if is_listed is not None:
+            body["is_listed"] = is_listed
+        return self._proxy_json(
+            "PATCH", f"skills/packages/{package_id}", json_body=body, coded=True
+        )
+
+    def delist_skill_package(self, package_id: str) -> dict:
+        """POST /api/v1/skills/packages/{id}/delist — take it out of the catalog.
+
+        Delisting hides the package from discovery; agents that already
+        installed it keep what they have, because a revision they hold is a
+        copy, not a reference.
+        """
+        return self._proxy_json(
+            "POST", f"skills/packages/{package_id}/delist", coded=True
+        )
 
     # --- Improvement requests (received on the agents this account owns) ---
     #
