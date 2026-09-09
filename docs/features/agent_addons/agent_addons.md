@@ -23,6 +23,13 @@ instance skills catalog so other agents can install it.
 - **Package / revision** — publishing creates a catalog *package* (identified by
   a reverse-DNS id such as `com.acme.report`) whose *revisions* are immutable.
   Re-publishing the same skill appends a revision; it never rewrites one.
+- **Version** — a line in the skill's own `SKILL.md` frontmatter, not a field of
+  a database row. It is free text (one line, at most 64 characters), and the
+  platform *derives* it at publish time rather than asking: the header's version
+  if it has not been published yet, otherwise the next one after the newest
+  release. The resolved value is written back into `SKILL.md` before the
+  snapshot, so the published bytes carry their own version and the next publish
+  reads it back. A skill nobody has versioned starts at `1.0.0`.
 - **Local vs remote** — the skill folders live in the synced workspace, but the
   list is read from the **platform's cache** of the environment's skill index,
   not from local disk. What `cinna skills list` shows is what the engine sees,
@@ -34,11 +41,15 @@ instance skills catalog so other agents can install it.
 
 1. Run `cinna skills list <agent>` from the account workspace.
 2. One row per addon: kind (`plugin` / `skill`), source (`marketplace`,
-   `bundle`, `catalog`, `local`), status, and name.
-3. `· published` marks a local skill that already has a catalog package;
+   `bundle`, `catalog`, `local`), status, name, and version.
+3. A blank version column is a fact, not a failure — the skill's header carries
+   none. On an environment built before skills carried versions it can also mean
+   the index has not been refreshed yet, which the CLI says beneath the table
+   whenever a local skill's version is missing.
+4. `· published` marks a local skill that already has a catalog package;
    `· orphan` marks a plugin directory the engine still loads whose link is
    gone.
-4. When the skill half could not be read, the plugin rows still list and the
+5. When the skill half could not be read, the plugin rows still list and the
    reason is stated (`env_not_running`, `adapter_error`, `parse_error`).
 
 ### Publish a skill to the catalog
@@ -50,9 +61,15 @@ instance skills catalog so other agents can install it.
    so an unsynced edit would be left out of an immutable revision.
 3. `cinna skills list <agent>` to confirm the skill is there and its status is
    clean.
-4. `cinna skills publish <agent> <name> --version 1.0.0 --notes "…"`.
-5. The success block prints the package id, the revision, the visibility that
-   stuck, and the catalog URL.
+4. Optionally `cinna skills publish <agent> <name> --dry-run` — the version, the
+   package id and the revision number a publish would take, taken from the same
+   code that will take them, with nothing published.
+5. `cinna skills publish <agent> <name> --visibility public --notes "…"`. At a
+   terminal the same preview is shown and confirmed before the press.
+6. The success block prints the package id, the revision and its version, the
+   visibility that stuck, and the catalog URL — plus a line saying that
+   `skills/<name>/SKILL.md` now carries the version, since a file in the synced
+   workspace changed without the user editing it.
 
 ### Share a private skill with named people
 
@@ -74,6 +91,27 @@ instance skills catalog so other agents can install it.
   names the offending files).
 - **The environment must exist**, but need not be awake. `no_environment` and
   `workspace_unavailable` are the two refusals here.
+- **The version is derived, not typed.** The platform reads `version:` from the
+  skill's `SKILL.md`, continues the series past the newest release (incrementing
+  the last run of digits: `1.0.0`→`1.0.1`, `1.2`→`1.3`, `v3`→`v4`), and starts
+  at `1.0.0` only when there is nothing to continue from. `--version` overrides
+  that for one revision, verbatim and without de-duplication — two revisions may
+  legitimately carry one version. The CLI refuses a `--version` that carries a
+  newline or any other control character before the call (the value is written
+  into a frontmatter block, where a newline would inject top-level keys into the
+  author's header), and refuses an empty one, which the server would ignore in
+  favour of the derived version — an override that silently is not one.
+- **Publishing edits the workspace.** The resolved version is written into
+  `skills/<name>/SKILL.md` on the environment before the snapshot is taken. A
+  write that cannot happen (a read-only workspace, a file with no frontmatter
+  fence) is not fatal: the revision still carries the version, but its stored
+  frontmatter then omits it — and the CLI warns, because the header and the
+  catalog have diverged and the next publish will continue from the catalog.
+- **The package id is derived too.** Omitting `--package-id` takes
+  `<reversed host>.skill.<name>`; when that is already taken on the instance the
+  publisher's own slug is appended rather than the publish being refused.
+  `--dry-run` says which of those happened before the press, since a hex tail in
+  your own package id has no other explanation.
 - **The package id is immutable.** `--package-id` applies to a first publish; on
   a re-publish it may only repeat the existing id, and a mismatch is refused
   (`package_id_immutable`) rather than ignored — every install and container
@@ -112,8 +150,10 @@ cinna skills list <agent>
       → api-proxy → GET /api/v1/agents/{id}/addons   (the server's projection)
     → account.py:_print_addons()                      (one row per addon)
 
-cinna skills publish <agent> <name>
+cinna skills publish <agent> <name> [--dry-run]
   → account.py:run_skills_publish()
+    → AccountClient.get_skill_publish_preview()       (--dry-run, or to confirm)
+      → api-proxy → GET /api/v1/agents/{id}/skills/{name}/publish-preview
     → AccountClient.publish_agent_skill()
       → api-proxy → POST /api/v1/agents/{id}/skills/{name}/publish
     → AccountClient.get_skill_package()               (for the catalog line)
@@ -129,7 +169,8 @@ user-scoped dependency directly. See the tech doc for why.
 - [Account workspace](../account_workspace/account_workspace.md) — the account
   token, agent-ref resolution, and the api-proxy these verbs ride.
 - [Live sync](../live_sync/live_sync.md) — a skill is published from the files
-  the environment has, so push before publishing.
+  the environment has, so push before publishing; and the version write-back
+  means a publish changes a workspace file that a sync will bring back down.
 - [Agent management](../agent_management/agent_management.md) — `cinna agent
   show` answers the neighbouring question ("is what I edited actually live?").
 - [Agent API](../agent_api/agent_api.md) — the other way one agent's capability

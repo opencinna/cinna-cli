@@ -32,6 +32,9 @@ def ensure_workspace_dirs(workspace: Path) -> None:
 
     - ``files/``, ``knowledge/`` — bundle-owned folders that always exist on the
       env but may be empty.
+    - ``skills/`` — the agent's own skills, one ``<name>/SKILL.md`` folder each.
+      Present locally even on an agent that carries none, because it is where a
+      new skill is written and where a publish's version write-back lands.
     - ``app-data/storage/``, ``app-data/uploads/``, ``app-data/cache/`` — the
       per-user persistent volume mounted at ``/app/workspace/app-data`` in the
       env. Created locally so script paths resolve immediately and Mutagen has
@@ -40,6 +43,7 @@ def ensure_workspace_dirs(workspace: Path) -> None:
     for rel in (
         "files",
         "knowledge",
+        "skills",
         "app-data/storage",
         "app-data/uploads",
         "app-data/cache",

@@ -1257,10 +1257,12 @@ def skills_list(agent_ref: str, as_json: bool):
     """List AGENT_REF's addons — plugins and skills in one deduplicated list.
 
     AGENT_REF is the agent's display name, slug, or id (see
-    ``cinna account agents``). Prints kind / source / status / name per addon,
-    marking the local skills already published to the catalog. Reads the
-    server's cache, so it never wakes a sleeping environment — a stale or
-    unreadable skill index is reported instead of hidden.
+    ``cinna account agents``). Prints kind / source / status / name / version
+    per addon — the version as the skill's own SKILL.md reports it — and marks
+    the local skills already published to the catalog. Reads the server's
+    cache, so it never wakes a sleeping environment: a stale or unreadable
+    skill index is reported instead of hidden, and a version it has not
+    backfilled yet is simply blank.
     """
     from cinna.account import run_skills_list
 
@@ -1285,13 +1287,26 @@ def skills_list(agent_ref: str, as_json: bool):
     help="Grant catalog access to EMAIL (repeatable, additive, never revokes). "
     "Requires --visibility users.",
 )
-@click.option("--version", default=None, help="Version label for this revision")
+@click.option(
+    "--version",
+    default=None,
+    help="Override the derived version (one line, max 64 chars). Normally "
+    "omit: the platform continues the series in the skill's own SKILL.md.",
+)
 @click.option("--notes", "release_notes", default=None, help="Release notes")
 @click.option(
     "--package-id",
     default=None,
-    help="Reverse-DNS package id, first publish only (e.g. com.acme.pdf-report)",
+    help="Reverse-DNS package id, first publish only (e.g. com.acme.pdf-report). "
+    "Derived from the skill name when omitted.",
 )
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show the version, package id and revision a publish would take, "
+    "and publish nothing.",
+)
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
 @click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
 def skills_publish(
     agent_ref: str,
@@ -1301,6 +1316,8 @@ def skills_publish(
     version: str | None,
     release_notes: str | None,
     package_id: str | None,
+    dry_run: bool,
+    yes: bool,
     as_json: bool,
 ):
     """Publish AGENT_REF's skill NAME to the instance skills catalog.
@@ -1315,8 +1332,17 @@ def skills_publish(
     Publishing reads the agent's **cloud** workspace, so ``cinna sync push``
     first — an unsynced edit is left out of a revision you cannot rewrite.
 
+    The **version is derived**, not typed: the platform reads ``version:`` from
+    the skill's own ``SKILL.md``, continues the series past the newest release
+    (``1.0.0`` for a skill nobody has versioned), and writes the result back
+    into that file. ``--version`` overrides it verbatim for one revision, and
+    ``--dry-run`` shows what would be taken. At a terminal the same preview is
+    shown for confirmation before the press; ``--yes``, ``--json`` and
+    ``--no-input`` publish straight away.
+
     \b
-      cinna skills publish crm-agent pdf-report --visibility public --version 1.2.0
+      cinna skills publish crm-agent pdf-report --visibility public
+      cinna skills publish crm-agent pdf-report --dry-run
       cinna skills publish crm-agent pdf-report --visibility users \\
           --grant alice@example.com --grant bob@example.com
     """
@@ -1330,6 +1356,8 @@ def skills_publish(
         version,
         release_notes,
         package_id,
+        dry_run=dry_run,
+        yes=yes,
         as_json=as_json,
     )
 

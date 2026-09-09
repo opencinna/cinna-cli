@@ -2859,6 +2859,19 @@ def run_credentials_share(credential_id: str, agent_ref: str) -> None:
 # projection it is handed rather than folding the two halves its own way.
 
 
+def _esc(value) -> str:
+    """One server-authored value, safe to interpolate into Rich markup.
+
+    A skill's version is free text and a display name is whatever its author
+    typed, so either can hold square brackets — which Rich reads as a style tag
+    and silently swallows (``1.0[beta]`` renders as ``1.0``). Escaping is not
+    cosmetic here: the version is the fact the row exists to report.
+    """
+    from rich.markup import escape
+
+    return escape(str(value))
+
+
 def _addon_status_cell(addon: dict) -> str:
     """Colour one addon's ``status`` (``ok`` / ``warning`` / ``error``).
 
@@ -2913,10 +2926,12 @@ def _print_addon_issues(addons: list[dict]) -> None:
         marker = "[red]✗[/red]" if addon.get("status") == "error" else "[yellow]![/yellow]"
         message, paths = _addon_issue_message(addon)
         code = addon.get("status_code") or addon.get("status")
-        headline = f"{marker} {addon.get('name', '?')} [dim]({code})[/dim]"
-        console.console.print(f"{headline}: {message}" if message else headline)
+        headline = f"{marker} {_esc(addon.get('name', '?'))} [dim]({_esc(code)})[/dim]"
+        console.console.print(f"{headline}: {_esc(message)}" if message else headline)
         for path in paths:
-            console.console.print(f"    [dim]{path}[/dim]")
+            # A path is the whole point of a `secrets` line: `config[dev].env`
+            # rendered as `config.env` would name a file that does not exist.
+            console.console.print(f"    [dim]{_esc(path)}[/dim]")
 
 
 def _addon_name_cell(addon: dict) -> str:
@@ -2925,15 +2940,28 @@ def _addon_name_cell(addon: dict) -> str:
     ``name`` leads because it is what ``plugin_ref`` and the on-disk layout
     use — it is the string the user types back at `cinna skills publish`.
     """
-    cell = f"[bold]{addon.get('name', '?')}[/bold]"
+    cell = f"[bold]{_esc(addon.get('name', '?'))}[/bold]"
     display = addon.get("display_name")
     if display and display != addon.get("name"):
-        cell += f" [dim]({display})[/dim]"
+        cell += f" [dim]({_esc(display)})[/dim]"
     if addon.get("published_package_id"):
         cell += " [cyan]· published[/cyan]"
     if addon.get("orphan"):
         cell += " [dim]· orphan[/dim]"
     return cell
+
+
+def _addon_version_cell(addon: dict) -> str:
+    """The addon's version, or nothing at all.
+
+    A skill's version is a line in its own ``SKILL.md``, so it is genuinely
+    optional — an absent one renders blank rather than a bare ``v`` or a
+    ``-``, the same way the web row shows no badge. See
+    :func:`_print_addons` for why a *local* skill's blank can also be staleness
+    rather than absence.
+    """
+    version = addon.get("version")
+    return f"[dim]{_esc(version)}[/dim]" if version else ""
 
 
 def _print_addons(payload: dict) -> None:
@@ -2943,7 +2971,14 @@ def _print_addons(payload: dict) -> None:
     addons = payload.get("addons") or []
     if not addons:
         # A dim line, not a green check: an empty list is a fact, not a success.
-        console.console.print("[dim]This agent carries no plugins or skills yet.[/dim]")
+        # But only when it IS one — with `skills_error` set, an agent whose
+        # addons are all skills lists nothing, and "carries none" would be the
+        # false completeness that warning exists to prevent. The warning below
+        # is then the whole answer.
+        if not payload.get("skills_error"):
+            console.console.print(
+                "[dim]This agent carries no plugins or skills yet.[/dim]"
+            )
     else:
         counts = payload.get("counts") or {}
         table = Table(title=f"Addons ({len(addons)})", title_style="bold")
@@ -2952,6 +2987,7 @@ def _print_addons(payload: dict) -> None:
         table.add_column("Source")
         table.add_column("Status")
         table.add_column("Name")
+        table.add_column("Version")
 
         for i, addon in enumerate(addons, 1):
             table.add_row(
@@ -2960,6 +2996,7 @@ def _print_addons(payload: dict) -> None:
                 addon.get("source", "?"),
                 _addon_status_cell(addon),
                 _addon_name_cell(addon),
+                _addon_version_cell(addon),
             )
 
         console.console.print(table)
@@ -2969,6 +3006,7 @@ def _print_addons(payload: dict) -> None:
             f"({counts.get('local_skills', 0)} of them this agent's own).[/dim]"
         )
         _print_addon_issues(addons)
+        _print_version_staleness_hint(addons)
 
     # The plugin half is returned even when the skill half could not be read —
     # say so rather than letting a short list look complete.
@@ -2976,6 +3014,30 @@ def _print_addons(payload: dict) -> None:
         console.warn(
             f"The skill index could not be read ({payload['skills_error']}); "
             f"only plugins are listed above."
+        )
+
+
+def _print_version_staleness_hint(addons: list[dict]) -> None:
+    """Say that a blank version can mean a stale index, not a missing header.
+
+    The index a row is read from is built inside the container, and an
+    environment created before skills carried a version reports none however
+    many times its author edits ``SKILL.md``. The platform backfills a local
+    skill's version from the workspace file — but only on an index *fetch*, and
+    this route is cache-only, so on those environments the version appears
+    after a Refresh, a start sweep or a publish, never on this read. Printed
+    only when a local skill actually has no version, so a fully-versioned agent
+    never sees the caveat.
+    """
+    if any(
+        a.get("source") == "local" and a.get("kind") == "skill" and not a.get("version")
+        for a in addons
+    ):
+        console.console.print()
+        console.console.print(
+            "[dim]A blank version means no `version:` in the skill's SKILL.md — "
+            "or an index built before skills carried one, which fills in after "
+            "the next refresh or publish.[/dim]"
         )
 
 
@@ -2993,7 +3055,7 @@ def run_skills_list(agent_ref: str, as_json: bool = False) -> None:
         click.echo(json.dumps(payload, indent=2, default=str))
         return
 
-    console.console.print(f"Agent: [bold]{agent['name']}[/bold]")
+    console.console.print(f"Agent: [bold]{_esc(agent['name'])}[/bold]")
     _print_addons(payload)
 
     publishable = [
@@ -3010,6 +3072,96 @@ def run_skills_list(agent_ref: str, as_json: bool = False) -> None:
         )
 
 
+# The platform derives a skill's version from the skill's own SKILL.md header
+# and writes the resolved value back into that file before it snapshots it, so
+# `--version` is an override, not the normal path. These two helpers are what
+# the CLI adds around that: a local refusal of a label the server's 422 would
+# refuse anyway, and the rendering of the preview the publish would take.
+
+def _validate_version_label(version: str | None) -> None:
+    """Refuse an ``--version`` the platform could not use, before any call.
+
+    Two failures, both invisible until after a publish that cannot be taken
+    back:
+
+    - A newline or any other control character is a **422** at the request
+      boundary, because the value is interpolated into a ``SKILL.md``
+      frontmatter block where a newline would inject top-level keys.
+    - An empty or whitespace-only label is *not* refused server-side — it is
+      normalised to nothing and the version is derived instead, so the
+      publisher gets a revision numbered by a rule they thought they had
+      overridden.
+
+    Over-length is left to the server: 64 is the platform's bound to move, and
+    a client copy of it that drifted would refuse a version the API accepts.
+    """
+    if version is None:
+        return
+    if any(ch == "\r" or ch == "\n" or ch < " " for ch in version):
+        raise click.UsageError(
+            "--version must be a single line with no control characters: it is "
+            "written into the skill's SKILL.md frontmatter, where a newline "
+            "would inject top-level keys into the header."
+        )
+    if not version.strip():
+        raise click.UsageError(
+            "--version is empty. An empty label is not an override — the "
+            "platform would ignore it and derive the version from SKILL.md. "
+            "Name a version, or drop the option to get the derived one."
+        )
+
+
+def _print_publish_preview(name: str, agent_name: str, preview: dict) -> None:
+    """Render a ``SkillPublishPreview`` — what pressing publish would do."""
+    verb = "Re-publish" if preview.get("is_republish") else "Publish"
+    console.console.print(
+        f"{verb} [bold]{_esc(name)}[/bold] from [bold]{_esc(agent_name)}[/bold]"
+    )
+
+    version = preview.get("version")
+    provenance = []
+    if preview.get("header_version"):
+        provenance.append(f"header {_esc(preview['header_version'])}")
+    if preview.get("latest_published_version"):
+        provenance.append(
+            f"latest published {_esc(preview['latest_published_version'])}"
+        )
+    suffix = f"  [dim]({', '.join(provenance)})[/dim]" if provenance else ""
+    console.console.print(f"  Version:    {_esc(version)}{suffix}")
+
+    console.console.print(f"  Package:    {_esc(preview.get('package_id', '?'))}")
+    if preview.get("package_id_disambiguated"):
+        # The publisher did nothing wrong and has no other explanation for the
+        # hex tail in their own package id: say where it came from.
+        console.console.print(
+            "              [dim]the plain id was already taken on this "
+            "instance, so your publisher slug was appended[/dim]"
+        )
+    console.console.print(f"  Revision:   {preview.get('next_revision_number', '?')}")
+
+
+def _skill_md_carries_version(revision: dict) -> bool | None:
+    """Did the publish manage to stamp the version into the workspace file?
+
+    The platform writes the resolved version into ``skills/<name>/SKILL.md``
+    before it snapshots the folder, and a write that could not happen is
+    logged, not fatal. The revision's *stored frontmatter* is what says which
+    happened: it carries ``version`` only when the published bytes do, so a
+    revision that has a version its frontmatter does not is exactly the
+    degraded path.
+
+    ``None`` when the answer is not in the payload — a response with no
+    frontmatter at all cannot distinguish "not written" from "not reported",
+    and a warning invented from an absent field would be worse than silence.
+    """
+    frontmatter = revision.get("frontmatter")
+    if not isinstance(frontmatter, dict) or not frontmatter:
+        return None
+    if not revision.get("version"):
+        return None
+    return bool(frontmatter.get("version"))
+
+
 def run_skills_publish(
     agent_ref: str,
     name: str,
@@ -3018,6 +3170,8 @@ def run_skills_publish(
     version: str | None,
     release_notes: str | None,
     package_id: str | None,
+    dry_run: bool = False,
+    yes: bool = False,
     as_json: bool = False,
 ) -> None:
     """Publish one of an agent's skills to the catalog — `cinna skills publish`.
@@ -3046,11 +3200,56 @@ def run_skills_publish(
             "already is), or drop --grant."
         )
 
+    _validate_version_label(version)
+
     account_root = find_account_root()
     account_cfg = load_account_config(account_root)
 
     with AccountClient(account_cfg) as client:
         agent = _resolve_one_agent(client, agent_ref)
+
+        if dry_run:
+            # The only thing this verb has to say, so a refusal here is the
+            # command failing rather than something to shrug off.
+            with console.spinner(f"Previewing '{name}'..."):
+                preview = client.get_skill_publish_preview(agent["id"], name)
+            if as_json:
+                click.echo(json.dumps(preview, indent=2, default=str))
+                return
+            _print_publish_preview(name, agent["name"], preview)
+            if version:
+                console.console.print(
+                    f"  [dim]--version {_esc(version)} would override the "
+                    f"derived version above.[/dim]"
+                )
+            console.console.print()
+            console.console.print(
+                "[dim]Nothing was published. The preview skips the content "
+                "checks (secrets, malformed skill, budget), so a publish can "
+                "still refuse.[/dim]"
+            )
+            return
+
+        # A human at a terminal sees what the press will do before it happens —
+        # the version is derived, and the package id may carry a disambiguating
+        # slug, so there is something to read that the command line does not
+        # say. Skipped under --no-input / --json / a pipe, which is every
+        # scripted caller: this must not turn an existing automation into a
+        # blocked prompt.
+        if not yes and not as_json and console.interactive():
+            preview = {}
+            try:
+                with console.spinner(f"Previewing '{name}'..."):
+                    preview = client.get_skill_publish_preview(agent["id"], name)
+            except CinnaExit as exc:
+                # An older platform has no preview route, and a preview is not
+                # what was asked for: publish as before rather than refusing.
+                logger.debug("skill publish preview failed: %s", exc)
+            if preview:
+                _print_publish_preview(name, agent["name"], preview)
+                if not console.confirm("Publish?", default=True):
+                    raise click.Abort()
+
         with console.spinner(f"Publishing '{name}'..."):
             revision = client.publish_agent_skill(
                 agent["id"],
@@ -3070,7 +3269,13 @@ def run_skills_publish(
         if package_uuid:
             try:
                 package = client.get_skill_package(package_uuid)
-            except CinnaExit as exc:
+            except Exception as exc:
+                # Deliberately every exception, not just CinnaExit: an httpx
+                # transport error would otherwise reach CinnaGroup.invoke and
+                # exit 12, reporting a publish that COMMITTED as a network
+                # failure. The user re-runs and appends a second immutable
+                # revision to the catalog — the one mistake this block exists
+                # to prevent.
                 logger.debug("skill package lookup after publish failed: %s", exc)
 
     catalog_link = (
@@ -3079,6 +3284,8 @@ def run_skills_publish(
         else None
     )
 
+    stamped = _skill_md_carries_version(revision)
+
     if as_json:
         click.echo(
             json.dumps(
@@ -3086,6 +3293,7 @@ def run_skills_publish(
                     "revision": revision,
                     "package": package,
                     "catalog_url": catalog_link,
+                    "skill_md_updated": stamped,
                 },
                 indent=2,
                 default=str,
@@ -3093,13 +3301,13 @@ def run_skills_publish(
         )
         return
 
-    console.status(f"Published '{name}' from {agent['name']}")
+    console.status(f"Published '{_esc(name)}' from {_esc(agent['name'])}")
     if package.get("package_id"):
         console.console.print(f"  Package:    {package['package_id']}")
     rev_no = revision.get("revision_number", "?")
     rev_version = revision.get("version")
     console.console.print(
-        f"  Revision:   {rev_no}" + (f" ({rev_version})" if rev_version else "")
+        f"  Revision:   {rev_no}" + (f" ({_esc(rev_version)})" if rev_version else "")
     )
     if package.get("visibility"):
         console.console.print(f"  Visibility: {package['visibility']}")
@@ -3107,3 +3315,22 @@ def run_skills_publish(
         console.console.print(f"  Granted:    {', '.join(grant_emails)}")
     if catalog_link:
         console.console.print(f"  Catalog:    {catalog_link}")
+
+    if stamped is True and rev_version:
+        # A file in the workspace changed without the user editing it, and the
+        # local mirror is a sync away from it — worth one line, because a live
+        # sync session will move it and an unsynced local edit to the same file
+        # is now a conflict rather than a fast-forward.
+        console.console.print(
+            f"  [dim]skills/{_esc(name)}/SKILL.md now carries version: "
+            f"{_esc(rev_version)} — sync to bring it down.[/dim]"
+        )
+    elif stamped is False:
+        console.warn(
+            f"The version could not be written into skills/{name}/SKILL.md "
+            f"(a read-only workspace, or a file with no frontmatter fence). "
+            f"Revision {rev_no} is published"
+            + (f" as {_esc(rev_version)}" if rev_version else "")
+            + ", but the header still says what it said; the next publish "
+            "continues the series from the catalog, not from the file."
+        )

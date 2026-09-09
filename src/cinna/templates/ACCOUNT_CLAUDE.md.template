@@ -121,10 +121,12 @@ Refresh after platform updates with `cinna account refresh-context`.
 
 | Command | What it does |
 |---------|--------------|
-| `cinna skills list <agent>` | Every addon the agent carries, deduplicated (kind / source / status / name); marks the local skills already published to the catalog |
-| `cinna skills publish <agent> <name> [--visibility public\|private\|users] [--grant EMAIL …] [--version V] [--notes T]` | Publish one of the agent's own skills to the instance skills catalog; a re-publish appends a revision. `--grant` is repeatable and only ever **adds** access |
+| `cinna skills list <agent>` | Every addon the agent carries, deduplicated (kind / source / status / name / version); marks the local skills already published to the catalog |
+| `cinna skills publish <agent> <name> [--visibility public\|private\|users] [--grant EMAIL …] [--notes T] [--dry-run]` | Publish one of the agent's own skills to the instance skills catalog; a re-publish appends a revision. `--grant` is repeatable and only ever **adds** access. `--dry-run` shows the version and package id a publish would take |
 
 > A **skill** is a `skills/<name>/` folder with a `SKILL.md` the engine loads on demand — never a synonym for "a thing the agent can do". A skill worth sharing reaches other people through the catalog — `cinna skills publish <agent> <name> --visibility public`, which reads the agent's **cloud** workspace, so the skill must have travelled there (`cinna sync push --agent <slug>` first). Without a visibility the package is private and nobody else sees it; `--visibility users --grant <email>` shares it with named people instead. Never by copying folders between agents.
+>
+> **Do not invent a version.** The platform derives it from `version:` in the skill's own `SKILL.md` — continuing the series past the newest release, `1.0.0` for a skill nobody has versioned — and writes the resolved value back into that file. Publish without `--version`; run `cinna skills publish <agent> <name> --dry-run` first if you want to see which version and package id the press would take. Use `--version` only when the user names a specific one. Publishing is not interactive under `--json` / `--no-input`, and `--yes` skips the confirmation at a terminal.
 
 **Wiring & escape hatch:**
 

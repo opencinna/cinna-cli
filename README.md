@@ -260,7 +260,7 @@ Where the folder has been published is recorded in `publications.json`, a **sibl
 
 ### `cinna skills list <agent> [--json]`
 
-List everything an agent carries beyond its prompt, as one deduplicated list. An **addon** is either an installed plugin or a `skills/<name>/` folder — a `SKILL.md` plus its files that the engine loads on demand. The two overlap (a skill installed from the catalog is *also* a plugin link), and the platform owns the dedupe rule, so this prints the server's projection rather than folding the halves itself: one row per addon, with its kind, source (`marketplace` / `bundle` / `catalog` / `local`), status and name.
+List everything an agent carries beyond its prompt, as one deduplicated list. An **addon** is either an installed plugin or a `skills/<name>/` folder — a `SKILL.md` plus its files that the engine loads on demand. The two overlap (a skill installed from the catalog is *also* a plugin link), and the platform owns the dedupe rule, so this prints the server's projection rather than folding the halves itself: one row per addon, with its kind, source (`marketplace` / `bundle` / `catalog` / `local`), status, name and version.
 
 ```bash
 cinna skills list crm-agent
@@ -268,23 +268,26 @@ cinna skills list crm-agent
 
 ```
 Agent: CRM Agent
-                                 Addons (3)
-┏━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ # ┃ Kind   ┃ Source      ┃ Status                ┃ Name                  ┃
-┡━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━┩
-│ 1 │ plugin │ marketplace │ ● ok                  │ pdf-tools (PDF Tools) │
-│ 2 │ skill  │ local       │ ● ok                  │ report · published    │
-│ 3 │ skill  │ local       │ ! secrets             │ draft                 │
-└───┴────────┴─────────────┴───────────────────────┴───────────────────────┘
+                                Addons (3)
+┏━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+┃ # ┃ Kind   ┃ Source      ┃ Status    ┃ Name                  ┃ Version ┃
+┡━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+│ 1 │ plugin │ marketplace │ ● ok      │ pdf-tools (PDF Tools) │ 2.1.0   │
+│ 2 │ skill  │ local       │ ● ok      │ report · published    │ 1.0.1   │
+│ 3 │ skill  │ local       │ ! secrets │ draft                 │         │
+└───┴────────┴─────────────┴───────────┴───────────────────────┴─────────┘
 1 plugin(s), 2 skill(s) (2 of them this agent's own).
 
 ! draft (secrets): This skill holds files that look like key material.
     .env
+
+A blank version means no `version:` in the skill's SKILL.md — or an index built
+before skills carried one, which fills in after the next refresh or publish.
 ```
 
 `Name` is the engine-facing folder name — the string `cinna skills publish` takes back — with the display name beside it when they differ. `· published` marks a local skill that already has a catalog package, so a re-publish appends a revision instead of creating a second package. The status column carries the server's own code (`secrets`, `oversized`, `shadowed` for warnings; `missing_description`, `name_mismatch`, `source_unavailable`, `orphan` for errors), and the platform's own sentence for each flagged row — with the offending files for `secrets` — follows under the table. Reads the server's cache, so it never wakes a sleeping environment: when the skill half could not be read the plugin rows still list and the reason is printed (`env_not_running`, `adapter_error`, `parse_error`) instead of a short list looking complete. `--json` prints the raw payload (`addons`, `counts`, `skills_error`) for a script or a local coding agent.
 
-### `cinna skills publish <agent> <name> [--visibility public|private|users] [--grant EMAIL ...] [--version V] [--notes TEXT] [--package-id ID] [--json]`
+### `cinna skills publish <agent> <name> [--visibility public|private|users] [--grant EMAIL ...] [--version V] [--notes TEXT] [--package-id ID] [--dry-run] [--yes] [--json]`
 
 Publish one of the agent's own skills to the instance skills catalog, where other agents can install it. `<name>` is the folder name from `cinna skills list`. Requires the `agent-developer` role on an agent that is not a foreign install; the skill must be clean (no parse error, no files that look like key material).
 
@@ -292,14 +295,27 @@ Publish one of the agent's own skills to the instance skills catalog, where othe
 
 **Without `--visibility` the package is private and nobody else sees it.** Say `--visibility public` for the catalog, or `--visibility users` with `--grant` for named people.
 
+**The version is derived, not typed.** A skill's version is a line in its own `SKILL.md`, and the platform continues the series for you: the header's version if it has not been published yet, otherwise the next one after the newest release (the last run of digits incremented — `1.0.0`→`1.0.1`, `v3`→`v4`), or `1.0.0` for a skill nobody has versioned. The resolved version is written back into `skills/<name>/SKILL.md` on the environment before the snapshot, so the published bytes carry their own version and your next `cinna sync` brings the stamped header down. `--version` overrides it verbatim for one revision — after which the series continues from *that*. `--dry-run` prints the version, package id and revision number a publish would take, from the same code that will take them, and publishes nothing.
+
 ```bash
+cinna skills publish crm-agent report --dry-run
 cinna skills publish crm-agent report --visibility public \
-    --version 1.2.0 --notes "Adds the quarterly rollup"
+    --notes "Adds the quarterly rollup"
 cinna skills publish crm-agent report --visibility users \
     --grant alice@example.com --grant bob@example.com
 ```
 
-A re-publish appends a revision to the same package, so `--package-id` (the reverse-DNS id, e.g. `com.acme.report`) is only for a first publish — a mismatch on a later one is refused rather than silently ignored. `--visibility` is likewise honoured on a first publish and on an explicit change; omitting it leaves the package as it is. `--grant` requires `--visibility users` and the CLI refuses the combination otherwise, before anything is written. The server would accept it — it stores the grant either way — but a package that is private or public never consults its grant list, so the publish would report success and share nothing, and a revision cannot be taken back. Within a `users` package `--grant` is strictly **additive**: it adds the addresses it names and never revokes the ones it omits (revoking is its own verb in the web UI), and an unknown address fails the whole publish rather than half-sharing it. On success the package id, revision, visibility and catalog URL are printed. A refusal is printed as the platform's own sentence with its code (`not_developer`, `foreign_install`, `no_environment`, `workspace_unavailable`, `skill_contains_secrets` — which also lists the offending files), and `--json` prints `{revision, package, catalog_url}` instead of the human block.
+```
+Re-publish report from CRM Agent
+  Version:    1.0.2  (header 1.0.1, latest published 1.0.1)
+  Package:    com.example.skill.report
+  Revision:   3
+Publish? [Y/n]:
+```
+
+At a terminal that preview is shown and confirmed before the press; `--yes`, `--json` and `--no-input` publish straight away. `--package-id` is optional too — omitted, it is derived as `<reversed host>.skill.<name>`, with your own publisher slug appended when that id is already taken on the instance (`--dry-run` says when that happened, since a hex tail in your own package id has no other explanation).
+
+A re-publish appends a revision to the same package, so `--package-id` (the reverse-DNS id, e.g. `com.acme.report`) is only for a first publish — a mismatch on a later one is refused rather than silently ignored. `--visibility` is likewise honoured on a first publish and on an explicit change; omitting it leaves the package as it is. `--grant` requires `--visibility users` and the CLI refuses the combination otherwise, before anything is written. The server would accept it — it stores the grant either way — but a package that is private or public never consults its grant list, so the publish would report success and share nothing, and a revision cannot be taken back. Within a `users` package `--grant` is strictly **additive**: it adds the addresses it names and never revokes the ones it omits (revoking is its own verb in the web UI), and an unknown address fails the whole publish rather than half-sharing it. On success the package id, revision and its version, visibility and catalog URL are printed, plus a line saying the version landed in `skills/<name>/SKILL.md` — and a warning instead when it could not be written there, because the header and the catalog have then diverged and the next publish continues from the catalog. A refusal is printed as the platform's own sentence with its code (`not_developer`, `foreign_install`, `no_environment`, `workspace_unavailable`, `package_id_immutable`, `skill_contains_secrets` — which also lists the offending files), and `--json` prints `{revision, package, catalog_url, skill_md_updated}` instead of the human block (`--dry-run --json` prints the preview payload).
 
 ### `cinna connect agent-api --producer <agent> --consumer <agent> [--label TEXT] [--read-only]`
 

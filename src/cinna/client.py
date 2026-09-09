@@ -905,6 +905,27 @@ class AccountClient:
         """
         return self._proxy_json("GET", f"agents/{agent_id}/addons")
 
+    def get_skill_publish_preview(self, agent_id: str, name: str) -> dict:
+        """GET /api/v1/agents/{id}/skills/{name}/publish-preview — what a publish would do.
+
+        ``SkillPublishPreview``: the ``version`` and reverse-DNS ``package_id``
+        the publish would take (computed by the same code that will take them),
+        plus ``header_version`` (``version:`` as ``SKILL.md`` stands now),
+        ``latest_published_version``, ``package_id_disambiguated``,
+        ``is_republish`` and ``next_revision_number``.
+
+        Nothing here is a promise. The values are re-derived inside the publish
+        lock, so a concurrent publish can still move the revision number; and
+        the preview runs the authorization gate and the workspace lookup but
+        **not** the three content checks (secrets, malformed skill, budget), so
+        a preview that answers is not a publish that will.
+        """
+        return self._proxy_json(
+            "GET",
+            f"agents/{agent_id}/skills/{quote(name, safe='')}/publish-preview",
+            coded=True,
+        )
+
     def publish_agent_skill(
         self,
         agent_id: str,
@@ -922,6 +943,14 @@ class AccountClient:
         ``CodedRefusal`` with the server's code (``not_developer``,
         ``foreign_install``, ``no_environment``, ``workspace_unavailable``,
         ``skill_contains_secrets``, …) and its own sentence.
+
+        ``version`` is normally omitted: the platform derives it from the
+        skill's own ``SKILL.md`` header (the header's version, else the
+        successor of the newest release, else ``1.0.0``) and writes the
+        resolved value back into that file before the snapshot is taken. An
+        explicit value wins verbatim and is never de-duplicated — two revisions
+        may legitimately carry one version — and must be a single line of at
+        most 64 characters, since it is interpolated into a frontmatter block.
 
         Only the fields the caller supplied go into the body. For the nullable
         ones (``version``, ``release_notes``, ``visibility``, ``package_id``)

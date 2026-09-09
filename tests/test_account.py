@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 import respx
 from click.testing import CliRunner
@@ -17,6 +18,7 @@ from cinna.account import (
     resolve_child_workspace,
     save_account_config,
 )
+from cinna import console
 from cinna.client import AccountClient
 from cinna.config import CinnaConfig, lookup_agent_registry, save_config, upsert_agent_registry
 from cinna.errors import AuthenticationError, CodedRefusal, PlatformError
@@ -3311,6 +3313,7 @@ ADDONS_PAYLOAD = {
             "source": "marketplace",
             "name": "pdf-tools",
             "display_name": "PDF Tools",
+            "version": "2.1.0",
             "status": "ok",
             "status_code": None,
             "can_manage": True,
@@ -3322,6 +3325,7 @@ ADDONS_PAYLOAD = {
             "source": "local",
             "name": "report",
             "display_name": "report",
+            "version": "1.0.1",
             "status": "ok",
             "status_code": None,
             "can_share": True,
@@ -3381,6 +3385,80 @@ def test_skills_list_renders_kind_source_status_name(
 
 
 @patch("cinna.account.AccountClient")
+def test_skills_list_shows_each_addons_version(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A skill's version is a line in its own SKILL.md — the row reports it."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = ADDONS_PAYLOAD
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "1.0.1" in result.output and "2.1.0" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_keeps_a_bracketed_version_intact(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A version is free text, and Rich eats square brackets as markup.
+
+    `1.0[beta]` rendering as `1.0` would silently mis-report the one fact the
+    column exists for.
+    """
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = {
+        **ADDONS_PAYLOAD,
+        "addons": [{**ADDONS_PAYLOAD["addons"][1], "version": "1.0[beta]"}],
+    }
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "1.0[beta]" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_says_a_blank_version_can_be_a_stale_index(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`draft` carries no version, and the reason may be the index, not the file.
+
+    The addons route is cache-only, and an environment built before skills
+    carried a version reports none until a refresh backfills it — a blank that
+    means "not read yet", not "not written".
+    """
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = ADDONS_PAYLOAD
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "refresh or publish" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_omits_the_version_caveat_when_every_skill_has_one(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = {
+        **ADDONS_PAYLOAD,
+        "addons": [a for a in ADDONS_PAYLOAD["addons"] if a["name"] != "draft"],
+    }
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "refresh or publish" not in result.output
+
+
+@patch("cinna.account.AccountClient")
 def test_skills_list_marks_already_published_local_skills(
     mock_client_cls, runner, account_root, monkeypatch
 ):
@@ -3414,6 +3492,65 @@ def test_skills_list_reports_an_unreadable_skill_index(
 
 
 @patch("cinna.account.AccountClient")
+def test_skills_list_keeps_a_bracketed_secret_path_intact(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The path IS the message on a `secrets` row.
+
+    `config[dev].env` rendered as `config.env` would name a file that does not
+    exist as the one blocking the publish.
+    """
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    flagged = ADDONS_PAYLOAD["addons"][2]
+    mock_client.get_agent_addons.return_value = {
+        **ADDONS_PAYLOAD,
+        "addons": [
+            {
+                **flagged,
+                "skills": [
+                    {
+                        **flagged["skills"][0],
+                        "warning": {
+                            **flagged["skills"][0]["warning"],
+                            "paths": ["config[dev].env"],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "config[dev].env" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_never_claims_an_unread_index_is_an_empty_one(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """An agent whose addons are all skills lists nothing when the index is
+    unreadable — saying it carries none would be the exact false completeness
+    the `skills_error` warning exists to prevent."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = {
+        **ADDONS_PAYLOAD,
+        "addons": [],
+        "counts": {},
+        "skills_error": "env_not_running",
+    }
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "carries no plugins or skills" not in result.output
+    assert "env_not_running" in result.output
+
+
+@patch("cinna.account.AccountClient")
 def test_skills_list_unknown_agent_never_calls_the_route(
     mock_client_cls, runner, account_root, monkeypatch
 ):
@@ -3440,6 +3577,230 @@ _PACKAGE = {
     "visibility": "users",
     "latest_version": "1.2.0",
 }
+
+
+_PREVIEW = {
+    "version": "1.0.2",
+    "header_version": "1.0.1",
+    "latest_published_version": "1.0.1",
+    "package_id": "com.example.skill.report",
+    "package_id_disambiguated": False,
+    "is_republish": True,
+    "next_revision_number": 3,
+}
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_dry_run_publishes_nothing(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The preview says what a publish would take; nothing is taken."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_skill_publish_preview.return_value = _PREVIEW
+
+    result = runner.invoke(
+        cli, ["skills", "publish", "CRM Agent", "report", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.get_skill_publish_preview.assert_called_once_with("agent-123", "report")
+    mock_client.publish_agent_skill.assert_not_called()
+    assert "1.0.2" in result.output
+    assert "com.example.skill.report" in result.output
+    # The derived version is only readable next to where it came from.
+    assert "header 1.0.1" in result.output
+    assert "Nothing was published" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_dry_run_explains_a_disambiguated_package_id(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A hex tail in your own package id has no other explanation."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_skill_publish_preview.return_value = {
+        **_PREVIEW,
+        "package_id": "com.example.skill.report-a1b2c3d4",
+        "package_id_disambiguated": True,
+    }
+
+    result = runner.invoke(
+        cli, ["skills", "publish", "CRM Agent", "report", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "already taken" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_dry_run_json_is_the_preview_payload(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_skill_publish_preview.return_value = _PREVIEW
+
+    result = runner.invoke(
+        cli, ["skills", "publish", "CRM Agent", "report", "--dry-run", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["version"] == "1.0.2"
+    assert payload["next_revision_number"] == 3
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_confirms_at_a_terminal(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A human sees the derived version before the press, and may decline."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setattr(console, "interactive", lambda: True)
+    monkeypatch.setattr(console, "confirm", lambda *a, **k: False)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_skill_publish_preview.return_value = _PREVIEW
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report"])
+    assert result.exit_code != 0
+    assert "1.0.2" in result.output
+    mock_client.publish_agent_skill.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_never_prompts_a_scripted_caller(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """--yes, --json and a pipe all publish straight away.
+
+    The verb shipped without a confirmation, so an existing automation must not
+    start blocking on one — and must not pay for a preview it never reads.
+    """
+    monkeypatch.chdir(account_root)
+    monkeypatch.setattr(console, "interactive", lambda: True)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.return_value = _REVISION
+    mock_client.get_skill_package.return_value = _PACKAGE
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report", "--yes"])
+    assert result.exit_code == 0, result.output
+    mock_client.get_skill_publish_preview.assert_not_called()
+    mock_client.publish_agent_skill.assert_called_once()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_survives_a_platform_with_no_preview_route(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The preview is a courtesy; its absence must not refuse the publish."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setattr(console, "interactive", lambda: True)
+    monkeypatch.setattr(console, "confirm", lambda *a, **k: True)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_skill_publish_preview.side_effect = CodedRefusal(
+        404, "not_found", "No such route."
+    )
+    mock_client.publish_agent_skill.return_value = _REVISION
+    mock_client.get_skill_package.return_value = _PACKAGE
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report"])
+    assert result.exit_code == 0, result.output
+    mock_client.publish_agent_skill.assert_called_once()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_refuses_a_version_the_header_could_not_carry(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A newline would inject top-level keys into the author's frontmatter."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(
+        cli,
+        ["skills", "publish", "CRM Agent", "report", "--version", "1.0\nname: evil"],
+    )
+    assert result.exit_code != 0
+    assert "single line" in result.output
+    mock_client.publish_agent_skill.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_refuses_an_empty_version(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The server would ignore it and derive one — an override that is not."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(
+        cli, ["skills", "publish", "CRM Agent", "report", "--version", "   "]
+    )
+    assert result.exit_code != 0
+    mock_client.publish_agent_skill.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_says_the_version_landed_in_skill_md(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The publish edited a workspace file the local mirror is a sync behind."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.return_value = {
+        **_REVISION,
+        "frontmatter": {"name": "report", "version": "1.2.0"},
+    }
+    mock_client.get_skill_package.return_value = _PACKAGE
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report"])
+    assert result.exit_code == 0, result.output
+    assert "skills/report/SKILL.md" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_warns_when_the_header_could_not_be_stamped(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A revision with a version its own stored frontmatter lacks is the
+    degraded write-back path: the catalog has the version, the file does not."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.return_value = {
+        **_REVISION,
+        "frontmatter": {"name": "report", "description": "Reports."},
+    }
+    mock_client.get_skill_package.return_value = _PACKAGE
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report"])
+    assert result.exit_code == 0, result.output
+    assert "could not be written" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_stays_silent_when_the_payload_cannot_say(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """No frontmatter in the response is "not reported", not "not written"."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.return_value = _REVISION
+    mock_client.get_skill_package.return_value = _PACKAGE
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report"])
+    assert result.exit_code == 0, result.output
+    assert "could not be written" not in result.output
+    assert "SKILL.md" not in result.output
 
 
 @patch("cinna.account.AccountClient")
@@ -3551,6 +3912,24 @@ def test_skills_list_json_prints_the_raw_payload(
     payload = json.loads(result.output)
     assert payload["counts"]["local_skills"] == 2
     assert [a["name"] for a in payload["addons"]] == ["pdf-tools", "report", "draft"]
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_survives_a_transport_error_after_committing(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A dropped connection on the follow-up lookup must not report a publish
+    that COMMITTED as a failure — the user would re-run and append a second
+    immutable revision to the catalog."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.return_value = _REVISION
+    mock_client.get_skill_package.side_effect = httpx.ConnectError("connection lost")
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report"])
+    assert result.exit_code == 0, result.output
+    assert "https://ui.example.com/catalog/skills/pkg-uuid" in result.output
 
 
 @patch("cinna.account.AccountClient")

@@ -216,6 +216,34 @@ def test_get_agent_addons_targets_the_platform_route(account_client):
 
 
 @respx.mock
+def test_get_skill_publish_preview_targets_the_preview_route(account_client):
+    """The read behind `--dry-run` and the pre-publish confirmation."""
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(
+        200,
+        json={
+            "version": "1.0.2",
+            "header_version": "1.0.1",
+            "latest_published_version": "1.0.1",
+            "package_id": "com.example.skill.pdf-report",
+            "package_id_disambiguated": False,
+            "is_republish": True,
+            "next_revision_number": 3,
+        },
+        headers={"X-Cinna-Proxied": "1"},
+    )
+
+    out = account_client.get_skill_publish_preview("agent-123", "pdf-report")
+    assert out["version"] == "1.0.2"
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {
+        "method": "GET",
+        "path": "agents/agent-123/skills/pdf-report/publish-preview",
+    }
+
+
+@respx.mock
 def test_publish_agent_skill_omits_unset_fields(account_client):
     """Only what the caller supplied reaches the wire.
 
