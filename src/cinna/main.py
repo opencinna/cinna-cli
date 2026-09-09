@@ -772,6 +772,32 @@ def agent_restart_env(agent_ref: str):
     run_agent_restart_env(agent_ref)
 
 
+@agent.command(name="rebuild-env")
+@click.argument("agent_ref")
+@click.option(
+    "--yes",
+    "yes",
+    is_flag=True,
+    help=(
+        "Skip the 'this takes a few minutes' confirmation. Does NOT skip the "
+        "unsynced-local-changes prompt, which still aborts on a dirty "
+        "workspace — run 'cinna sync push --agent <name>' first."
+    ),
+)
+def agent_rebuild_env(agent_ref: str, yes: bool):
+    """Rebuild AGENT_REF's environment (pick up new platform features).
+
+    Heavier than 'restart-env' and not the same thing: a restart re-runs the
+    same image, a rebuild replaces the container's core from the template. Use
+    this when an environment built before a feature existed cannot answer for
+    it — e.g. a skills refresh that keeps reporting 'adapter_unsupported'.
+    Takes a few minutes and blocks until it is done.
+    """
+    from cinna.account import run_agent_rebuild_env
+
+    run_agent_rebuild_env(agent_ref, yes=yes)
+
+
 @agent.command(name="show")
 @click.argument("agent_ref")
 @click.option(

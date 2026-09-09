@@ -134,8 +134,16 @@ without `cinna api`, and without anyone typing a UUID.
    environment. It rebuilds the skill index and, where the platform has it, the
    plugin half too, and reports how many skills were indexed.
 3. If the index still cannot be read, the refresh says so rather than claiming
-   success: the environment's skill adapter is not answering, and the next step
-   is `cinna agent restart-env <agent>`, not another refresh.
+   success — and names the remedy *that reason code* has, because the four codes
+   do not share one. Both `list` and `refresh` read the same table:
+   `env_not_running` → wake it (send it a message, or refresh again);
+   `adapter_error` → `cinna agent restart-env <agent>`, the adapter is not
+   answering; `adapter_unsupported` → `cinna agent rebuild-env <agent>`, the
+   container predates agent skills and has no skills endpoint, so neither a
+   refresh nor a restart of the same image can ever reach one; `parse_error` →
+   `cinna skills refresh <agent>`, the environment answered but the index did
+   not parse. An unrecognised code names **no** verb — guessing one sends the
+   caller round a loop that cannot close.
 4. `cinna skills list <agent>` again.
 
 ### Share a private skill with named people

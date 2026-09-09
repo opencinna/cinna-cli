@@ -18,8 +18,9 @@ out of scope here — see Agent Schedules.)
   `agent sync` / `agent unsync` (so a synced workspace equals a `cinna setup` one).
 - `src/cinna/config.py` — `CinnaConfig`, the agent registry (`~/.cinna/agents.json`)
   writers, and the `agents/<slug>/` layout helpers.
-- Tests: `tests/test_account.py` — sync/unsync/create/restart-env/show/status
-  command tests plus the `AccountClient` endpoint tests (see "Command surface").
+- Tests: `tests/test_account.py` — sync/unsync/create/restart-env/rebuild-env/
+  show/status command tests plus the `AccountClient` endpoint tests (see
+  "Command surface").
 
 ## Command surface
 
@@ -30,6 +31,7 @@ Each `cinna agent` verb → its Click stub in `src/cinna/main.py` → its handle
 - `cinna agent unsync` → `src/cinna/main.py:agent_unsync()` → `account.py:run_agent_unsync()`
 - `cinna agent create` → `src/cinna/main.py:agent_create()` → `account.py:run_agent_create()`
 - `cinna agent restart-env` → `src/cinna/main.py:agent_restart_env()` → `account.py:run_agent_restart_env()`
+- `cinna agent rebuild-env` → `src/cinna/main.py:agent_rebuild_env()` → `account.py:run_agent_rebuild_env()`
 - `cinna agent show` → `src/cinna/main.py:agent_show()` → `account.py:run_agent_show()`
 - `cinna agent status show` → `src/cinna/main.py:agent_status_show()` → `account.py:run_status_show(force_refresh=False)`
 - `cinna agent status refresh` → `src/cinna/main.py:agent_status_refresh()` → `account.py:run_status_show(force_refresh=True)`
@@ -60,6 +62,23 @@ The group/subgroup objects are `src/cinna/main.py:agent()` and
   child workspace exists (`resolve_child_workspace()`), read `sync_session.status()`
   and warn+confirm when `pending_to_remote > 0` or `conflict_count > 0`; then
   `AccountClient.restart_agent_env()` (blocking) and print status.
+- `src/cinna/account.py:run_agent_rebuild_env()` — the same shape as
+  `run_agent_restart_env()` plus a second gate: the D2 unsynced-changes
+  warn+confirm, then a `Rebuild …?` confirmation (default No) that `--yes`
+  skips. `--yes` deliberately does **not** disarm the D2 guard, so it is not a
+  general non-interactive switch. Then `AccountClient.rebuild_agent_env()`
+  (blocking, 1800 s) and print status. When the response's `was_running` is
+  false and the post-rebuild `status` is not `running`, it adds the "left
+  stopped" note — a rebuild restores the state it found, and silence there
+  turns "rebuilt successfully" into a container that still answers nothing.
+- `src/cinna/account.py:_index_error_remedy(code, ref)` — the one table mapping
+  a `skills_error` / refresh `error` code to its remedy lines. All four platform
+  codes are named (`env_not_running` → wake it, `adapter_error` →
+  `restart-env`, `adapter_unsupported` → `rebuild-env`, `parse_error` →
+  `skills refresh`); an unrecognised code gets a generic line and **no** verb.
+  Both `run_skills_refresh()` and `_print_addons()` (i.e. `cinna skills list`)
+  route through it — before that each hardcoded a single remedy and was
+  therefore wrong for most codes.
 - `src/cinna/account.py:run_agent_show()` — `AccountClient.inspect_agent()` then
   render prompts (`entrypoint`/`workflow`/`refiner`), features, credential
   name+type, and `agent_api_status` via `_print_agent_api_status()`. Truncates
@@ -113,6 +132,13 @@ under `/api/v1/cli/account/`:
 - `POST …/agents/{id}/restart-env` (`AccountClient.restart_agent_env`) — bounce
   the container; **blocks until back**; returns `{environment_id, status,
   status_message}`.
+- `POST …/agents/{id}/rebuild-env` (`AccountClient.rebuild_agent_env`) — recreate
+  the container, replacing `/app/core` from the template: the only way a
+  container built before a feature gains that feature's routes, which a restart
+  of the same image cannot do. **Blocks for the whole rebuild**, so the call
+  carries its own 1800 s timeout rather than the client default. Returns
+  `{environment_id, status, status_message, was_running}`; `was_running` is what
+  lets the CLI explain a successful rebuild that came back stopped.
 - `GET  …/agents/{id}/inspect` (`AccountClient.inspect_agent`) — effective
   `{name, id, prompts:{entrypoint,workflow,refiner}, features, credentials:[{name,
   type}], agent_api_status}` (never secret values).
@@ -125,8 +151,8 @@ under `/api/v1/cli/account/`:
   or `/run:<name>`; empty string opts out).
 
 `sync_session` (Mutagen wrapper) is the only non-HTTP external touch:
-`sync_session.stop()` on unsync, `sync_session.status()` for the restart-env
-guard — both shared with the rest of the CLI, not specific to this feature.
+`sync_session.stop()` on unsync, `sync_session.status()` for the restart-env and
+rebuild-env guards — both shared with the rest of the CLI, not specific to this feature.
 
 ## Edge cases & guardrails (preserve these)
 

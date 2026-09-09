@@ -392,10 +392,18 @@ downstream still runs, unchanged.
   the packages it excluded.
 - **A refresh that could not read the index answers 200.** The reason arrives in
   `AgentSkillsPublic.error` (`adapter_error`, …), so the verb inspects it and
-  warns instead of printing a green check; the remedy it names is
-  `cinna agent restart-env`, because the failing part is the environment's
-  adapter, not the cache. `cinna skills list` names `cinna skills refresh` in
-  the same spirit — the `skills_error` warning previously had no next step.
+  warns instead of printing a green check. **The remedy comes from
+  `_index_error_remedy(code, ref)`, not from the call site** — one code, one
+  remedy, because the codes exist precisely because the fixes differ:
+  `env_not_running` → wake it, `adapter_error` → `cinna agent restart-env`,
+  `adapter_unsupported` → `cinna agent rebuild-env`, `parse_error` →
+  `cinna skills refresh`, unknown → a generic line naming no verb.
+  `run_skills_refresh()` and `_print_addons()` (`cinna skills list`) both route
+  through it. Each used to hardcode one remedy for every code, so
+  `adapter_unsupported` was told to restart an image that cannot grow the route
+  — and `skills list` went further and called a *refresh* a "Rebuild", the exact
+  conflation this vocabulary exists to prevent, in the read command an LLM
+  caller reaches first.
 - **A grant's `id` is the grant row, never the user.** Revoking addresses
   `user_id`; falling back to `id` would delete nothing and report success.
 - **A plugin mutation can half-succeed.** `PluginSyncResponse` reports the

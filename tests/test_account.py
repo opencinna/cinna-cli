@@ -2609,6 +2609,152 @@ def test_agent_restart_env_warns_on_unsynced_edits(
     mock_client.restart_agent_env.assert_called_once_with("agent-123")
 
 
+# --- cinna agent rebuild-env ---
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_rebuild_env(mock_client_cls, runner, account_root, monkeypatch):
+    """`cinna agent rebuild-env` confirms, resolves the agent, prints status."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.rebuild_agent_env.return_value = {
+        "environment_id": "env-1",
+        "status": "running",
+        "status_message": "Environment rebuilt successfully",
+        "was_running": True,
+    }
+
+    result = runner.invoke(cli, ["agent", "rebuild-env", "CRM Agent"], input="y\n")
+    assert result.exit_code == 0, result.output
+    mock_client.rebuild_agent_env.assert_called_once_with("agent-123")
+    assert "running" in result.output
+    assert "Environment rebuilt successfully" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_rebuild_env_declined_never_reaches_the_route(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A rebuild recreates the container and takes minutes — declining the
+    prompt has to mean nothing happened, not "asked and did it anyway"."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(cli, ["agent", "rebuild-env", "CRM Agent"], input="n\n")
+    assert result.exit_code != 0
+    mock_client.rebuild_agent_env.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_rebuild_env_yes_skips_the_prompt(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """--yes is what makes the verb scriptable: no stdin, still rebuilds."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.rebuild_agent_env.return_value = {
+        "environment_id": "env-1",
+        "status": "running",
+        "status_message": None,
+        "was_running": True,
+    }
+
+    result = runner.invoke(cli, ["agent", "rebuild-env", "CRM Agent", "--yes"])
+    assert result.exit_code == 0, result.output
+    mock_client.rebuild_agent_env.assert_called_once_with("agent-123")
+    assert "Rebuild CRM Agent's environment?" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_rebuild_env_says_when_it_left_the_environment_stopped(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A rebuild restores the state it found, so a stopped environment comes
+    back stopped. Saying nothing is how "rebuilt successfully" becomes a
+    container that still answers nothing."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.rebuild_agent_env.return_value = {
+        "environment_id": "env-1",
+        "status": "stopped",
+        "status_message": None,
+        "was_running": False,
+    }
+
+    result = runner.invoke(cli, ["agent", "rebuild-env", "CRM Agent", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "left stopped" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_rebuild_env_stays_quiet_when_it_came_back_running(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The stopped note is for the case it describes; on a running environment
+    it would be a plain falsehood."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.rebuild_agent_env.return_value = {
+        "environment_id": "env-1",
+        "status": "running",
+        "status_message": None,
+        "was_running": True,
+    }
+
+    result = runner.invoke(cli, ["agent", "rebuild-env", "CRM Agent", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "left stopped" not in result.output
+
+
+@patch("cinna.account.sync_session.status")
+@patch("cinna.account.resolve_child_workspace")
+@patch("cinna.account.AccountClient")
+def test_agent_rebuild_env_warns_on_unsynced_edits(
+    mock_client_cls, mock_resolve, mock_status, runner, account_root, monkeypatch, sample_config
+):
+    """D2, and it matters more here than on restart: a rebuild re-materializes
+    the backend scaffold over a freshly recreated container."""
+    from cinna.sync_session import SyncStatus
+
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_resolve.return_value = (account_root / "agents" / "crm-agent", sample_config)
+    mock_status.return_value = SyncStatus(
+        session_name="cinna-abc", state="connected", pending_to_remote=3
+    )
+
+    # Decline the D2 confirmation → abort, rebuild NOT called.
+    result = runner.invoke(cli, ["agent", "rebuild-env", "CRM Agent"], input="n\n")
+    assert result.exit_code != 0
+    assert "unsynced local change" in result.output
+    mock_client.rebuild_agent_env.assert_not_called()
+
+    # Confirm the warning, then the rebuild prompt → proceeds.
+    mock_client.rebuild_agent_env.return_value = {
+        "environment_id": "env-1",
+        "status": "running",
+        "status_message": None,
+        "was_running": True,
+    }
+    result = runner.invoke(
+        cli, ["agent", "rebuild-env", "CRM Agent"], input="y\ny\n"
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.rebuild_agent_env.assert_called_once_with("agent-123")
+
+
 # --- cinna agent show ---
 
 
@@ -2798,6 +2944,24 @@ def test_account_client_restart_agent_env(account_client):
     result = account_client.restart_agent_env("agent-123")
     assert result["status"] == "running"
     assert route.called
+
+
+@respx.mock
+def test_account_client_rebuild_agent_env(account_client):
+    """Its own route, and its own timeout: a rebuild recreates the container
+    and re-runs setup, so the default client timeout would abandon a rebuild
+    that is still running server-side."""
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/agents/agent-123/rebuild-env"
+    ).respond(200, json={
+        "environment_id": "env-1", "status": "running",
+        "status_message": None, "was_running": True,
+    })
+    result = account_client.rebuild_agent_env("agent-123")
+    assert result["status"] == "running"
+    assert route.called
+    timeout = route.calls[0].request.extensions.get("timeout") or {}
+    assert timeout.get("read") == 1800.0
 
 
 @respx.mock
@@ -4829,20 +4993,213 @@ def test_skills_refresh_that_could_not_read_the_index_is_not_a_success(
 
 
 @patch("cinna.account.AccountClient")
+def test_skills_refresh_names_the_rebuild_verb_for_a_pre_feature_environment(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`adapter_unsupported` is the one code where restarting is guaranteed not
+    to help: a container built before agent skills has no /config/skills route,
+    and re-running the same image cannot grow one. Only a rebuild can."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.refresh_agent_skills.return_value = {
+        "agent_id": "agent-123",
+        "skills": [],
+        "error": "adapter_unsupported",
+    }
+    mock_client.refresh_agent_addons.return_value = {}
+
+    result = runner.invoke(cli, ["skills", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "adapter_unsupported" in result.output
+    assert "cinna agent rebuild-env crm-agent" in result.output
+    assert "restart" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_refresh_still_names_restart_when_the_adapter_errors(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The per-code routing must not cost the code that already had the right
+    remedy: an environment that is up but not answering does want a restart."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.refresh_agent_skills.return_value = {
+        "agent_id": "agent-123",
+        "skills": [],
+        "error": "adapter_error",
+    }
+    mock_client.refresh_agent_addons.return_value = {}
+
+    result = runner.invoke(cli, ["skills", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "cinna agent restart-env crm-agent" in result.output
+    assert "rebuild-env" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_refresh_tells_a_sleeping_environment_to_be_woken(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """Nothing is broken when the environment is simply asleep, so neither
+    heavy verb applies — waking it is the whole fix."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.refresh_agent_skills.return_value = {
+        "agent_id": "agent-123",
+        "skills": [],
+        "error": "env_not_running",
+    }
+    mock_client.refresh_agent_addons.return_value = {}
+
+    result = runner.invoke(cli, ["skills", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "wake it" in result.output
+    assert "restart-env" not in result.output
+    assert "rebuild-env" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_refresh_names_a_re_read_for_a_parse_error(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`parse_error` is the fourth code the platform emits, and the one the
+    fallback used to swallow: the environment answered, the payload just was
+    not an index, so re-reading is the fix and is worth naming."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.refresh_agent_skills.return_value = {
+        "agent_id": "agent-123",
+        "skills": [],
+        "error": "parse_error",
+    }
+    mock_client.refresh_agent_addons.return_value = {}
+
+    result = runner.invoke(cli, ["skills", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "cinna skills refresh crm-agent" in result.output
+    assert "restart-env" not in result.output
+    assert "rebuild-env" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_refresh_invents_no_remedy_for_an_unknown_code(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A code this build cannot name a fix for gets the generic line. Guessing
+    a verb is how the caller ends up in a loop that cannot close."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.refresh_agent_skills.return_value = {
+        "agent_id": "agent-123",
+        "skills": [],
+        "error": "some_future_reason",
+    }
+    mock_client.refresh_agent_addons.return_value = {}
+
+    result = runner.invoke(cli, ["skills", "refresh", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "some_future_reason" in result.output
+    assert "Refresh again" in result.output
+    assert "restart-env" not in result.output
+    assert "rebuild-env" not in result.output
+
+
+def _addons_with_skills_error(code: str) -> dict:
+    """An addons payload whose plugin half is readable and skill half is not."""
+    return {**INSTALLED_ADDONS, "skills_error": code}
+
+
+@patch("cinna.account.AccountClient")
 def test_skills_list_points_a_stale_index_at_the_refresh_verb(
     mock_client_cls, runner, account_root, monkeypatch
 ):
+    """`parse_error` is the code a re-read can actually clear — the environment
+    answered, the payload just was not an index."""
     monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
     mock_client = mock_client_cls.return_value.__enter__.return_value
     mock_client.list_account_agents.return_value = AGENTS_LISTING
-    mock_client.get_agent_addons.return_value = {
-        **INSTALLED_ADDONS,
-        "skills_error": "adapter_error",
-    }
+    mock_client.get_agent_addons.return_value = _addons_with_skills_error(
+        "parse_error"
+    )
 
     result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
     assert result.exit_code == 0, result.output
     assert "cinna skills refresh crm-agent" in result.output
+    assert "restart-env" not in result.output
+    assert "rebuild-env" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_names_the_rebuild_verb_for_a_pre_feature_environment(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`list` is the read command an LLM caller reaches first, and it used to
+    hardcode "Rebuild it with: cinna skills refresh" for every code — the wrong
+    verb attached to the one action that cannot fix `adapter_unsupported`."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = _addons_with_skills_error(
+        "adapter_unsupported"
+    )
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "only plugins are listed above" in result.output
+    assert "cinna agent rebuild-env crm-agent" in result.output
+    assert "refresh" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_names_the_restart_verb_when_the_adapter_errors(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """An environment that is up but unreachable wants a restart — the remedy
+    `list` never offered, because it offered a refresh for everything."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = _addons_with_skills_error(
+        "adapter_error"
+    )
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "cinna agent restart-env crm-agent" in result.output
+    assert "rebuild-env" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_names_no_heavy_verb_for_a_sleeping_environment(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """Nothing is broken; it is asleep. Both container verbs would be theatre."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = _addons_with_skills_error(
+        "env_not_running"
+    )
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "asleep" in result.output
+    assert "restart-env" not in result.output
+    assert "rebuild-env" not in result.output
 
 
 @patch("cinna.account.AccountClient")
@@ -4887,3 +5244,69 @@ def test_a_partial_environment_sync_is_not_hidden_by_a_green_check(
     assert result.exit_code == 0, result.output
     assert "1 of 2 environment(s) did not pick it up" in result.output
     assert "restart-env" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_a_pre_feature_environment_is_not_reported_as_a_failed_sync(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`unsupported_syncs` is not a partial failure: the link row is written
+    and correct, and there is nothing to retry. Offering "restart or try
+    again" would be an instruction to repeat something that already worked,
+    followed by a restart that cannot change the outcome."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+    mock_client.install_skill_on_agent.return_value = {
+        "success": True,
+        "message": "Skill added",
+        "plugin_link": {"id": "link-77", "installed_version": "1.1.0"},
+        "total_environments": 2,
+        "failed_syncs": 0,
+        "unsupported_syncs": 1,
+        "partial_failures": False,
+    }
+
+    result = runner.invoke(cli, ["skills", "install", "CRM Agent", "dad-jokes"])
+    assert result.exit_code == 0, result.output
+    assert "The link is updated" in result.output
+    assert "1 of 2 environment(s) were built before this feature" in result.output
+    assert "rebuild-env" in result.output
+    assert "restart" not in result.output
+    # The plain success line would read as "nothing to see here" directly under
+    # a warning that says otherwise.
+    assert "Skill added" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_failed_and_unsupported_syncs_are_reported_as_the_two_things_they_are(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """One environment that can be retried and one that cannot need both
+    remedies; collapsing them loses whichever half is dropped."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+    mock_client.install_skill_on_agent.return_value = {
+        "success": True,
+        "message": "Skill added",
+        "plugin_link": {"id": "link-77", "installed_version": "1.1.0"},
+        "total_environments": 3,
+        "failed_syncs": 1,
+        "unsupported_syncs": 1,
+        "partial_failures": True,
+    }
+
+    result = runner.invoke(cli, ["skills", "install", "CRM Agent", "dad-jokes"])
+    assert result.exit_code == 0, result.output
+    assert "1 of 3 environment(s) were built before this feature" in result.output
+    assert "rebuild-env" in result.output
+    assert "1 of 3 environment(s) did not pick it up" in result.output
+    assert "restart-env" in result.output
+    assert "Skill added" not in result.output

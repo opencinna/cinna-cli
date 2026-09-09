@@ -25,8 +25,8 @@ not exercise schedules here beyond confirming `cinna agent schedule --help` list
 - **Editable install** of the CLI under test:
   `python3 -c "import cinna,os;print(os.path.dirname(cinna.__file__))"` must point
   at this repo's `src/cinna`. Confirm `which cinna` resolves and
-  `cinna agent --help` lists `sync / unsync / create / restart-env / show /
-  status` (and `schedule`).
+  `cinna agent --help` lists `sync / unsync / create / restart-env / rebuild-env /
+  show / status` (and `schedule`).
 - Run every command from the account root (or a nested folder under it). `git`
   and `mutagen` on `PATH` (for the sync/restart scenarios).
 - At least one agent you own; the create scenario provisions a throwaway one.
@@ -183,6 +183,34 @@ not exercise schedules here beyond confirming `cinna agent schedule --help` list
   edits/conflicts exist; the warning firing when there's nothing pending;
   aborting still calling restart.
 
+### 9a. `agent rebuild-env` adds routes a restart cannot
+
+- **Goal:** recover a container built *before* a feature existed — the case a
+  restart provably cannot fix, because it re-runs the same image.
+- **Steps (clean case):**
+  ```
+  cinna skills list acc-test-agent          # reports adapter_unsupported
+  cinna agent rebuild-env acc-test-agent
+  ```
+  **Expected:** `skills list` names `cinna agent rebuild-env acc-test-agent` —
+  **not** a refresh and **not** a restart. The rebuild asks `Rebuild …? This
+  recreates the container and takes a few minutes.` (default No), then blocks
+  with a spinner and prints `Environment rebuilt for …` + `Status:`. Re-running
+  `cinna skills list` no longer reports `adapter_unsupported`.
+- **Steps (was-stopped case):** rebuild an environment that was not running.
+  **Expected:** success, and a note that it *was not running before the rebuild,
+  so it was left stopped* — a rebuild restores the state it found.
+- **Steps (dirty case):** make a local edit but do **not** push it, then
+  `cinna agent rebuild-env acc-test-agent --yes`.
+  **Expected:** `--yes` skips the "takes minutes" confirmation but the unsynced-
+  changes guard **still** warns and asks `Rebuild anyway?`. `--yes` is not a
+  general non-interactive switch; under `--no-input` the guard takes its No
+  default and the rebuild aborts.
+- **Watch for:** `--yes` skipping the D2 guard; the "left stopped" note printed
+  for an environment that came back running (or missing when it did not); the
+  command returning before the rebuild finishes (it must block — the client
+  allows 1800 s for exactly this).
+
 ### 10. `AGENT_REF` resolution: id, slug, ambiguous, unknown
 
 - **Goal:** every verb resolves the agent reference uniformly and fail-loud.
@@ -213,8 +241,15 @@ not exercise schedules here beyond confirming `cinna agent schedule --help` list
   `.cinna/` pair; `agent unsync` removes exactly that pair; neither orphans a
   registry entry nor a dangling `.cinna/`. A failed unsync revoke still reconciles
   local state.
-- **No silent clobber.** Re-sync of a synced agent is refused; restart-env warns
-  before overwriting unsynced edits; user workspace files survive unsync.
+- **No silent clobber.** Re-sync of a synced agent is refused; restart-env and
+  rebuild-env both warn before overwriting unsynced edits; user workspace files
+  survive unsync.
+- **One code, one remedy.** Every surface that reports a skill-index error
+  (`cinna skills list`, `cinna skills refresh`) names the fix *that code* has —
+  `restart-env` for `adapter_error`, `rebuild-env` for `adapter_unsupported`,
+  wake-it for `env_not_running`, `skills refresh` for `parse_error` — and names
+  no verb at all for a code it does not recognise. Never a single hardcoded
+  remedy printed for all of them.
 - **Fail-loud `AGENT_REF`.** Unknown → lists agents; ambiguous → demands the id;
   never a silent wrong-agent action.
 

@@ -537,6 +537,23 @@ class AccountClient:
         )
         return self._handle_response(response).json()
 
+    def rebuild_agent_env(self, agent_id: str) -> dict:
+        """POST /api/v1/cli/account/agents/{id}/rebuild-env — rebuild the env.
+
+        Not a louder restart: this replaces the container's ``/app/core`` from
+        the template, which is the only way a container built before a feature
+        gains that feature's routes. Blocks for the whole rebuild (minutes);
+        returns ``{environment_id, status, status_message, was_running}``.
+        """
+        response = self._client.post(
+            f"/api/v1/cli/account/agents/{agent_id}/rebuild-env",
+            # A rebuild recreates the container and re-runs setup. The default
+            # client timeout is nowhere near that, and a timeout here would
+            # abandon a rebuild that is still running server-side.
+            timeout=1800.0,
+        )
+        return self._handle_response(response).json()
+
     def inspect_agent(self, agent_id: str) -> dict:
         """GET /api/v1/cli/account/agents/{id}/inspect — effective config.
 

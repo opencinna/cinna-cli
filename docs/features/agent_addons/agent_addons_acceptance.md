@@ -566,12 +566,19 @@ could not be done.
 
 On an agent whose environment adapter is broken, the refresh answers **200 with
 `error: adapter_error`** — and must then say so and point at `cinna agent
-restart-env <AGENT>`, not print a green check. `cinna skills list` on the same
-agent names `cinna skills refresh` under its `skills_error` warning.
+restart-env <AGENT>`, not print a green check. On an agent whose container
+predates agent skills the code is `adapter_unsupported`, and both `refresh` and
+`skills list` must point at `cinna agent rebuild-env <AGENT>` instead — a
+restart re-runs the same image and another refresh re-reads a route that is not
+there. `env_not_running` names neither container verb (it is asleep, not
+broken); `parse_error` names `cinna skills refresh`.
 
 **Watch for** — `refresh` failing outright because one of the two routes is
 missing; a refresh that changed nothing reported as a success (the failure
-arrives as a 200, so only reading `error` catches it).
+arrives as a 200, so only reading `error` catches it); **any surface printing
+one remedy for every code** — in particular `cinna skills list` saying "Rebuild
+it with: cinna skills refresh", which is both the wrong verb and the wrong word
+for it.
 
 ### 23. `cinna api` no longer swallows a truncated id
 

@@ -77,6 +77,29 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
    builder is told to `cinna sync push` first.
 3. It blocks until the container is back, then prints the post-restart status.
 
+### Rebuild an environment that predates a feature
+1. `cinna agent rebuild-env <agent_ref> [--yes]` is **not** a louder restart.
+   A restart re-runs the same image, so it can recover a wedged container but
+   can never add a route that was not built into it. A rebuild replaces the
+   container's `/app/core` from the template, which is the only thing that
+   gives a pre-feature container a feature's routes.
+2. Reach for it when a surface reports `adapter_unsupported` — e.g. a skills
+   refresh, or `cinna skills list`, that keeps saying the skill index cannot be
+   read because the container has no skills endpoint. Restarting or refreshing
+   that state is a loop that cannot close.
+3. Same unsynced-local-changes guard as `restart-env`, and it matters more
+   here: a rebuild re-materializes the backend scaffold over a freshly
+   recreated container, so local edits have further to fall.
+4. Then a second confirmation, because this recreates the container and takes
+   minutes. **`--yes` skips only that second prompt.** It deliberately does not
+   disarm the unsynced-changes guard, so `rebuild-env --yes` is not a general
+   non-interactive switch: under `--no-input` on a workspace with pending local
+   changes it still aborts (the guard takes its "no" default).
+5. It blocks for the whole rebuild, then prints the status. A rebuild restores
+   the state it found, so an environment that was stopped comes back stopped —
+   successfully. The command says so rather than letting "rebuilt successfully"
+   mean a container that still answers nothing.
+
 ### Inspect what's live
 1. `cinna agent show <agent_ref>` prints the **effective prompts** (entrypoint,
    workflow, refiner — as the runtime reads them), enabled features, connected
@@ -125,6 +148,7 @@ cinna agent <verb> ── account.py ── AccountClient ──► /api/v1/cli/
       │  unsync→ stop sync + revoke child token + teardown │  DELETE …/tokens/children/{id}
       │  create→ thin agent create                        │  POST …/agents
       │  restart-env→ bounce container (block until up)    │  POST …/agents/{id}/restart-env
+      │  rebuild-env→ recreate container from template     │  POST …/agents/{id}/rebuild-env
       │  show  → effective prompts/features/creds          │  GET  …/agents/{id}/inspect
       │  status→ STATUS.md snapshot / refresh / set-cmd    │  GET/POST …/agents/{id}/status[/refresh-command]
       ▼
@@ -138,7 +162,8 @@ agents/<slug>/  (a normal per-agent workspace — child token, Mutagen, optional
   `cinna account agents` listing every verb resolves against.
 - **Live Sync** (`../live_sync/live_sync.md`) —
   `agent sync` materializes the Mutagen-synced workspace; `agent unsync` tears it
-  down; `restart-env` checks the sync session for unsynced edits before bouncing.
+  down; `restart-env` and `rebuild-env` both check the sync session for unsynced
+  edits before touching the container.
 - **Git Versioning** ([git_versioning](../git_versioning/git_versioning.md)) —
   `agent sync` auto-links the git working tree when the agent is git-versioned,
   identical to `cinna setup`.

@@ -359,7 +359,7 @@ Installing something the agent already carries is answered as a sentence, not a 
 
 Move an installed skill to the package's newest revision, printing the version it moved from and to. `<name>` is the name `cinna skills list` prints; the plugin-link id the route actually addresses is resolved internally. The listing's `has_update` is *reported*, never used to skip the call — it comes from a cache, and the upgrade route is what decides.
 
-Every install / uninstall / update / toggle also pushes the change into the agent's running environments, and that push can partly fail while the call itself succeeds. When it does, the command says how many environments did not take it and points at `cinna agent restart-env` — a green check alone would hide the one case where the catalog and the live agent disagree.
+Every install / uninstall / update / toggle also pushes the change into the agent's running environments, and that push can partly fail while the call itself succeeds. When it does, the command says how many environments did not take it and points at `cinna agent restart-env` — a green check alone would hide the one case where the catalog and the live agent disagree. An environment built *before* the feature existed is reported separately (`unsupported_syncs`): the link write is complete and there is nothing to retry, so that half points at `cinna agent rebuild-env` and suppresses the plain success line rather than offering a restart that cannot change the outcome.
 
 ### `cinna skills uninstall <agent> <name> [--yes] [--json]`
 
@@ -371,9 +371,18 @@ Enable or disable an installed skill, or change where it is offered, without rem
 
 ### `cinna skills refresh <agent> [--json]`
 
-Rebuild the agent's addon index, reporting how many skills were indexed. Everything else in this group reads the platform's cache — which is what makes it safe against a sleeping environment, and what makes a stale index possible. This is the remedy when `cinna skills list` reports `adapter_error` / `env_not_running` / `parse_error`, or shows no version for a skill whose `SKILL.md` has one. The plugin half is refreshed too where the platform offers that route; a platform without it still refreshes the skill half and says so.
+Rebuild the agent's addon index, reporting how many skills were indexed. Everything else in this group reads the platform's cache — which is what makes it safe against a sleeping environment, and what makes a stale index possible. This is the remedy when `cinna skills list` reports `parse_error`, or shows no version for a skill whose `SKILL.md` has one. It is *not* the remedy for every reason code — see below. The plugin half is refreshed too where the platform offers that route; a platform without it still refreshes the skill half and says so.
 
-A refresh that still could not read the index answers **200 with the reason** — so this prints the reason and points at `cinna agent restart-env <agent>` rather than a green check. The failing part is the environment's skill adapter, and running the refresh again will not move it.
+A refresh that still could not read the index answers **200 with the reason** — so this prints the reason and the remedy *that reason* has, rather than a green check. The four codes do not share a fix, and both `skills refresh` and `skills list` route through the same table:
+
+| Code | What it means | The fix it prints |
+|---|---|---|
+| `env_not_running` | The environment is asleep | Send it a message, or refresh again, to wake it |
+| `adapter_error` | Up, but not answering | `cinna agent restart-env <agent>` |
+| `adapter_unsupported` | Built before agent skills existed; no skills endpoint to answer | `cinna agent rebuild-env <agent>` |
+| `parse_error` | Answered, but the index did not parse | `cinna skills refresh <agent>` |
+
+An unrecognised code gets a generic "refresh again, then check the logs" and names **no** verb: a code whose fix this build cannot name is one where guessing a verb sends the caller round a loop that cannot close. That is exactly what the old copy did to `adapter_unsupported` — it printed one hardcoded remedy for every code, so a container missing the route was told to restart (which re-runs the same image) or, in `skills list`, to "Rebuild it with: cinna skills refresh" (which re-reads a route that is not there, and calls a refresh a rebuild).
 
 ### `cinna skills grants <package> [--json]` · `grant <package> --user EMAIL` · `revoke <package> --user EMAIL [--yes]`
 

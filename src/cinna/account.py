@@ -1953,6 +1953,82 @@ def run_agent_restart_env(agent_ref: str) -> None:
         console.console.print(f"  Message: {result['status_message']}")
 
 
+def run_agent_rebuild_env(agent_ref: str, yes: bool = False) -> None:
+    """Rebuild an agent's environment — `cinna agent rebuild-env`.
+
+    The fix for a container that predates a feature. A restart re-runs the same
+    image and cannot add a route that was never built into it; a rebuild
+    replaces ``/app/core`` from the template. Blocks for the whole rebuild.
+
+    Confirms first (unless ``yes``): this recreates the container and takes
+    minutes, which is a heavier thing than the restart sitting next to it in
+    ``--help``.
+    """
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_account_agent(
+            client.list_account_agents().get("data", []), agent_ref
+        )
+
+        # Same D2 guard as restart-env, and it matters more here: a rebuild
+        # re-materializes the backend scaffold over a freshly recreated
+        # container, so unsynced local edits have further to fall.
+        resolved = resolve_child_workspace(account_root, agent_ref)
+        if resolved is not None:
+            _child_root, child_cfg = resolved
+            try:
+                st = sync_session.status(child_cfg)
+            except Exception:
+                st = None
+            if st is not None and st.exists and (
+                st.pending_to_remote > 0 or st.conflict_count > 0
+            ):
+                bits = []
+                if st.pending_to_remote > 0:
+                    bits.append(f"{st.pending_to_remote} unsynced local change(s)")
+                if st.conflict_count > 0:
+                    bits.append(f"{st.conflict_count} conflict(s)")
+                console.warn(
+                    f"This machine has {' and '.join(bits)} for {agent['name']}. "
+                    "A rebuild may overwrite them with the backend scaffold. "
+                    "Run 'cinna sync push --agent "
+                    f"{normalize_agent_dir_name(agent['name'])}' first to be safe."
+                )
+                if not console.confirm("Rebuild anyway?", default=False):
+                    raise click.Abort()
+
+        if not yes and not console.confirm(
+            f"Rebuild {agent['name']}'s environment? This recreates the "
+            "container and takes a few minutes.",
+            default=False,
+        ):
+            raise click.Abort()
+
+        with console.spinner(
+            f"Rebuilding environment for {agent['name']} (this takes a few "
+            "minutes)..."
+        ):
+            result = client.rebuild_agent_env(agent["id"])
+
+    console.status(f"Environment rebuilt for {agent['name']}")
+    console.console.print(f"  Status: {result.get('status')}")
+    if result.get("status_message"):
+        console.console.print(f"  Message: {result['status_message']}")
+
+    # A rebuild restores the state it found. An environment that was stopped
+    # comes back stopped — a success, but not one the user can act on yet, and
+    # saying nothing here is how "rebuilt successfully" becomes a container
+    # that still answers nothing.
+    if not result.get("was_running") and result.get("status") != "running":
+        console.console.print(
+            "  [dim]It was not running before the rebuild, so it was left "
+            "stopped. Send it a message, or refresh its addons, to start "
+            "it.[/dim]"
+        )
+
+
 def _stdout_is_tty() -> bool:
     """Whether stdout is an interactive terminal (vs. piped/redirected)."""
     return sys.stdout.isatty()
@@ -3141,12 +3217,22 @@ def _print_addons(payload: dict, agent_ref: str = "<agent>") -> None:
 
     # The plugin half is returned even when the skill half could not be read —
     # say so rather than letting a short list look complete.
-    if payload.get("skills_error"):
+    #
+    # The remedy comes from the same table `refresh` reads. This used to hard-
+    # code "cinna skills refresh" for every code, which for
+    # `adapter_unsupported` sent the reader round a loop that cannot close: a
+    # refresh re-reads a route the container never had. It also called that
+    # refresh a "Rebuild", which is the exact word this vocabulary reserves for
+    # the one action a refresh is not. `list` is the read command an LLM caller
+    # reaches first, so a wrong verb here is the wrong verb everywhere after it.
+    code = payload.get("skills_error")
+    if code:
         console.warn(
-            f"The skill index could not be read ({payload['skills_error']}); "
-            f"only plugins are listed above.\n"
-            f"Rebuild it with: cinna skills refresh {agent_ref}"
+            f"The skill index could not be read ({code}); only plugins are "
+            f"listed above."
         )
+        for line in _index_error_remedy(code, agent_ref):
+            console.console.print(f"  [dim]{line}[/dim]")
 
 
 def _print_pending_update_hint(addons: list[dict], agent_ref: str) -> None:
@@ -3711,6 +3797,47 @@ def _agent_ref_for_hint(agent: dict) -> str:
     return normalize_agent_dir_name(agent.get("name", "")) or str(agent.get("id", ""))
 
 
+def _index_error_remedy(code: str, ref: str) -> list[str]:
+    """What to actually DO about an unreadable skill index, per reason code.
+
+    One code, one remedy, and the codes exist precisely because the remedies
+    differ. This printed the restart hint for every code, including the one
+    where restarting is the one action guaranteed not to help: a container
+    built before agent skills has no ``/config/skills`` route, and re-running
+    the same image cannot grow one. The advice could not succeed, and the
+    action that does — a rebuild — had no verb to name.
+
+    All four codes the platform emits (``env_not_running``, ``adapter_error``,
+    ``adapter_unsupported``, ``parse_error``) are named here. The fallback is
+    for a code this build has never heard of, and is deliberately the only
+    branch that names no verb — see below.
+    """
+    if code == "adapter_unsupported":
+        return [
+            "This environment was built before agent skills existed, so it has "
+            "no skills endpoint to answer.",
+            f"Rebuild it: cinna agent rebuild-env {ref}",
+        ]
+    if code == "env_not_running":
+        return [
+            "The environment is asleep. Send it a message, or refresh again, "
+            "to wake it.",
+        ]
+    if code == "adapter_error":
+        return [
+            "The environment is not answering.",
+            f"Restart it: cinna agent restart-env {ref}",
+        ]
+    if code == "parse_error":
+        return [
+            "The environment answered, but its skill index did not parse.",
+            f"Re-read it: cinna skills refresh {ref}",
+        ]
+    # An unknown code is one whose fix this build cannot name. Naming a remedy
+    # anyway is how the caller ends up in a loop that cannot close.
+    return ["Refresh again; if it persists, check the environment's logs."]
+
+
 def _print_plugin_sync(result: dict) -> None:
     """The environment half of a plugin mutation, when it has something to say.
 
@@ -3724,14 +3851,31 @@ def _print_plugin_sync(result: dict) -> None:
     if not isinstance(result, dict):
         return
     failed = result.get("failed_syncs") or 0
+    unsupported = result.get("unsupported_syncs") or 0
+    total = result.get("total_environments") or 0
+
+    # A pre-feature environment is reported first and on its own terms. It is
+    # not a failed sync — the link write is complete and correct, and there is
+    # nothing to retry — so the "or try again" copy below would be an
+    # instruction to repeat something that already worked, followed by a
+    # restart that cannot change the outcome.
+    if unsupported:
+        console.warn(
+            f"The link is updated, but {unsupported} of {total} "
+            f"environment(s) were built before this feature existed and "
+            f"cannot pick it up."
+        )
+        console.console.print(
+            "  [dim]Rebuild: cinna agent rebuild-env <agent>[/dim]"
+        )
+
     if result.get("partial_failures") or failed:
-        total = result.get("total_environments") or 0
         console.warn(
             f"The link is updated, but {failed} of {total} environment(s) did "
             f"not pick it up. Restart the environment "
             f"('cinna agent restart-env <agent>') or try again."
         )
-    elif result.get("message"):
+    elif not unsupported and result.get("message"):
         console.console.print(f"  [dim]{_esc(result['message'])}[/dim]")
 
 
@@ -4075,10 +4219,10 @@ def run_skills_refresh(agent_ref: str, as_json: bool = False) -> None:
     if error:
         console.warn(
             f"{agent['name']}'s skill index was rebuilt but still could not be "
-            f"read ({error}). The environment's skill adapter is not "
-            f"answering; restart it with 'cinna agent restart-env "
-            f"{_agent_ref_for_hint(agent)}' and try again."
+            f"read ({error})."
         )
+        for line in _index_error_remedy(error, _agent_ref_for_hint(agent)):
+            console.console.print(f"  [dim]{line}[/dim]")
         return
 
     indexed = len((skills_result or {}).get("skills") or [])
