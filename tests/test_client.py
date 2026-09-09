@@ -6,7 +6,7 @@ import respx
 
 from cinna.account import AccountConfig
 from cinna.client import AccountClient, PlatformClient
-from cinna.errors import AuthenticationError, PlatformError
+from cinna.errors import AuthenticationError, CodedRefusal, PlatformError
 
 
 @pytest.fixture
@@ -194,3 +194,152 @@ def test_account_client_context_package_version_absent_on_old_backend():
 
     with AccountClient(cfg) as client:
         assert client.get_context_package_version() is None
+
+
+# --- Agent addons + skills catalog (ride the account api-proxy) ---
+
+
+@respx.mock
+def test_get_agent_addons_targets_the_platform_route(account_client):
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(
+        200,
+        json={"agent_id": "agent-123", "addons": [], "counts": {}},
+        headers={"X-Cinna-Proxied": "1"},
+    )
+
+    out = account_client.get_agent_addons("agent-123")
+    assert out["agent_id"] == "agent-123"
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"method": "GET", "path": "agents/agent-123/addons"}
+
+
+@respx.mock
+def test_publish_agent_skill_omits_unset_fields(account_client):
+    """Only what the caller supplied reaches the wire.
+
+    For the nullable fields the server treats null and omission the same, so
+    this pins presentation; for ``grant_emails`` it pins a real constraint (see
+    the null-grant test)."""
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(
+        200,
+        json={"package_id": "pkg-uuid", "revision_number": 2},
+        headers={"X-Cinna-Proxied": "1"},
+    )
+
+    account_client.publish_agent_skill("agent-123", "pdf-report", version="1.2.0")
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["path"] == "agents/agent-123/skills/pdf-report/publish"
+    assert sent["json_body"] == {"version": "1.2.0"}
+
+
+@respx.mock
+def test_publish_agent_skill_sends_every_field_under_its_wire_name(account_client):
+    """Pins the whole request body, not just the fields one test happened to set.
+
+    A rename on either side — `grant_emails` → `grants`, `release_notes` →
+    `notes` — is a silent no-op at runtime (the server ignores what it does not
+    know), so only an exact-body assertion catches it."""
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(
+        200,
+        json={"package_id": "pkg-uuid", "revision_number": 4},
+        headers={"X-Cinna-Proxied": "1"},
+    )
+
+    account_client.publish_agent_skill(
+        "agent-123",
+        "pdf-report",
+        version="2.0.0",
+        release_notes="Adds the rollup",
+        visibility="users",
+        grant_emails=["alice@example.com", "bob@example.com"],
+        package_id="com.acme.pdf-report",
+    )
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["method"] == "POST"
+    assert sent["path"] == "agents/agent-123/skills/pdf-report/publish"
+    assert sent["json_body"] == {
+        "version": "2.0.0",
+        "release_notes": "Adds the rollup",
+        "visibility": "users",
+        "grant_emails": ["alice@example.com", "bob@example.com"],
+        "package_id": "com.acme.pdf-report",
+    }
+
+
+@respx.mock
+def test_publish_agent_skill_never_sends_a_null_grant_list(account_client):
+    """`grant_emails` is `list[str]`, not `list[str] | None` — a null is a 422."""
+    route = respx.post(
+        "https://platform.example.com/api/v1/cli/account/api-proxy"
+    ).respond(
+        200,
+        json={"package_id": "pkg-uuid", "revision_number": 1},
+        headers={"X-Cinna-Proxied": "1"},
+    )
+
+    account_client.publish_agent_skill("agent-123", "pdf-report", grant_emails=None)
+    sent = json.loads(route.calls.last.request.content)
+    assert "grant_emails" not in sent["json_body"]
+
+
+@respx.mock
+def test_publish_agent_skill_raises_the_servers_coded_refusal(account_client):
+    """A ``{"detail": {"code", "message"}}`` refusal keeps BOTH halves: the
+    server's sentence verbatim and its code as the CLI's machine code."""
+    respx.post("https://platform.example.com/api/v1/cli/account/api-proxy").respond(
+        403,
+        json={
+            "detail": {
+                "code": "not_developer",
+                "message": "Only agent developers can publish a skill.",
+            }
+        },
+        headers={"X-Cinna-Proxied": "1"},
+    )
+
+    with pytest.raises(CodedRefusal) as exc:
+        account_client.publish_agent_skill("agent-123", "pdf-report")
+    assert exc.value.code == "not_developer"
+    assert exc.value.detail == "Only agent developers can publish a skill."
+    assert exc.value.status_code == 403
+
+
+@respx.mock
+def test_publish_agent_skill_lists_offending_paths(account_client):
+    respx.post("https://platform.example.com/api/v1/cli/account/api-proxy").respond(
+        422,
+        json={
+            "detail": {
+                "code": "skill_contains_secrets",
+                "message": "This skill contains what look like secrets.",
+                "paths": [".env", "scripts/token.txt"],
+            }
+        },
+        headers={"X-Cinna-Proxied": "1"},
+    )
+
+    with pytest.raises(CodedRefusal) as exc:
+        account_client.publish_agent_skill("agent-123", "pdf-report")
+    assert exc.value.paths == [".env", "scripts/token.txt"]
+    assert ".env" in exc.value.detail
+
+
+@respx.mock
+def test_plain_detail_still_raises_platform_error(account_client):
+    """A route that answers with a sentence (not a coded dict) must not be
+    dressed up as a coded refusal with an invented code."""
+    respx.post("https://platform.example.com/api/v1/cli/account/api-proxy").respond(
+        404,
+        json={"detail": "Agent not found."},
+        headers={"X-Cinna-Proxied": "1"},
+    )
+
+    with pytest.raises(PlatformError) as exc:
+        account_client.get_skill_package("pkg-uuid")
+    assert "Agent not found." in str(exc.value)

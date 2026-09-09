@@ -1235,6 +1235,105 @@ def agent_api_call(
     run_agent_api_call(agent_ref, method, path, query_pairs, json_text)
 
 
+# ─── skills group ──────────────────────────────────────────────────────────
+
+
+@cli.group(name="skills")
+def skills():
+    """Inspect an agent's addons and publish one of its skills.
+
+    A **skill** is a ``skills/<name>/`` folder with a ``SKILL.md`` the engine
+    loads on demand; an **addon** is that or an installed plugin. ``list``
+    shows both halves as the platform deduplicates them (a catalog install
+    appears once, as a skill); ``publish`` shares one of the agent's own skills
+    to the instance skills catalog. Run from the account workspace.
+    """
+
+
+@skills.command(name="list")
+@click.argument("agent_ref")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
+def skills_list(agent_ref: str, as_json: bool):
+    """List AGENT_REF's addons — plugins and skills in one deduplicated list.
+
+    AGENT_REF is the agent's display name, slug, or id (see
+    ``cinna account agents``). Prints kind / source / status / name per addon,
+    marking the local skills already published to the catalog. Reads the
+    server's cache, so it never wakes a sleeping environment — a stale or
+    unreadable skill index is reported instead of hidden.
+    """
+    from cinna.account import run_skills_list
+
+    run_skills_list(agent_ref, as_json=as_json)
+
+
+@skills.command(name="publish")
+@click.argument("agent_ref")
+@click.argument("name")
+@click.option(
+    "--visibility",
+    type=click.Choice(["public", "private", "users"]),
+    default=None,
+    help="Who may see the package (default: private on a first publish; "
+    "unchanged on a re-publish)",
+)
+@click.option(
+    "--grant",
+    "grant_emails",
+    multiple=True,
+    metavar="EMAIL",
+    help="Grant catalog access to EMAIL (repeatable, additive, never revokes). "
+    "Requires --visibility users.",
+)
+@click.option("--version", default=None, help="Version label for this revision")
+@click.option("--notes", "release_notes", default=None, help="Release notes")
+@click.option(
+    "--package-id",
+    default=None,
+    help="Reverse-DNS package id, first publish only (e.g. com.acme.pdf-report)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def skills_publish(
+    agent_ref: str,
+    name: str,
+    visibility: str | None,
+    grant_emails: tuple[str, ...],
+    version: str | None,
+    release_notes: str | None,
+    package_id: str | None,
+    as_json: bool,
+):
+    """Publish AGENT_REF's skill NAME to the instance skills catalog.
+
+    NAME is the skill's folder name as ``cinna skills list`` prints it. A
+    re-publish appends a revision to the same package. Without a visibility the
+    package is private and nobody else sees it; ``--grant`` names people on a
+    ``users`` package and never takes access away (revoke is its own verb in the
+    web UI), and it *requires* ``--visibility users`` because no other
+    visibility consults the grant list.
+
+    Publishing reads the agent's **cloud** workspace, so ``cinna sync push``
+    first — an unsynced edit is left out of a revision you cannot rewrite.
+
+    \b
+      cinna skills publish crm-agent pdf-report --visibility public --version 1.2.0
+      cinna skills publish crm-agent pdf-report --visibility users \\
+          --grant alice@example.com --grant bob@example.com
+    """
+    from cinna.account import run_skills_publish
+
+    run_skills_publish(
+        agent_ref,
+        name,
+        visibility,
+        grant_emails,
+        version,
+        release_notes,
+        package_id,
+        as_json=as_json,
+    )
+
+
 # ─── api (escape hatch) ────────────────────────────────────────────────────
 
 

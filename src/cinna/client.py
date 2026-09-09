@@ -3,12 +3,13 @@
 import json
 import logging
 from typing import Iterator
+from urllib.parse import quote
 
 import httpx
 
 from cinna.config import CinnaConfig
 from cinna.auth import get_auth_headers
-from cinna.errors import AuthenticationError, PlatformError
+from cinna.errors import AuthenticationError, CodedRefusal, PlatformError
 
 logger = logging.getLogger("cinna.client")
 
@@ -21,6 +22,27 @@ EXEC_STREAM_TIMEOUT = httpx.Timeout(None, connect=10.0)
 # response. Its absence means the escape hatch itself refused the call (policy
 # denial / rate limit / size cap) rather than the target route answering.
 PROXY_MARKER_HEADER = "x-cinna-proxied"
+
+
+def _coded_refusal(response: httpx.Response) -> CodedRefusal | None:
+    """Build a :class:`CodedRefusal` from a ``{"detail": {code, message}}`` body.
+
+    Returns ``None`` when the body is not that shape, so the caller can fall
+    back to the ordinary ``PlatformError`` rendering rather than inventing a
+    code for a route that never sent one.
+    """
+    try:
+        detail = response.json().get("detail")
+    except Exception:
+        return None
+    if not isinstance(detail, dict) or not detail.get("code"):
+        return None
+    return CodedRefusal(
+        response.status_code,
+        str(detail["code"]),
+        str(detail.get("message") or detail["code"]),
+        paths=[str(p) for p in (detail.get("paths") or [])],
+    )
 
 
 class PlatformClient:
@@ -683,6 +705,7 @@ class AccountClient:
         path: str,
         query: dict | None = None,
         json_body=None,
+        coded: bool = False,
     ) -> dict:
         """Call ``api_proxy`` and return parsed JSON, raising on any failure.
 
@@ -690,6 +713,12 @@ class AccountClient:
         limit / size cap) from a mirrored inner-route error, and raises a typed
         ``PlatformError`` either way so callers get a clean exception instead of
         a raw response to interpret.
+
+        ``coded=True`` for a route that answers refusals as
+        ``{"detail": {"code", "message"}}`` (the skills catalog): the mirrored
+        error is raised as a ``CodedRefusal`` carrying the server's own code and
+        sentence, instead of a ``PlatformError`` whose message would be the
+        repr of a dict.
         """
         response = self.api_proxy(method, path, query=query, json_body=json_body)
 
@@ -708,6 +737,10 @@ class AccountClient:
                 f"escape hatch refused {method} {path}: {_detail()}",
             )
         if response.status_code >= 400:
+            if coded:
+                refusal = _coded_refusal(response)
+                if refusal is not None:
+                    raise refusal
             raise PlatformError(response.status_code, _detail())
         if not response.content:
             return {}
@@ -849,6 +882,89 @@ class AccountClient:
             timeout=DOWNLOAD_TIMEOUT,
         )
         return self._handle_response(response).content
+
+    # --- Agent addons + skills catalog (routed through the api-proxy) ---
+    #
+    # These are ordinary platform routes (`/agents/…`, `/skills/…`), not
+    # `/cli/account/*` verbs, so they ride the same buffered escape hatch
+    # `cinna chat` uses. They have to: an account token's `sub` is the CLIToken
+    # row id, not a user id, so it can never satisfy `CurrentUser` on a platform
+    # route directly. The proxy re-dispatches as the owning user, and neither
+    # `agents` nor `skills` is on its denylist (credentials / users / admin /
+    # cli / auth), so every downstream ownership and role check still applies —
+    # unchanged, just reached through the hatch.
+
+    def get_agent_addons(self, agent_id: str) -> dict:
+        """GET /api/v1/agents/{id}/addons — plugins + skills as one list.
+
+        Returns ``AgentAddonsPublic``: ``addons[]`` (each with ``kind``,
+        ``source``, ``name``, ``status``, ``published_package_id``, …),
+        ``counts``, ``skills_error`` and ``can_add``. Cache-only server-side, so
+        it never wakes a sleeping environment — that case comes back as the
+        plugin half plus a ``skills_error``, not as a failure.
+        """
+        return self._proxy_json("GET", f"agents/{agent_id}/addons")
+
+    def publish_agent_skill(
+        self,
+        agent_id: str,
+        name: str,
+        version: str | None = None,
+        release_notes: str | None = None,
+        visibility: str | None = None,
+        grant_emails: list[str] | None = None,
+        package_id: str | None = None,
+    ) -> dict:
+        """POST /api/v1/agents/{id}/skills/{name}/publish — publish to the catalog.
+
+        Returns the new ``SkillPackageRevisionPublic`` (``package_id`` is the
+        package's UUID, ``revision_number``, ``version``, …). Refusals arrive as
+        ``CodedRefusal`` with the server's code (``not_developer``,
+        ``foreign_install``, ``no_environment``, ``workspace_unavailable``,
+        ``skill_contains_secrets``, …) and its own sentence.
+
+        Only the fields the caller supplied go into the body. For the nullable
+        ones (``version``, ``release_notes``, ``visibility``, ``package_id``)
+        that is presentation, not semantics — the server treats an explicit
+        ``null`` and an omission identically, so a re-publish naming no
+        ``visibility`` leaves the package's visibility alone either way.
+
+        For ``grant_emails`` the guard is load-bearing: the field is
+        ``list[str] = Field(default=[], max_length=50)`` — **not** nullable — so
+        sending ``null`` is a 422. It must be omitted when empty, never sent as
+        ``None``.
+        """
+        body: dict = {}
+        if version is not None:
+            body["version"] = version
+        if release_notes is not None:
+            body["release_notes"] = release_notes
+        if visibility is not None:
+            body["visibility"] = visibility
+        if grant_emails:
+            # Not `is not None`: see the docstring — the field rejects null.
+            body["grant_emails"] = list(grant_emails)
+        if package_id is not None:
+            body["package_id"] = package_id
+        # Defensive only. A skill name is validated against
+        # `^[a-z0-9]+(-[a-z0-9]+)*$`, so nothing that can exist server-side has a
+        # character this would encode; the quoting is here so a future widening
+        # of that shape cannot turn a name into a path injection unnoticed.
+        return self._proxy_json(
+            "POST",
+            f"agents/{agent_id}/skills/{quote(name, safe='')}/publish",
+            json_body=body,
+            coded=True,
+        )
+
+    def get_skill_package(self, package_id: str) -> dict:
+        """GET /api/v1/skills/packages/{id} — one package + its revisions.
+
+        ``SkillPackageDetailPublic``: the human ``display_name``, the
+        reverse-DNS ``package_id`` string, ``visibility``, ``latest_version``
+        and ``revisions[]``.
+        """
+        return self._proxy_json("GET", f"skills/packages/{package_id}", coded=True)
 
     # --- Improvement requests (received on the agents this account owns) ---
     #

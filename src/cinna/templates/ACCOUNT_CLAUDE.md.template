@@ -117,6 +117,15 @@ Refresh after platform updates with `cinna account refresh-context`.
 | `cinna agent-api spec <agent> [-o file]` | Print the harvested OpenAPI spec JSON (verify the surface before connecting a consumer) |
 | `cinna agent-api call <agent> <path> [-X M] [--query k=v] [--json …]` | Smoke-test the producer's own endpoint (query params forwarded) — verify it end-to-end without a consumer |
 
+**Addons — what an agent carries beyond its prompt (plugins + `skills/<name>/` folders):**
+
+| Command | What it does |
+|---------|--------------|
+| `cinna skills list <agent>` | Every addon the agent carries, deduplicated (kind / source / status / name); marks the local skills already published to the catalog |
+| `cinna skills publish <agent> <name> [--visibility public\|private\|users] [--grant EMAIL …] [--version V] [--notes T]` | Publish one of the agent's own skills to the instance skills catalog; a re-publish appends a revision. `--grant` is repeatable and only ever **adds** access |
+
+> A **skill** is a `skills/<name>/` folder with a `SKILL.md` the engine loads on demand — never a synonym for "a thing the agent can do". A skill worth sharing reaches other people through the catalog — `cinna skills publish <agent> <name> --visibility public`, which reads the agent's **cloud** workspace, so the skill must have travelled there (`cinna sync push --agent <slug>` first). Without a visibility the package is private and nobody else sees it; `--visibility users --grant <email>` shares it with named people instead. Never by copying folders between agents.
+
 **Wiring & escape hatch:**
 
 | Command | What it does |

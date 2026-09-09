@@ -19,7 +19,7 @@ from cinna.account import (
 )
 from cinna.client import AccountClient
 from cinna.config import CinnaConfig, lookup_agent_registry, save_config, upsert_agent_registry
-from cinna.errors import AuthenticationError, PlatformError
+from cinna.errors import AuthenticationError, CodedRefusal, PlatformError
 from cinna.main import cli
 
 
@@ -3296,3 +3296,341 @@ def test_poll_until_authorized_raises_on_denied(mock_poll):
     mock_poll.return_value = {"status": "access_denied"}
     with pytest.raises(click.ClickException, match="denied"):
         _poll_until_authorized("https://p", "dev-1", interval=1, expires_in=60)
+
+
+# --- cinna skills list / publish ---
+
+
+ADDONS_PAYLOAD = {
+    "agent_id": "agent-123",
+    "environment_id": "env-1",
+    "addons": [
+        {
+            "key": "plugin:link-1",
+            "kind": "plugin",
+            "source": "marketplace",
+            "name": "pdf-tools",
+            "display_name": "PDF Tools",
+            "status": "ok",
+            "status_code": None,
+            "can_manage": True,
+            "published_package_id": None,
+        },
+        {
+            "key": "skill:local:report",
+            "kind": "skill",
+            "source": "local",
+            "name": "report",
+            "display_name": "report",
+            "status": "ok",
+            "status_code": None,
+            "can_share": True,
+            "published_package_id": "pkg-uuid",
+        },
+        {
+            "key": "skill:local:draft",
+            "kind": "skill",
+            "source": "local",
+            "name": "draft",
+            "display_name": "draft",
+            "status": "warning",
+            "status_code": "secrets",
+            "skills": [
+                {
+                    "name": "draft",
+                    "source": "local",
+                    "warning": {
+                        "code": "secrets",
+                        "message": "This skill holds files that look like key material.",
+                        "paths": [".env"],
+                    },
+                }
+            ],
+            "can_share": False,
+            "published_package_id": None,
+        },
+    ],
+    "counts": {"plugins": 1, "skills": 2, "local_skills": 2},
+    "skills_error": None,
+    "can_add": True,
+}
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_renders_kind_source_status_name(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """One row per addon, carrying kind / source / status / name."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = ADDONS_PAYLOAD
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.get_agent_addons.assert_called_once_with("agent-123")
+    assert "plugin" in result.output and "marketplace" in result.output
+    assert "pdf-tools" in result.output
+    assert "report" in result.output
+    # The status column carries the server's code...
+    assert "secrets" in result.output
+    # ...and the platform's own sentence (plus its paths) follows the table,
+    # rather than the CLI inventing copy or dropping it.
+    assert "This skill holds files that look like key material." in result.output
+    assert ".env" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_marks_already_published_local_skills(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = ADDONS_PAYLOAD
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "published" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_reports_an_unreadable_skill_index(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The plugin half still lists; the missing skill half is stated, not hidden."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = {
+        **ADDONS_PAYLOAD,
+        "addons": ADDONS_PAYLOAD["addons"][:1],
+        "skills_error": "env_not_running",
+    }
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "env_not_running" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_unknown_agent_never_calls_the_route(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(cli, ["skills", "list", "ghost"])
+    assert result.exit_code != 0
+    mock_client.get_agent_addons.assert_not_called()
+
+
+_REVISION = {
+    "id": "rev-uuid",
+    "package_id": "pkg-uuid",
+    "revision_number": 3,
+    "version": "1.2.0",
+}
+
+_PACKAGE = {
+    "id": "pkg-uuid",
+    "package_id": "com.acme.report",
+    "display_name": "Report",
+    "visibility": "users",
+    "latest_version": "1.2.0",
+}
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_prints_the_catalog_url(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.return_value = _REVISION
+    mock_client.get_skill_package.return_value = _PACKAGE
+
+    result = runner.invoke(
+        cli, ["skills", "publish", "CRM Agent", "report", "--version", "1.2.0"]
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.publish_agent_skill.assert_called_once_with(
+        "agent-123",
+        "report",
+        version="1.2.0",
+        release_notes=None,
+        visibility=None,
+        grant_emails=[],
+        package_id=None,
+    )
+    mock_client.get_skill_package.assert_called_once_with("pkg-uuid")
+    assert "https://ui.example.com/catalog/skills/pkg-uuid" in result.output
+    assert "com.acme.report" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_grant_is_repeatable(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.return_value = _REVISION
+    mock_client.get_skill_package.return_value = _PACKAGE
+
+    result = runner.invoke(
+        cli,
+        [
+            "skills",
+            "publish",
+            "CRM Agent",
+            "report",
+            "--visibility",
+            "users",
+            "--grant",
+            "alice@example.com",
+            "--grant",
+            "bob@example.com",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    kwargs = mock_client.publish_agent_skill.call_args.kwargs
+    assert kwargs["visibility"] == "users"
+    assert kwargs["grant_emails"] == ["alice@example.com", "bob@example.com"]
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_prints_the_servers_refusal_verbatim(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A coded refusal reaches the user as the platform's own sentence."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.side_effect = CodedRefusal(
+        409,
+        "no_environment",
+        "This agent has no environment, so its files cannot be read.",
+    )
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report"])
+    assert result.exit_code == 1
+    assert "This agent has no environment" in result.output
+    mock_client.get_skill_package.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_survives_a_failed_package_lookup(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The publish already succeeded — a missing detail line must not undo it."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.return_value = _REVISION
+    mock_client.get_skill_package.side_effect = PlatformError(503, "catalog down")
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report"])
+    assert result.exit_code == 0, result.output
+    assert "https://ui.example.com/catalog/skills/pkg-uuid" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_json_prints_the_raw_payload(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = ADDONS_PAYLOAD
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["counts"]["local_skills"] == 2
+    assert [a["name"] for a in payload["addons"]] == ["pdf-tools", "report", "draft"]
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_json_carries_the_catalog_url(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.publish_agent_skill.return_value = _REVISION
+    mock_client.get_skill_package.return_value = _PACKAGE
+
+    result = runner.invoke(cli, ["skills", "publish", "CRM Agent", "report", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["revision"]["revision_number"] == 3
+    assert payload["package"]["package_id"] == "com.acme.report"
+    assert payload["catalog_url"] == "https://ui.example.com/catalog/skills/pkg-uuid"
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_refuses_a_grant_that_would_share_nothing(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """`--grant` without `--visibility users` is refused before anything is written.
+
+    The server would accept it: it stores the grant unconditionally, but
+    `user_can_see` only consults grants for a `users` package, so a private
+    publish with `--grant` succeeds and shares nothing. The revision is
+    immutable, so the correction costs a permanent extra one — the refusal has
+    to come before the call.
+    """
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(
+        cli,
+        ["skills", "publish", "CRM Agent", "report", "--grant", "alice@example.com"],
+    )
+    assert result.exit_code != 0
+    assert "--visibility users" in result.output
+    mock_client.publish_agent_skill.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_publish_refuses_a_grant_on_a_public_package(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+
+    result = runner.invoke(
+        cli,
+        [
+            "skills", "publish", "CRM Agent", "report",
+            "--visibility", "public",
+            "--grant", "alice@example.com",
+        ],
+    )
+    assert result.exit_code != 0
+    mock_client.publish_agent_skill.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_empty_is_stated_not_celebrated(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = {
+        "agent_id": "agent-123",
+        "addons": [],
+        "counts": {"plugins": 0, "skills": 0, "local_skills": 0},
+        "skills_error": None,
+    }
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "no plugins or skills yet" in result.output
+    assert "✓" not in result.output

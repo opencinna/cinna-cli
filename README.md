@@ -258,6 +258,49 @@ The folder rules come from the kit's versioned contract, `.cinna-kit/layout.json
 
 Where the folder has been published is recorded in `publications.json`, a **sibling** of `cinna-agent.json` holding one entry per Cinna instance — it cannot live inside the manifest, because each entry records a hash of the exported tree and the manifest is part of that tree. Every step is idempotent (agent by the entry whose `platform_url` matches the instance you are logged into, credentials by name, schedules by name), so a partial import is resumed with `--update` instead of duplicating anything. The publication is recorded **only after the push settled** — `--no-push`, a failed flush, or remaining conflicts leave it unrecorded, and the next run is a plain `--update`. A legacy `cloud` block is migrated into the ledger on the first write and is still read until then, so an older folder's `--update` never creates a second agent. `--dry-run` makes no platform call and writes nothing.
 
+### `cinna skills list <agent> [--json]`
+
+List everything an agent carries beyond its prompt, as one deduplicated list. An **addon** is either an installed plugin or a `skills/<name>/` folder — a `SKILL.md` plus its files that the engine loads on demand. The two overlap (a skill installed from the catalog is *also* a plugin link), and the platform owns the dedupe rule, so this prints the server's projection rather than folding the halves itself: one row per addon, with its kind, source (`marketplace` / `bundle` / `catalog` / `local`), status and name.
+
+```bash
+cinna skills list crm-agent
+```
+
+```
+Agent: CRM Agent
+                                 Addons (3)
+┏━━━┳━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ # ┃ Kind   ┃ Source      ┃ Status                ┃ Name                  ┃
+┡━━━╇━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 1 │ plugin │ marketplace │ ● ok                  │ pdf-tools (PDF Tools) │
+│ 2 │ skill  │ local       │ ● ok                  │ report · published    │
+│ 3 │ skill  │ local       │ ! secrets             │ draft                 │
+└───┴────────┴─────────────┴───────────────────────┴───────────────────────┘
+1 plugin(s), 2 skill(s) (2 of them this agent's own).
+
+! draft (secrets): This skill holds files that look like key material.
+    .env
+```
+
+`Name` is the engine-facing folder name — the string `cinna skills publish` takes back — with the display name beside it when they differ. `· published` marks a local skill that already has a catalog package, so a re-publish appends a revision instead of creating a second package. The status column carries the server's own code (`secrets`, `oversized`, `shadowed` for warnings; `missing_description`, `name_mismatch`, `source_unavailable`, `orphan` for errors), and the platform's own sentence for each flagged row — with the offending files for `secrets` — follows under the table. Reads the server's cache, so it never wakes a sleeping environment: when the skill half could not be read the plugin rows still list and the reason is printed (`env_not_running`, `adapter_error`, `parse_error`) instead of a short list looking complete. `--json` prints the raw payload (`addons`, `counts`, `skills_error`) for a script or a local coding agent.
+
+### `cinna skills publish <agent> <name> [--visibility public|private|users] [--grant EMAIL ...] [--version V] [--notes TEXT] [--package-id ID] [--json]`
+
+Publish one of the agent's own skills to the instance skills catalog, where other agents can install it. `<name>` is the folder name from `cinna skills list`. Requires the `agent-developer` role on an agent that is not a foreign install; the skill must be clean (no parse error, no files that look like key material).
+
+**It publishes the agent's cloud workspace, not the folder you are standing in.** The files are read from the remote workspace on disk — which is why a *suspended* environment publishes fine, no container needs to be running — but an edit that has not synced yet is not there. Run `cinna sync push` first, or you publish the older remote copy as a revision you cannot take back.
+
+**Without `--visibility` the package is private and nobody else sees it.** Say `--visibility public` for the catalog, or `--visibility users` with `--grant` for named people.
+
+```bash
+cinna skills publish crm-agent report --visibility public \
+    --version 1.2.0 --notes "Adds the quarterly rollup"
+cinna skills publish crm-agent report --visibility users \
+    --grant alice@example.com --grant bob@example.com
+```
+
+A re-publish appends a revision to the same package, so `--package-id` (the reverse-DNS id, e.g. `com.acme.report`) is only for a first publish — a mismatch on a later one is refused rather than silently ignored. `--visibility` is likewise honoured on a first publish and on an explicit change; omitting it leaves the package as it is. `--grant` requires `--visibility users` and the CLI refuses the combination otherwise, before anything is written. The server would accept it — it stores the grant either way — but a package that is private or public never consults its grant list, so the publish would report success and share nothing, and a revision cannot be taken back. Within a `users` package `--grant` is strictly **additive**: it adds the addresses it names and never revokes the ones it omits (revoking is its own verb in the web UI), and an unknown address fails the whole publish rather than half-sharing it. On success the package id, revision, visibility and catalog URL are printed. A refusal is printed as the platform's own sentence with its code (`not_developer`, `foreign_install`, `no_environment`, `workspace_unavailable`, `skill_contains_secrets` — which also lists the offending files), and `--json` prints `{revision, package, catalog_url}` instead of the human block.
+
 ### `cinna connect agent-api --producer <agent> --consumer <agent> [--label TEXT] [--read-only]`
 
 Wire one agent to another's REST API from the account workspace. Resolves both agents (name, slug, or ID), mints a producer API token, and attaches it to the consumer as a credential — which rides the consumer's normal credential sync into its remote environment, so no key ever touches your machine. Prints the credential ID, token prefix, base URL, and spec URL. `--read-only` restricts the consumer to read-only access; `--label` names the credential. Backend errors surface verbatim: 400 if the producer's REST API is disabled, 403/404 for ownership violations.

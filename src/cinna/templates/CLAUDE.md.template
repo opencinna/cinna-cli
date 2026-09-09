@@ -29,9 +29,12 @@ workspace/                      # continuously synced with remote /app/workspace
 ├── scripts/                    # bundle-owned — Python entrypoints + helpers
 │   ├── README.md               # documents every script (what / how to run / output)
 │   ├── main.py                 # primary entrypoint (convention)
-│   ├── <capability>/           # subfolder per capability when 3+ skills exist
+│   ├── <capability>/           # subfolder per capability when 3+ of them exist
 │   │   └── …
 │   └── shared_utils.py         # shared helpers at top level
+├── skills/                     # bundle-owned — one folder per skill, loaded on demand
+│   └── <name>/
+│       └── SKILL.md            # the only required file; frontmatter `name` == folder name
 ├── docs/                       # bundle-owned — PROMPT files (the agent's brain)
 │   ├── WORKFLOW_PROMPT.md      # main behavior prompt
 │   ├── ENTRYPOINT_PROMPT.md    # how the agent starts a conversation
@@ -65,8 +68,9 @@ Rules of thumb:
 
 | Kind of file | Put it in | Why |
 |---|---|---|
-| Python entrypoints (run by the agent or by the user) | `scripts/` | Bundle-owned source. Add a subfolder per capability once you have 3+ skills. |
-| Shared Python helpers | `scripts/` (top level) | Importable across skills. |
+| Python entrypoints (run by the agent or by the user) | `scripts/` | Bundle-owned source. Add a subfolder per capability once you have 3+ of them. |
+| Shared Python helpers | `scripts/` (top level) | Importable across capabilities. |
+| A capability the engine should load only when it is invoked | `skills/<name>/SKILL.md` | Bundle-owned. `SKILL.md` is the only required file and its frontmatter `name` must equal the folder name; `scripts/`, `references/` and `assets/` beside it are optional. Share a finished one with `cinna skills publish <agent> <name> --visibility public`, which reads the agent's **cloud** workspace — `cinna sync push` first (§10), or you publish the older remote copy as an immutable revision. |
 | Prompt files (workflow / entrypoint / refiner / role-specific) | `docs/` | The runtime loads these as the agent's prompts. Naming convention is `*_PROMPT.md` for the main slots. |
 | Domain knowledge docs the *agent* should read at runtime | `docs/` or `knowledge/` | `docs/` if the prompt references it inline; `knowledge/` if it should be indexed and queried via `knowledge_query`. |
 | Static lookup tables, fixtures, sample inputs shipped with the agent | `files/` | Treated as static publisher assets, not source code. |
@@ -137,7 +141,7 @@ scripts/
     └── run.py
 ```
 
-Keep shared utilities at the top level. Keep single-purpose scripts that don't belong to a capability flat at the top level. Don't pre-split before you have the skills.
+Keep shared utilities at the top level. Keep single-purpose scripts that don't belong to a capability flat at the top level. Don't pre-split before you have the capabilities.
 
 ---
 
@@ -211,7 +215,7 @@ Conflicts: Mutagen writes `<file>.conflict.<side>.<timestamp>` instead of pickin
 
 1. **Pick the trigger.** What does the user say to activate it? Record this in `docs/WORKFLOW_PROMPT.md`.
 2. **Decide if it's its own capability or inline.** Multi-step workflow + own scripts → its own capability with `docs/<capability>.md`. One-shot command → inline in `WORKFLOW_PROMPT.md`.
-3. **Create the script.** `workspace/scripts/<capability>/run.py` (or top-level if single-skill agent). Make it runnable as `cinna exec python scripts/<capability>/run.py`.
+3. **Create the script.** `workspace/scripts/<capability>/run.py` (or top-level if single-capability agent). Make it runnable as `cinna exec python scripts/<capability>/run.py`.
 4. **Wire I/O paths.** Inputs from `files/` / `uploads/` / `storage/`. Outputs to `storage/` (durable) or `cache/` (disposable).
 5. **Document the script** in `scripts/README.md`.
 6. **Write the capability doc** at `docs/<capability>.md`: when to use, workflow, how to present results, technical notes.

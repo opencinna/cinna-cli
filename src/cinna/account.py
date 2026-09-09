@@ -56,6 +56,7 @@ from cinna.config import (
 from cinna.errors import (
     AccountConfigNotFoundError,
     AccountMismatchError,
+    CinnaExit,
     NetworkError,
     PlatformError,
     SetupTokenError,
@@ -2847,3 +2848,262 @@ def run_credentials_share(credential_id: str, agent_ref: str) -> None:
         "[dim]Once the user fills the credential's secret in the UI, it syncs "
         "into the agent's environment automatically.[/dim]"
     )
+
+
+# ── Agent addons: skills + plugins (`cinna skills`) ─────────────────────────
+#
+# "Addon" is the platform's umbrella over the two things an agent carries
+# beyond its prompt: installed plugins, and `skills/<name>/` folders the engine
+# loads on demand. The server owns the dedupe rule (a catalog install is both a
+# plugin link and an index entry, and is one row here), so the CLI renders the
+# projection it is handed rather than folding the two halves its own way.
+
+
+def _addon_status_cell(addon: dict) -> str:
+    """Colour one addon's ``status`` (``ok`` / ``warning`` / ``error``).
+
+    The **code** goes in the column, not the sentence: the codes are the
+    contract and they keep the table one line per addon. The platform's own
+    sentence follows the table — see :func:`_addon_issue_lines`.
+    """
+    status = addon.get("status") or "ok"
+    code = addon.get("status_code")
+    if status == "error":
+        return f"[red]✗ {code or 'error'}[/red]"
+    if status == "warning":
+        return f"[yellow]! {code or 'warning'}[/yellow]"
+    return "[green]● ok[/green]"
+
+
+def _addon_issue_message(addon: dict) -> tuple[str | None, list[str]]:
+    """The platform's sentence behind a row's ``status_code``, and its paths.
+
+    The row carries only the code; the sentence that goes with it sits on the
+    offending skill one level down (``skills[].error`` / ``.warning``), which is
+    where the platform wrote the copy. Matching on the code locates that issue —
+    the tone still comes from ``status``, never from the prose.
+
+    Row-level codes (``orphan``, ``source_unavailable``) have no skill behind
+    them and no sentence to borrow; those return ``None`` and the code in the
+    table is the whole answer.
+    """
+    code = addon.get("status_code")
+    if not code:
+        return None, []
+    for skill in addon.get("skills") or []:
+        for issue in (skill.get("error"), skill.get("warning")):
+            if issue and issue.get("code") == code:
+                return issue.get("message"), [str(p) for p in issue.get("paths") or []]
+    return None, []
+
+
+def _print_addon_issues(addons: list[dict]) -> None:
+    """Print the platform's sentence for every row that is not ``ok``.
+
+    Below the table rather than inside it: a sentence in a status cell would
+    wrap and cost the one-row-per-addon shape, and ``secrets`` carries a file
+    list that has nowhere to go in a column.
+    """
+    flagged = [a for a in addons if (a.get("status") or "ok") != "ok"]
+    if not flagged:
+        return
+
+    console.console.print()
+    for addon in flagged:
+        marker = "[red]✗[/red]" if addon.get("status") == "error" else "[yellow]![/yellow]"
+        message, paths = _addon_issue_message(addon)
+        code = addon.get("status_code") or addon.get("status")
+        headline = f"{marker} {addon.get('name', '?')} [dim]({code})[/dim]"
+        console.console.print(f"{headline}: {message}" if message else headline)
+        for path in paths:
+            console.console.print(f"    [dim]{path}[/dim]")
+
+
+def _addon_name_cell(addon: dict) -> str:
+    """The engine-facing name, plus the human one and the published marker.
+
+    ``name`` leads because it is what ``plugin_ref`` and the on-disk layout
+    use — it is the string the user types back at `cinna skills publish`.
+    """
+    cell = f"[bold]{addon.get('name', '?')}[/bold]"
+    display = addon.get("display_name")
+    if display and display != addon.get("name"):
+        cell += f" [dim]({display})[/dim]"
+    if addon.get("published_package_id"):
+        cell += " [cyan]· published[/cyan]"
+    if addon.get("orphan"):
+        cell += " [dim]· orphan[/dim]"
+    return cell
+
+
+def _print_addons(payload: dict) -> None:
+    """Render an ``AgentAddonsPublic`` payload as one row per addon."""
+    from rich.table import Table
+
+    addons = payload.get("addons") or []
+    if not addons:
+        # A dim line, not a green check: an empty list is a fact, not a success.
+        console.console.print("[dim]This agent carries no plugins or skills yet.[/dim]")
+    else:
+        counts = payload.get("counts") or {}
+        table = Table(title=f"Addons ({len(addons)})", title_style="bold")
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("Kind")
+        table.add_column("Source")
+        table.add_column("Status")
+        table.add_column("Name")
+
+        for i, addon in enumerate(addons, 1):
+            table.add_row(
+                str(i),
+                addon.get("kind", "?"),
+                addon.get("source", "?"),
+                _addon_status_cell(addon),
+                _addon_name_cell(addon),
+            )
+
+        console.console.print(table)
+        console.console.print(
+            f"[dim]{counts.get('plugins', 0)} plugin(s), "
+            f"{counts.get('skills', 0)} skill(s) "
+            f"({counts.get('local_skills', 0)} of them this agent's own).[/dim]"
+        )
+        _print_addon_issues(addons)
+
+    # The plugin half is returned even when the skill half could not be read —
+    # say so rather than letting a short list look complete.
+    if payload.get("skills_error"):
+        console.warn(
+            f"The skill index could not be read ({payload['skills_error']}); "
+            f"only plugins are listed above."
+        )
+
+
+def run_skills_list(agent_ref: str, as_json: bool = False) -> None:
+    """List an agent's addons — `cinna skills list`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with console.spinner("Fetching addons..."):
+        with AccountClient(account_cfg) as client:
+            agent = _resolve_one_agent(client, agent_ref)
+            payload = client.get_agent_addons(agent["id"])
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, default=str))
+        return
+
+    console.console.print(f"Agent: [bold]{agent['name']}[/bold]")
+    _print_addons(payload)
+
+    publishable = [
+        a.get("name")
+        for a in (payload.get("addons") or [])
+        if a.get("can_share") and not a.get("published_package_id")
+    ]
+    if publishable:
+        console.console.print()
+        console.console.print(
+            f"[dim]Ready to share: cinna skills publish "
+            f"{normalize_agent_dir_name(agent['name'])} {publishable[0]} "
+            f"--visibility <public|private|users>[/dim]"
+        )
+
+
+def run_skills_publish(
+    agent_ref: str,
+    name: str,
+    visibility: str | None,
+    grant_emails: tuple[str, ...],
+    version: str | None,
+    release_notes: str | None,
+    package_id: str | None,
+    as_json: bool = False,
+) -> None:
+    """Publish one of an agent's skills to the catalog — `cinna skills publish`.
+
+    Refusals (``not_developer``, ``foreign_install``, ``no_environment``,
+    ``workspace_unavailable``, ``skill_contains_secrets``, …) surface as the
+    server's own coded sentence: the platform owns that copy, and re-wording it
+    here would make two places to keep true.
+    """
+    # ``--grant`` is only meaningful on a ``users`` package. The server stores a
+    # grant unconditionally, but ``user_can_see`` consults the grant table ONLY
+    # for ``visibility="users"`` — so publishing private (the default for a new
+    # package) with ``--grant ana@…`` succeeds, writes Ana's grant row, and
+    # shares nothing. The publisher would be told the opposite and stop, and the
+    # correction costs a permanent extra revision because revisions are
+    # immutable. The web dialog cannot reach that state — its people picker only
+    # renders under ``users`` — so the CLI has to make the same coupling
+    # explicit. Naming ``--visibility users`` is a no-op on a package that is
+    # already ``users``, so requiring it costs a re-publish nothing.
+    if grant_emails and visibility != "users":
+        raise click.UsageError(
+            "--grant only has an effect on a package whose visibility is "
+            "'users': a private or public package ignores its grant list "
+            "entirely, and the grant would be written but share nothing.\n"
+            "Re-run with --visibility users (harmless on a package that "
+            "already is), or drop --grant."
+        )
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner(f"Publishing '{name}'..."):
+            revision = client.publish_agent_skill(
+                agent["id"],
+                name,
+                version=version,
+                release_notes=release_notes,
+                visibility=visibility,
+                grant_emails=list(grant_emails),
+                package_id=package_id,
+            )
+
+        # The revision names its package by UUID only; the catalog line wants
+        # the reverse-DNS id and the visibility that actually stuck. A failure
+        # here must not turn a successful publish into an error.
+        package_uuid = revision.get("package_id")
+        package: dict = {}
+        if package_uuid:
+            try:
+                package = client.get_skill_package(package_uuid)
+            except CinnaExit as exc:
+                logger.debug("skill package lookup after publish failed: %s", exc)
+
+    catalog_link = (
+        f"{account_cfg.frontend_url.rstrip('/')}/catalog/skills/{package_uuid}"
+        if package_uuid
+        else None
+    )
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "revision": revision,
+                    "package": package,
+                    "catalog_url": catalog_link,
+                },
+                indent=2,
+                default=str,
+            )
+        )
+        return
+
+    console.status(f"Published '{name}' from {agent['name']}")
+    if package.get("package_id"):
+        console.console.print(f"  Package:    {package['package_id']}")
+    rev_no = revision.get("revision_number", "?")
+    rev_version = revision.get("version")
+    console.console.print(
+        f"  Revision:   {rev_no}" + (f" ({rev_version})" if rev_version else "")
+    )
+    if package.get("visibility"):
+        console.console.print(f"  Visibility: {package['visibility']}")
+    if grant_emails:
+        console.console.print(f"  Granted:    {', '.join(grant_emails)}")
+    if catalog_link:
+        console.console.print(f"  Catalog:    {catalog_link}")

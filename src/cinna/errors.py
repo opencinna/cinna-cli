@@ -182,6 +182,43 @@ class PlatformError(CinnaExit):
         self.status_code = status_code
 
 
+class CodedRefusal(CinnaExit):
+    """A platform refusal whose ``detail`` body carried a machine code.
+
+    Most routes answer ``{"detail": "<sentence>"}``; some answer
+    ``{"detail": {"code": …, "message": …}}`` instead, so a client can branch
+    (the skills catalog does: ``no_environment`` and ``skill_contains_secrets``
+    need different next steps, and prose cannot be switched on). This carries
+    both halves through: the server's own sentence becomes the message — the
+    CLI never re-words a refusal it did not author — and the server's code
+    becomes the CLI's machine code, so a ``--json`` driver switches on the same
+    identifier the web UI does.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        paths: list[str] | None = None,
+    ):
+        detail = message
+        if paths:
+            detail += "\n  " + "\n  ".join(paths)
+        extra: dict = {"http_status": status_code}
+        if paths:
+            extra["paths"] = list(paths)
+        super().__init__(
+            EXIT_NETWORK if status_code >= 500 else EXIT_ERROR,
+            code or "platform_error",
+            detail,
+            extra=extra,
+        )
+        self.status_code = status_code
+        self.paths = list(paths or [])
+
+
 class MutagenNotFoundError(CinnaExit):
     """Mutagen is not installed or not on PATH."""
 
