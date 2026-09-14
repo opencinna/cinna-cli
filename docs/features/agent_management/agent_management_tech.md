@@ -33,6 +33,8 @@ Each `cinna agent` verb → its Click stub in `src/cinna/main.py` → its handle
 - `cinna agent restart-env` → `src/cinna/main.py:agent_restart_env()` → `account.py:run_agent_restart_env()`
 - `cinna agent rebuild-env` → `src/cinna/main.py:agent_rebuild_env()` → `account.py:run_agent_rebuild_env()`
 - `cinna agent show` → `src/cinna/main.py:agent_show()` → `account.py:run_agent_show()`
+- `cinna agent model show` → `src/cinna/main.py:agent_model_show()` → `account.py:run_agent_model_show()`
+- `cinna agent model set` → `src/cinna/main.py:agent_model_set()` → `account.py:run_agent_model_set()`
 - `cinna agent prompts pull` → `src/cinna/main.py:agent_prompts_pull()` → `account.py:run_agent_prompts_pull()`
 - `cinna agent prompts diff` → `src/cinna/main.py:agent_prompts_diff()` → `account.py:run_agent_prompts_diff()`
 - `cinna agent prompts push` → `src/cinna/main.py:agent_prompts_push()` → `account.py:run_agent_prompts_push()`
@@ -110,6 +112,32 @@ The group/subgroup objects are `src/cinna/main.py:agent()` and
   silently drops it. Credentials come from `_fetch_linked_credentials()` (skipped
   under `--prompts`) and render via `_credential_summary()`; inspect's
   name+type list is the fallback when that returns `None`.
+- `src/cinna/account.py:_confirm_unsynced_edits()` / `_report_rebuild()` — the D2
+  guard and the post-rebuild ending (status, the stopped note,
+  `_wait_for_env_health()`), shared by `restart-env`, `rebuild-env` and `model set`.
+- `src/cinna/account.py:run_agent_model_show()` — `_resolve_one_agent()` →
+  `_agent_environment()` (`AccountClient.get_agent()` for `active_environment_id`,
+  then `AccountClient.get_environment()`; no environment → one sentence, a 404 →
+  "no accessible agent") → `_model_view()` → `_print_model_view()`, or the view as
+  JSON. `_model_view()` takes `effective` / `health` / `cause` / `suggested_model` /
+  `cta` from the record's `model_health.modes`; `_print_model_view()` prints the
+  platform's `cta` and suggested model only when `has_warning`.
+- `src/cinna/account.py:run_agent_model_set()` — the client-side merge, in order:
+  a usage error with no option or an empty value; `CodedRefusal`
+  (`foreign_install` / `not_developer`, carrying the platform's `_BUILD_REFUSALS`
+  sentences) from the listing flags before any read, because the escape hatch skips
+  `assert_can_build`; `_model_settings()` copies every `RECONFIGURE_FIELDS` entry
+  (and refuses a record missing one); `_apply_model_changes()` applies the options
+  (`MODEL_DEFAULT` clears; both credentials `default` → `use_default_ai_credentials`
+  true, an explicit id → false); equal settings → "nothing changed" and return.
+  Then, unless `--no-rebuild`, `_confirm_unsynced_edits(…, "rebuild")` and the
+  confirmation `--yes` skips; `AccountClient.reconfigure_environment()`; and
+  `AccountClient.rebuild_agent_env()` → `_report_rebuild()`. A rebuild failure after
+  the store warns that the settings are stored, names `rebuild-env`, and re-raises.
+  Finally it re-reads the environment, prints the table, and calls a newly set
+  override with `unknown_model` health a likely typo.
+  (`tests/test_account.py:test_agent_model_set_changes_only_the_conversation_model`
+  and the other `test_agent_model_*`)
 - `src/cinna/account.py:_fetch_linked_credentials()` — `AccountClient.list_agent_credentials()`
   says which credentials are linked; `service_uri` / `is_placeholder` / `status`
   are then overlaid by id from `AccountClient.list_credentials()`, because the
@@ -222,6 +250,18 @@ Platform routes reached through the account escape hatch
 - `GET environments/{id}/health` (`AccountClient.get_environment_health`) —
   `{status: "healthy", …}` once the container's server answers; the post-rebuild
   readiness signal.
+- `GET environments/{id}` (`AccountClient.get_environment`) — both modes'
+  `agent_sdk_*`, `model_override_*`, `use_default_ai_credentials`,
+  `*_ai_credential_id`, and `model_health: {has_warning, modes: [{mode, model,
+  status, cause, suggested_model, cta}]}`, whose `model` is the effective one.
+  Reached through `GET agents/{id}`'s `active_environment_id`; owner / superuser only.
+- `POST environments/{id}/reconfigure` (`AccountClient.reconfigure_environment`) —
+  resets every omitted field (a missing `model_override_*` clears the override, a
+  missing `use_default_ai_credentials` turns account defaults on), answers 400 on an
+  SDK↔credential mismatch or while the environment is building, and does not
+  validate model ids. Always sent with `rebuild: false`: with a rebuild it blocks for
+  minutes, and the escape hatch gives up on the inner call after 30 s. No account
+  route merges these settings server-side yet, which is why `model set` does.
 
 `sync_session` (Mutagen wrapper) is the only non-HTTP external touch:
 `sync_session.stop()` on unsync, `sync_session.status()` for the restart-env and
@@ -257,3 +297,28 @@ rebuild-env guards, and `ensure_session()` + `flush()` at the end of `agent sync
 - **`AGENT_REF` ambiguity is fail-loud** — `_resolve_account_agent` raises listing
   the collisions/available agents rather than guessing.
   (`test_agent_sync_unknown_agent`, `test_agent_sync_resolves_by_id_and_slug`)
+- **Model set sends every field** — `_model_settings()` copies all
+  `RECONFIGURE_FIELDS` and refuses a record missing one, because the reconfigure
+  route resets what it is not sent; only the requested keys differ in the body.
+  (`test_agent_model_set_changes_only_the_conversation_model`,
+  `test_agent_model_set_default_clears_the_override`)
+- **Never rebuild through the escape hatch** —
+  `AccountClient.reconfigure_environment()` forces `rebuild: false`; the rebuild
+  goes through `AccountClient.rebuild_agent_env()` and its 1800 s timeout.
+  (`test_account_client_reconfigure_environment_never_rebuilds_through_the_hatch`)
+- **An unchanged set touches nothing** — equal settings return before the D2 guard,
+  the confirmation and any write. (`test_agent_model_set_unchanged_is_a_no_op`)
+- **The build gate is re-applied locally** — the escape hatch skips the platform's
+  `assert_can_build`, so `run_agent_model_set()` refuses `is_foreign_install` or
+  `can_build: false` from the listing before any read.
+  (`test_agent_model_set_refuses_a_foreign_install`)
+- **`--yes` skips one prompt only** — the rebuild confirmation;
+  `_confirm_unsynced_edits()` still asks, and `--no-rebuild` needs neither.
+  (`test_agent_model_set_yes_does_not_skip_the_unsynced_edits_guard`,
+  `test_agent_model_set_no_rebuild_stores_and_names_the_rebuild`)
+- **Credential semantics follow the options, not the resulting state** — both
+  credentials `default` → account defaults on; an explicit id → off, the other pin
+  kept; a single `default` unpins that mode and leaves the flag as it was, since a
+  live environment can hold a null pin with account defaults off.
+  (`test_agent_model_set_both_credentials_default_returns_to_account_defaults`,
+  `test_agent_model_set_an_explicit_credential_keeps_the_other_pin`)

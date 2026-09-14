@@ -616,6 +616,33 @@ class AccountClient:
         """
         return self._proxy_json("GET", f"environments/{environment_id}/health")
 
+    def get_environment(self, environment_id: str) -> dict:
+        """GET environments/{id} — one environment's settings and model health.
+
+        Carries both modes' ``agent_sdk_*``, ``model_override_*``,
+        ``use_default_ai_credentials``, ``*_ai_credential_id`` and a computed
+        ``model_health: {has_warning, modes: [{mode, model, status, cause,
+        suggested_model, cta}]}``, whose ``model`` is the effective one — the
+        override, or the catalog default.
+        """
+        return self._proxy_json("GET", f"environments/{environment_id}")
+
+    def reconfigure_environment(self, environment_id: str, settings: dict) -> dict:
+        """POST environments/{id}/reconfigure — store per-mode SDK/model/credentials.
+
+        ``settings`` must carry every field: the route resets what is left out
+        (a missing ``model_override_*`` clears the override, a missing
+        ``use_default_ai_credentials`` turns account defaults back on). Always
+        sent with ``rebuild: false``: with a rebuild the route blocks for
+        minutes, far past the escape hatch's 30 s inner timeout. Apply the
+        stored change with ``rebuild_agent_env``.
+        """
+        return self._proxy_json(
+            "POST",
+            f"environments/{environment_id}/reconfigure",
+            json_body={**settings, "rebuild": False},
+        )
+
     # --- Schedules (full CRUD via dedicated account verbs) ---
 
     def list_schedules(self, agent_id: str) -> dict:

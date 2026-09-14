@@ -6097,3 +6097,401 @@ def test_agent_prompts_diff_shows_edits_and_flags_platform_moves(
     assert "-You run `report.py` for the period." in result.output
     assert "router_trigger.md" in result.output
     assert "push leaves it alone" in result.output
+
+
+# --- agent model show | set ---
+
+
+def _model_health(
+    conversation="haiku", building="claude-opus", conversation_health=None, building_health=None
+):
+    modes = []
+    for mode, model, health in (
+        ("conversation", conversation, conversation_health),
+        ("building", building, building_health),
+    ):
+        row = {"mode": mode, "model": model, "status": "ok", "cause": None,
+               "suggested_model": None, "cta": None}
+        row.update(health or {})
+        modes.append(row)
+    return {"has_warning": any(m["status"] != "ok" for m in modes), "modes": modes}
+
+
+ENV_RECORD = {
+    "id": "env-1",
+    "status": "running",
+    "agent_sdk_conversation": "claude-code/anthropic",
+    "agent_sdk_building": "claude-code/anthropic",
+    "model_override_conversation": None,
+    "model_override_building": "claude-opus",
+    "use_default_ai_credentials": False,
+    "conversation_ai_credential_id": "cred-conv",
+    "building_ai_credential_id": "cred-build",
+    "model_health": _model_health(),
+}
+CURRENT_SETTINGS = {
+    key: ENV_RECORD[key]
+    for key in (
+        "agent_sdk_conversation",
+        "agent_sdk_building",
+        "model_override_conversation",
+        "model_override_building",
+        "use_default_ai_credentials",
+        "conversation_ai_credential_id",
+        "building_ai_credential_id",
+    )
+}
+
+
+def _model_client(mock_client_cls, account_root, monkeypatch, env=None, after=None):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    monkeypatch.setattr("cinna.account.time.sleep", lambda s: None)
+    env = env or ENV_RECORD
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent.return_value = {"id": "agent-123", "active_environment_id": "env-1"}
+    mock_client.get_environment.side_effect = [env, after or env]
+    mock_client.rebuild_agent_env.return_value = {
+        "environment_id": "env-1",
+        "status": "running",
+        "status_message": None,
+        "was_running": True,
+    }
+    mock_client.get_environment_health.return_value = {"status": "healthy"}
+    return mock_client
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_show_renders_both_modes(mock_client_cls, runner, account_root, monkeypatch):
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+
+    result = runner.invoke(cli, ["agent", "model", "show", "CRM Agent"])
+
+    assert result.exit_code == 0, result.output
+    mock_client.get_environment.assert_called_once_with("env-1")
+    lines = result.output.splitlines()
+    conversation = next(line for line in lines if line.strip().startswith("conversation"))
+    building = next(line for line in lines if line.strip().startswith("building"))
+    assert conversation.split() == ["conversation", "claude-code/anthropic", "—", "haiku", "ok"]
+    assert building.split() == ["building", "claude-code/anthropic", "claude-opus", "claude-opus", "ok"]
+    assert "environment env-1 (running)" in result.output
+    assert "AI credentials: conversation cred-conv, building cred-build" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_show_prints_the_platforms_remedy_on_a_warning(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    env = {
+        **ENV_RECORD,
+        "model_health": _model_health(
+            building_health={
+                "status": "retired_override",
+                "cause": "claude-opus is retired",
+                "suggested_model": "claude-opus-5",
+                "cta": "Switch to a current model.",
+            }
+        ),
+    }
+    _model_client(mock_client_cls, account_root, monkeypatch, env=env)
+
+    result = runner.invoke(cli, ["agent", "model", "show", "CRM Agent"])
+
+    assert result.exit_code == 0, result.output
+    assert "building: retired_override — claude-opus is retired" in result.output
+    assert "Switch to a current model." in result.output
+    assert "suggested model: claude-opus-5" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_show_json(mock_client_cls, runner, account_root, monkeypatch):
+    _model_client(mock_client_cls, account_root, monkeypatch)
+
+    result = runner.invoke(cli, ["agent", "model", "show", "CRM Agent", "--json"])
+
+    assert result.exit_code == 0, result.output
+    view = json.loads(result.output)
+    assert view["environment_id"] == "env-1"
+    assert view["conversation"]["override"] is None
+    assert view["conversation"]["effective"] == "haiku"
+    assert view["building"]["override"] == "claude-opus"
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_changes_only_the_conversation_model(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The route resets what its body leaves out: the building override and
+    both credential pins travel along unchanged, and nothing rebuilds inside
+    the escape hatch."""
+    after = {
+        **ENV_RECORD,
+        "model_override_conversation": "claude-haiku-4-5",
+        "model_health": _model_health(conversation="claude-haiku-4-5"),
+    }
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch, after=after)
+
+    result = runner.invoke(
+        cli, ["agent", "model", "set", "CRM Agent", "--conversation", "claude-haiku-4-5", "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    mock_client.reconfigure_environment.assert_called_once_with(
+        "env-1", {**CURRENT_SETTINGS, "model_override_conversation": "claude-haiku-4-5"}
+    )
+    mock_client.rebuild_agent_env.assert_called_once_with("agent-123")
+    assert "conversation model default → claude-haiku-4-5" in result.output
+    assert "ready to chat" in result.output
+    conversation = next(
+        line for line in reversed(result.output.splitlines()) if line.strip().startswith("conversation")
+    )
+    assert conversation.split()[2:4] == ["claude-haiku-4-5", "claude-haiku-4-5"]
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_default_clears_the_override(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+
+    result = runner.invoke(cli, ["agent", "model", "set", "CRM Agent", "--building", "default", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    mock_client.reconfigure_environment.assert_called_once_with(
+        "env-1", {**CURRENT_SETTINGS, "model_override_building": None}
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_unchanged_is_a_no_op(mock_client_cls, runner, account_root, monkeypatch):
+    """No confirmation, no write, no rebuild — and no stdin needed to prove it."""
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+
+    result = runner.invoke(cli, ["agent", "model", "set", "CRM Agent", "--building", "claude-opus"])
+
+    assert result.exit_code == 0, result.output
+    assert "nothing changed" in result.output
+    mock_client.reconfigure_environment.assert_not_called()
+    mock_client.rebuild_agent_env.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_declined_never_writes(mock_client_cls, runner, account_root, monkeypatch):
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+
+    result = runner.invoke(
+        cli, ["agent", "model", "set", "CRM Agent", "--conversation", "sonnet"], input="n\n"
+    )
+
+    assert result.exit_code != 0
+    assert "takes a few minutes" in result.output
+    mock_client.reconfigure_environment.assert_not_called()
+    mock_client.rebuild_agent_env.assert_not_called()
+
+
+@patch("cinna.account.sync_session.status")
+@patch("cinna.account.resolve_child_workspace")
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_yes_does_not_skip_the_unsynced_edits_guard(
+    mock_client_cls, mock_resolve, mock_status, runner, account_root, monkeypatch, sample_config
+):
+    from cinna.sync_session import SyncStatus
+
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+    mock_resolve.return_value = (account_root / "agents" / "crm-agent", sample_config)
+    mock_status.return_value = SyncStatus(
+        session_name="cinna-abc", state="connected", pending_to_remote=2
+    )
+
+    result = runner.invoke(
+        cli, ["agent", "model", "set", "CRM Agent", "--conversation", "sonnet", "--yes"], input="n\n"
+    )
+
+    assert result.exit_code != 0
+    assert "unsynced local change" in result.output
+    mock_client.reconfigure_environment.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_no_rebuild_stores_and_names_the_rebuild(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+
+    result = runner.invoke(
+        cli, ["agent", "model", "set", "CRM Agent", "--conversation", "sonnet", "--no-rebuild"]
+    )
+
+    assert result.exit_code == 0, result.output
+    mock_client.reconfigure_environment.assert_called_once()
+    mock_client.rebuild_agent_env.assert_not_called()
+    assert "applies on the next rebuild — cinna agent rebuild-env crm-agent" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_says_when_the_rebuild_left_it_stopped(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+    mock_client.rebuild_agent_env.return_value = {
+        "environment_id": "env-1", "status": "stopped", "status_message": None, "was_running": False,
+    }
+
+    result = runner.invoke(
+        cli, ["agent", "model", "set", "CRM Agent", "--conversation", "sonnet", "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "left stopped" in result.output
+    mock_client.get_environment_health.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_surfaces_the_platforms_400(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+    mock_client.reconfigure_environment.side_effect = PlatformError(
+        400, "Environment is currently building. Wait for it to finish before reconfiguring."
+    )
+
+    result = runner.invoke(
+        cli, ["agent", "model", "set", "CRM Agent", "--conversation", "sonnet", "--yes"]
+    )
+
+    assert result.exit_code != 0
+    assert "currently building" in result.output
+    mock_client.rebuild_agent_env.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_names_the_rebuild_when_it_fails_after_storing(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+    mock_client.rebuild_agent_env.side_effect = PlatformError(500, "boom")
+
+    result = runner.invoke(
+        cli, ["agent", "model", "set", "CRM Agent", "--conversation", "sonnet", "--yes"]
+    )
+
+    assert result.exit_code != 0
+    assert "stored, but the rebuild did not finish" in result.output
+    assert "cinna agent rebuild-env crm-agent" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_refuses_a_foreign_install(mock_client_cls, runner, account_root, monkeypatch):
+    """The escape hatch skips the build gate the account rebuild route runs."""
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+
+    result = runner.invoke(
+        cli, ["agent", "model", "set", "Installed Bundle", "--conversation", "sonnet", "--yes"]
+    )
+
+    assert result.exit_code != 0
+    assert "This is an installed bundle" in result.output
+    mock_client.get_agent.assert_not_called()
+    mock_client.reconfigure_environment.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_needs_an_option(mock_client_cls, runner, account_root, monkeypatch):
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+
+    result = runner.invoke(cli, ["agent", "model", "set", "CRM Agent"])
+
+    assert result.exit_code == 2
+    mock_client.list_account_agents.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_both_credentials_default_returns_to_account_defaults(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch)
+
+    result = runner.invoke(
+        cli,
+        ["agent", "model", "set", "CRM Agent", "--conversation-credential", "default",
+         "--building-credential", "default", "--no-rebuild"],
+    )
+
+    assert result.exit_code == 0, result.output
+    mock_client.reconfigure_environment.assert_called_once_with(
+        "env-1",
+        {**CURRENT_SETTINGS, "use_default_ai_credentials": True,
+         "conversation_ai_credential_id": None, "building_ai_credential_id": None},
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_an_explicit_credential_keeps_the_other_pin(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    env = {**ENV_RECORD, "use_default_ai_credentials": True}
+    mock_client = _model_client(mock_client_cls, account_root, monkeypatch, env=env)
+
+    result = runner.invoke(
+        cli,
+        ["agent", "model", "set", "CRM Agent", "--conversation-credential", "cred-new", "--no-rebuild"],
+    )
+
+    assert result.exit_code == 0, result.output
+    mock_client.reconfigure_environment.assert_called_once_with(
+        "env-1",
+        {**CURRENT_SETTINGS, "use_default_ai_credentials": False,
+         "conversation_ai_credential_id": "cred-new", "building_ai_credential_id": "cred-build"},
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_model_set_calls_an_unknown_model_a_likely_typo(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    after = {
+        **ENV_RECORD,
+        "model_override_conversation": "haikuu",
+        "model_health": _model_health(
+            conversation="haikuu",
+            conversation_health={"status": "unknown_model", "cta": "Pick a model from the catalog."},
+        ),
+    }
+    _model_client(mock_client_cls, account_root, monkeypatch, after=after)
+
+    result = runner.invoke(
+        cli, ["agent", "model", "set", "CRM Agent", "--conversation", "haikuu", "--no-rebuild"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "usually a typo in the model id" in result.output
+    assert "Pick a model from the catalog." in result.output
+
+
+@respx.mock
+def test_account_client_get_environment(account_client):
+    from cinna.client import PROXY_MARKER_HEADER
+
+    route = respx.post("https://platform.example.com/api/v1/cli/account/api-proxy").respond(
+        200, json={"id": "env-1"}, headers={PROXY_MARKER_HEADER: "1"}
+    )
+    assert account_client.get_environment("env-1") == {"id": "env-1"}
+    body = json.loads(route.calls[0].request.content)
+    assert (body["method"], body["path"]) == ("GET", "environments/env-1")
+
+
+@respx.mock
+def test_account_client_reconfigure_environment_never_rebuilds_through_the_hatch(account_client):
+    """With a rebuild the route blocks for minutes; the hatch gives up after 30 s."""
+    from cinna.client import PROXY_MARKER_HEADER
+
+    route = respx.post("https://platform.example.com/api/v1/cli/account/api-proxy").respond(
+        200, json={"id": "env-1"}, headers={PROXY_MARKER_HEADER: "1"}
+    )
+    account_client.reconfigure_environment(
+        "env-1", {"model_override_conversation": "haiku", "rebuild": True}
+    )
+    body = json.loads(route.calls[0].request.content)
+    assert (body["method"], body["path"]) == ("POST", "environments/env-1/reconfigure")
+    assert body["json_body"] == {"model_override_conversation": "haiku", "rebuild": False}

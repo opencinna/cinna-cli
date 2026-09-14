@@ -258,6 +258,30 @@ cinna agent prompts push crm-agent        # one bulk write, then the doc prompts
 
 `cinna agent show <agent>` prints each prompt under its `[entrypoint]` / `[workflow]` / `[refiner]` label and each connected credential with its type, slot, setup state and id. `cinna agent rebuild-env <agent>` waits after the rebuild until the environment answers its health check, and says "ready to chat" only then. `cinna agent restart-env` re-runs the same image and does not update the container's core or SDK helpers.
 
+### `cinna agent model show | set <agent>`
+
+The model is a setting of the agent's environment, not of the agent. `show` prints each mode's SDK, model override, effective model and health; `set` changes only what you pass and rebuilds.
+
+```bash
+cinna agent model show crm-agent
+cinna agent model set crm-agent --conversation haiku             # rebuilds, waits for the health check
+cinna agent model set crm-agent --building default --no-rebuild  # clear the override; apply on the next rebuild-env
+```
+
+`default` clears an override, or with `--conversation-credential` / `--building-credential` unpins an AI credential. The other mode and the credential pins keep their values, a setting already in place is a no-op, and `unknown_model` right after a set is usually a typo in the model id. Refused on a foreign install.
+
+### `cinna agent scenarios list | run <agent>`
+
+Re-run the agent's recorded `docs/test_scenarios/*.md` — each file's `## Say | Expect` table — without one `cinna chat` per row.
+
+```bash
+cinna agent scenarios list crm-agent
+cinna agent scenarios run crm-agent --out run.md
+cinna agent scenarios run crm-agent scope_and_pushback --yes --json
+```
+
+Every Say row goes to a fresh session, one after another. Each case reports the reply, the tool calls, the outcome and the session id, under a header naming the conversation model. The run does not judge: mark each row against its Expect. A case that does not complete prints its `cinna chat --attach` command, is not re-sent, and makes the command exit non-zero. The files are read from the synced workspace (`--path DIR` for any other folder) and never pushed.
+
 ### `cinna agent import <path> [--name TEXT] [--workspace REF] [--update] [--dry-run] [--no-push] [--yes]`
 
 Import an agent that was built **locally** with the [Local Agent Kit](docs/features/local_agent_import/local_agent_import.md) — a folder holding a `cinna-agent.json` manifest, typically `../Local/<slug>` next to this account workspace. Run it from the account workspace root (or any folder inside it).

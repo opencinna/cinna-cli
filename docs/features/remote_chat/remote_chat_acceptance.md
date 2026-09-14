@@ -250,6 +250,38 @@ depends on — assert on parsed events, not on prose.
 - **Watch for:** `--show` blocking on a running turn; an in-progress message
   emitted as final; a message silently sent.
 
+### 15. `agent scenarios run` replays the recorded set, one session per row
+
+- **Goal:** re-run a scenario set after a change and read every reply and tool
+  call without one `cinna chat` per row.
+- **Setup:** a synced agent, and a scenario folder with two rows plus a README that
+  must not be run:
+  ```
+  mkdir -p /tmp/sc
+  printf '## Say | Expect\n| Say | Expect |\n|---|---|\n| `hi` | a greeting, no tool call |\n| `whats 2+2 \\| explain` | an answer; the pipe reaches the agent |\n' > /tmp/sc/scope.md
+  printf '# Fixtures\n## Say | Expect\n| Say | Expect |\n|---|---|\n| `never sent` | - |\n' > /tmp/sc/README.md
+  ```
+- **Steps:**
+  ```
+  cinna agent scenarios list acc-test-agent --path /tmp/sc
+  cinna agent scenarios run acc-test-agent --path /tmp/sc --out /tmp/sc-run.md
+  cinna agent scenarios run acc-test-agent --path /tmp/sc --yes --json | jq -c '{event, row, outcome, session_id, tool_calls}'
+  cinna agent scenarios run acc-test-agent --path /tmp/sc --yes --timeout 1; echo "exit=$?"
+  ```
+- **Expected:** `list` shows `scope.md  2 cases` and no README.md. `run` prints the
+  conversation model and "2 cases across 1 file — each is a real agent turn", asks
+  to confirm, then one block per case with Say, Expect, Reply, Tools and
+  `completed`, and two different session ids; the second Say reaches the agent as
+  `whats 2+2 | explain`. `/tmp/sc-run.md` holds `## scope.md` and a `| # | Say |
+  Expect | Reply | Tools | Outcome | Verdict |` table. `--json` prints exactly two
+  `case` lines and one `summary` with `completed: 2`. With `--timeout 1` each case
+  reports `timeout` with its `cinna chat --attach <sid>`, both cases are still sent,
+  and `exit=1`.
+- **Watch for:** the second row answering with context from the first (a reused
+  session); README.md run as a scenario; the escaped pipe cutting the Say short; a
+  timeout that stops the run or re-sends a message; exit 0 after an incomplete
+  case; human text mixed into the `--json` stream.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **NDJSON contract** — default output is one JSON object per line; the first event
@@ -265,9 +297,15 @@ depends on — assert on parsed events, not on prose.
   reaches for a per-agent token.
 - **Upload is the only non-proxy call** — all session/message/download traffic goes
   through the api-proxy; only the multipart upload uses `/files/upload`.
+- **One turn per Say row** — `agent scenarios run` sends each row exactly once, in
+  its own session; nothing is re-sent after a timeout, and `README.md` is never a
+  scenario file.
 
 ## Cleanup
 
+- Remove scenario scratch files: `rm -rf /tmp/sc /tmp/sc-run.md`. A scenario run
+  leaves one session per row, titled `scenario <file> #<row>`; delete them from the
+  platform UI if the environment should stay pristine.
 - Remove downloaded attachments: `rm -rf cinna-chat-files/` (and any custom
   `--download-dir`).
 - Remove scratch inputs: `rm -f /tmp/data.csv /tmp/chat*.ndjson`.

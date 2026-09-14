@@ -59,12 +59,21 @@ _POLL_RETRY_DELAYS = (2.0, 4.0, 8.0, 15.0, 30.0)
 
 
 class _Emitter:
-    """Render chat events: NDJSON to stdout by default, Rich when ``pretty``."""
+    """Render chat events: NDJSON to stdout by default, Rich when ``pretty``.
 
-    def __init__(self, pretty: bool):
+    With a ``sink`` nothing is printed: each event is handed to it instead —
+    how ``cinna agent scenarios run`` drives the same poll loop and builds its
+    own report from what the turn produced.
+    """
+
+    def __init__(self, pretty: bool, sink=None):
         self.pretty = pretty
+        self.sink = sink
 
     def emit(self, event: dict) -> None:
+        if self.sink is not None:
+            self.sink(event)
+            return
         if not self.pretty:
             sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
             sys.stdout.flush()

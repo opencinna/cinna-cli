@@ -921,6 +921,208 @@ def agent_prompts_push(
     run_agent_prompts_push(agent_ref, dir_opt, sync_env, force, dry_run)
 
 
+# ─── agent model subgroup ──────────────────────────────────────────────────
+
+
+_MODEL_VALUE_HELP = "a model id, or 'default' to clear the override (the catalog default)"
+
+
+@agent.group(name="model")
+def agent_model():
+    """Show or set the model an agent runs in each mode.
+
+    \b
+    show   both modes' SDK, override, effective model and health
+    set    change a mode's model or AI credential, then rebuild
+
+    The model is a setting of the agent's environment, not of the agent:
+    'cinna api PUT agents/<id>' cannot change it. 'set' copies both modes'
+    current settings, changes only what you pass, and rebuilds the environment
+    so the change applies. Model ids are not checked locally — the platform's
+    catalog decides, and 'show' reports its verdict under health.
+    """
+
+
+@agent_model.command(name="show")
+@click.argument("agent_ref")
+@click.option("--json", "as_json", is_flag=True, help="Print the settings as JSON.")
+def agent_model_show(agent_ref: str, as_json: bool):
+    """Show AGENT_REF's SDK, model override, effective model and health per mode."""
+    from cinna.account import run_agent_model_show
+
+    run_agent_model_show(agent_ref, as_json)
+
+
+@agent_model.command(name="set")
+@click.argument("agent_ref")
+@click.option(
+    "--conversation",
+    default=None,
+    metavar="MODEL|default",
+    help=f"Conversation-mode model: {_MODEL_VALUE_HELP}.",
+)
+@click.option(
+    "--building",
+    default=None,
+    metavar="MODEL|default",
+    help=f"Building-mode model: {_MODEL_VALUE_HELP}.",
+)
+@click.option(
+    "--conversation-credential",
+    default=None,
+    metavar="ID|default",
+    help="Pin conversation mode to this AI credential id, or 'default' to unpin it.",
+)
+@click.option(
+    "--building-credential",
+    default=None,
+    metavar="ID|default",
+    help="Pin building mode to this AI credential id, or 'default' to unpin it. "
+    "Both credentials 'default' switches back to the account's default AI credentials.",
+)
+@click.option(
+    "--no-rebuild",
+    "no_rebuild",
+    is_flag=True,
+    help="Store the change without rebuilding; it applies on the next "
+    "'cinna agent rebuild-env'.",
+)
+@click.option(
+    "--yes",
+    "yes",
+    is_flag=True,
+    help="Skip the 'this rebuilds the environment' confirmation. Does NOT skip "
+    "the unsynced-local-changes prompt.",
+)
+def agent_model_set(
+    agent_ref: str,
+    conversation: str | None,
+    building: str | None,
+    conversation_credential: str | None,
+    building_credential: str | None,
+    no_rebuild: bool,
+    yes: bool,
+):
+    """Change AGENT_REF's model or AI credential for one or both modes.
+
+    Only what you pass changes: the other mode and the credential pins keep
+    their current values, and a setting that is already in place is a no-op.
+    By default the environment is then rebuilt (minutes, blocking) and the
+    command waits until it answers its health check.
+
+    \b
+      cinna agent model set crm-agent --conversation haiku
+      cinna agent model set crm-agent --building default --no-rebuild
+    """
+    from cinna.account import run_agent_model_set
+
+    run_agent_model_set(
+        agent_ref,
+        conversation=conversation,
+        building=building,
+        conversation_credential=conversation_credential,
+        building_credential=building_credential,
+        rebuild=not no_rebuild,
+        yes=yes,
+    )
+
+
+# ─── agent scenarios subgroup ──────────────────────────────────────────────
+
+
+_SCENARIOS_PATH_HELP = (
+    "Scenario folder (default: the synced workspace's docs/test_scenarios/). "
+    "An agent folder that holds docs/test_scenarios/ works too, e.g. a Local "
+    "Agent Kit agent's Local/<slug>."
+)
+
+
+@agent.group(name="scenarios")
+def agent_scenarios():
+    """Re-run an agent's recorded test scenarios (docs/test_scenarios/*.md).
+
+    \b
+    list   every scenario file and how many Say | Expect rows it holds
+    run    send every Say row to the agent, each in a fresh session
+
+    Each file's '## Say | Expect' table is the contract (CHAT_TESTING.md,
+    "Record the conditions"); README.md is not a scenario file. The files are
+    read locally and never pushed. 'run' does not judge pass or fail: Expect is
+    prose, so the report is for you to mark.
+    """
+
+
+@agent_scenarios.command(name="list")
+@click.argument("agent_ref")
+@click.option(
+    "--path", "path_opt", default=None, type=click.Path(file_okay=False), help=_SCENARIOS_PATH_HELP
+)
+def agent_scenarios_list(agent_ref: str, path_opt: str | None):
+    """List AGENT_REF's scenario files and their row counts."""
+    from cinna.scenarios import run_scenarios_list
+
+    run_scenarios_list(agent_ref, path_opt)
+
+
+@agent_scenarios.command(name="run")
+@click.argument("agent_ref")
+@click.argument("files", nargs=-1)
+@click.option(
+    "--path", "path_opt", default=None, type=click.Path(file_okay=False), help=_SCENARIOS_PATH_HELP
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    show_default=True,
+    help="Max seconds to wait for each case's turn.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, help="One JSON object per case, then a summary. Needs --yes."
+)
+@click.option(
+    "--out",
+    "out",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help="Also write a Markdown report to this file.",
+)
+@click.option("--yes", is_flag=True, help="Skip the 'each case is a real agent turn' confirmation.")
+def agent_scenarios_run(
+    agent_ref: str,
+    files: tuple[str, ...],
+    path_opt: str | None,
+    timeout: int,
+    as_json: bool,
+    out: str | None,
+    yes: bool,
+):
+    """Send every Say row of AGENT_REF's scenarios and report what came back.
+
+    FILES narrows the run to some scenario files (name, with or without .md).
+    Rows run one after another, each in a fresh conversation session, so no
+    row leaks context into a later one. Per case: the reply, the tool calls,
+    the outcome (completed, timeout, not_started) and the session id. A case
+    that does not complete is never re-sent — its 'cinna chat --attach'
+    command is printed — and the command exits non-zero at the end.
+
+    \b
+      cinna agent scenarios run crm-agent
+      cinna agent scenarios run crm-agent scope_and_pushback --out run.md
+    """
+    from cinna.scenarios import run_scenarios_run
+
+    run_scenarios_run(
+        agent_ref,
+        files,
+        path_opt=path_opt,
+        timeout=timeout,
+        as_json=as_json,
+        out=out,
+        yes=yes,
+    )
+
+
 # ─── agent schedule subgroup ───────────────────────────────────────────────
 
 

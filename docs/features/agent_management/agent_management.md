@@ -4,7 +4,8 @@
 
 Drive an agent's **whole local-dev lifecycle from the account workspace** —
 create an agent on the platform, attach (sync) a local workspace to it, detach
-(unsync) it, restart its remote environment when it gets wedged, and inspect what
+(unsync) it, restart or rebuild its remote environment, choose the model it runs
+in each mode, and inspect what
 the running agent *actually* sees (effective prompts, features, credentials, and
 self-reported status). One account login fans out to every agent you own; you
 never paste a per-agent setup token.
@@ -37,6 +38,11 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
   the *runtime* reads right now (the prompts the env assembles, the live status
   snapshot) — so you can confirm an edit is actually live without opening the
   browser.
+- **The model belongs to the environment.** An agent's active environment holds,
+  per mode, an SDK, an optional model override and the AI credentials; with no
+  override the platform catalog picks the mode's default. `agent model` reads and
+  changes those settings — never the agent record — and a change reaches the
+  container only through a rebuild.
 
 ## User flows
 
@@ -127,6 +133,33 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
      this account cannot see reads `slot: unknown`, never `no slot`. When the
      agent's credential listing cannot be read, it falls back to name + type.
 
+### Choose the model per mode
+1. `cinna agent model show <agent_ref> [--json]` prints, for conversation and
+   building mode, the SDK, the model override (`—` when none), the **effective**
+   model the runtime uses — the override, or the platform catalog's default for
+   that mode — and the platform's health verdict (`ok`, `retired_override`,
+   `unknown_model`, `unverified`), plus which AI credentials the environment uses.
+   When the platform flags a warning, its own remediation text and suggested model
+   are printed under the table.
+2. `cinna agent model set <agent_ref>` takes `--conversation` / `--building` (a
+   model id, or `default` to clear the override) and `--conversation-credential` /
+   `--building-credential` (an AI credential id, or `default` to unpin). Only what
+   was passed changes. Both credentials `default` returns to the account's default
+   AI credentials; an explicit credential id turns them off and keeps the other
+   mode's pin.
+3. A request that matches the current settings says "nothing changed" and stops —
+   no prompt, no write, no rebuild.
+4. Otherwise it runs `rebuild-env`'s gates — the unsynced-local-changes guard, then
+   the "takes a few minutes" confirmation that `--yes` skips — stores the new
+   settings, rebuilds, and ends the way `rebuild-env` does (the stopped note, or
+   the health-check wait and "ready to chat"). The new table follows.
+5. `--no-rebuild` stores the change and names `cinna agent rebuild-env <agent>` to
+   apply it.
+6. The usual reason to switch is a smaller conversation model. The gate is the
+   scenario set: re-run it with `cinna agent scenarios run` and keep the switch only
+   if every row still meets its Expect (see
+   [Remote Chat](../remote_chat/remote_chat.md)).
+
 ### Edit the prompts as files
 1. `cinna agent prompts pull <agent_ref>` writes `workflow.md`, `entrypoint.md`,
    `refiner.md`, `router_trigger.md`, `description.md` and `example_prompts.json`
@@ -143,12 +176,14 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
 4. Why files: changing one line used to take a raw GET, a hand-built JSON body, a
    raw PUT and a raw `sync-prompts` call — and building that JSON inline let the
    shell command-substitute the prompt's Markdown backticks.
-2. `cinna agent status show <agent_ref>` prints the agent's cached `STATUS.md`
+
+### Check the agent's self-reported status
+1. `cinna agent status show <agent_ref>` prints the agent's cached `STATUS.md`
    snapshot (severity, summary, age) plus the configured refresh pre-command.
-3. `cinna agent status refresh <agent_ref>` forces a **live** re-read — wakes a
+2. `cinna agent status refresh <agent_ref>` forces a **live** re-read — wakes a
    suspended env, runs the pre-command, re-reads `STATUS.md`, and never fails
    (it falls back to the cached snapshot on error).
-4. `cinna agent status set-command <agent_ref> "<cmd>"` configures the pre-command
+3. `cinna agent status set-command <agent_ref> "<cmd>"` configures the pre-command
    the refresh runs (a raw shell/Python string or a `/run:<name>` reference); an
    empty string opts out. The platform default is `/run:status`.
 
@@ -183,6 +218,14 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
   or another agent's prompts without `--force`. The agent config stays
   authoritative; hand-editing the synced `docs/*.md` as well is a last-writer-wins
   race — pick one path.
+- **Model settings merge, never reset.** The model lives on the agent's
+  environment, whose write path resets every field it is not sent, so `model set`
+  sends both modes' current settings with only the requested change, stores them
+  without a rebuild (a rebuild through the escape hatch outlasts its 30 s limit),
+  then rebuilds through the account route. An unchanged set is a no-op. A foreign
+  install or a non-developer is refused before anything is read, with the
+  platform's own sentence. Model ids are never validated locally — the platform's
+  health verdict is the check.
 - **Rebuild readiness is stated, not assumed.** A rebuilt, running environment is
   "ready to chat" only after its health check answers; a timeout is a warning, and
   an unreadable health answer says nothing rather than guessing.
@@ -201,6 +244,7 @@ cinna agent <verb> ── account.py ── AccountClient ──► /api/v1/cli/
       │  create→ thin agent create                        │  POST …/agents
       │  restart-env→ bounce container (block until up)    │  POST …/agents/{id}/restart-env
       │  rebuild-env→ recreate container from template     │  POST …/agents/{id}/rebuild-env
+      │  model → copy settings, store, then rebuild-env    │  GET/POST environments/{id}[/reconfigure] (api-proxy)
       │  show  → effective prompts/features/creds          │  GET  …/agents/{id}/inspect
       │  status→ STATUS.md snapshot / refresh / set-cmd    │  GET/POST …/agents/{id}/status[/refresh-command]
       ▼

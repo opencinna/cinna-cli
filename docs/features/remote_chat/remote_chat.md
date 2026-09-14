@@ -95,6 +95,27 @@ message itself.
 - `--attach` / `--show` take no message, `--resume`, `--file` or `--agent` — they
   name an existing session and send nothing.
 
+### Re-run recorded scenarios
+- A builder records the agent's regression set as `docs/test_scenarios/*.md` in the
+  agent's workspace: one file per kind of question, each with a `## Say | Expect`
+  table (the contract is `src/cinna/templates/CHAT_TESTING.md`, "Record the
+  conditions"). `cinna agent scenarios list <agent>` shows each file and its row
+  count and flags a file with no readable table; `README.md` is never a scenario.
+- `cinna agent scenarios run <agent> [FILE…]` prints a header naming the agent's
+  effective conversation model and "N cases across M files — each is a real agent
+  turn", confirms (`--yes` skips), then sends every Say row, one after another, each
+  in its **own new session** so no row inherits another's context.
+- Per case it reports the reply, a compact tool-call list (tool name and the first
+  line of its input), the outcome (`completed`, `timeout`, `not_started`, or
+  `lost_contact`), the session id and the duration. `--json` prints one object per
+  case and a closing summary; `--out FILE` also writes a Markdown report grouped by
+  file, with an empty Verdict column.
+- It never judges: Expect is prose, so the builder marks each row. A case that did
+  not complete carries its `cinna chat --attach <sid>`, is never re-sent, and the
+  run goes on to the next case, then exits non-zero.
+- The files are read from the synced workspace copy, or from `--path DIR` (a Local
+  Agent Kit agent folder works too), and nothing is pushed.
+
 ## Business rules / guardrails
 
 - **Account workspace required, fail-loud.** No `.cinna/account.json` up the tree
@@ -130,6 +151,10 @@ message itself.
 - **Upload is the one non-proxy call.** The api-proxy is JSON-only and can't carry
   multipart, so uploading a local attachment uses a dedicated account-CLI route;
   everything else in `cinna chat` rides the proxy.
+- **Scenario runs record; they never judge or re-send.** Each Say row is one real
+  turn in a fresh session. The run never marks pass or fail (Expect is prose), never
+  re-sends a case that did not complete, and exits non-zero when any case did not.
+  A `--json` run needs `--yes`, because a prompt would corrupt the stream.
 
 ## Agent resolution
 
@@ -157,6 +182,11 @@ AccountClient ── api-proxy (buffered JSON) ─► platform conversation API
    send (JSON ack) ──► agent turn runs async on the platform
                                    │
    poll get_messages + streaming-status ──► emit NDJSON: session / upload / message / status / done
+
+cinna agent scenarios run ─► scenarios.py ── parse docs/test_scenarios/*.md (local copy)
+      │   for each Say row: new session → send → chat.py poll loop (collecting emitter)
+      ▼
+   per-case block / NDJSON case lines ──► summary (+ Markdown report with --out)
 ```
 
 ## Integration points
@@ -168,6 +198,10 @@ AccountClient ── api-proxy (buffered JSON) ─► platform conversation API
   edit a prompt/script, let Mutagen mirror it to the running container, then
   `cinna chat` exercises that live version through a real session. The pairing is
   the core build-test loop.
+- **Agent Management** ([agent_management](../agent_management/agent_management.md)) —
+  `cinna agent model set` switches the conversation model; `cinna agent scenarios
+  run` is the check that decides whether the switch stays, and its header names the
+  model it ran on.
 - **Remote Exec** (`../remote_exec/remote_exec.md`) —
   `cinna exec` runs an arbitrary command in the agent-env over an SSE stream;
   `cinna chat` instead drives the full conversation pipeline. Exec is the

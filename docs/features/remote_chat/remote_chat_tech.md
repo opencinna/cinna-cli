@@ -22,6 +22,11 @@ all logic lives in `src/cinna/`, tests in `tests/`.
   missing-message error, account-workspace requirement, poll retries and the
   lost-contact recovery hint, `--attach`, `--show`, the `--attach` usage guard,
   and the proxy/upload client-method tests).
+- `src/cinna/scenarios.py` — `cinna agent scenarios`: the `Say | Expect` parser,
+  scenario-folder resolution, and the runner that drives `chat.py`'s poll loop
+  once per row. Tests: `tests/test_scenarios.py` (parser cases, `list`, one session
+  per row, declined confirmation, a timeout that does not stop the run, `--json`,
+  `--out`, named files).
 
 ## Command surface
 
@@ -30,6 +35,11 @@ all logic lives in `src/cinna/`, tests in `tests/`.
   `src/cinna/chat.py:run_chat_attach()`.
 - `cinna chat --show SID` → `src/cinna/main.py:chat_cmd()` →
   `src/cinna/chat.py:run_chat_show()`.
+- `cinna agent scenarios list` → `src/cinna/main.py:agent_scenarios_list()` →
+  `src/cinna/scenarios.py:run_scenarios_list()`.
+- `cinna agent scenarios run` → `src/cinna/main.py:agent_scenarios_run()` →
+  `src/cinna/scenarios.py:run_scenarios_run()` (options `FILES…`, `--path`,
+  `--timeout`, `--json`, `--out`, `--yes`).
 
 Key options (all on `chat_cmd`): `--agent`, `--resume`, `--attach`, `--show`,
 `--file` (repeatable), `--mode` (`conversation`|`building`, new sessions only),
@@ -113,7 +123,40 @@ refuses `--attach` together with `--show`, and either with a message, `--resume`
 - `src/cinna/chat.py:_download_dir()` — resolves `<download_dir or
   ./cinna-chat-files>/<session_id>/`.
 - `src/cinna/chat.py:_Emitter` — NDJSON (one `json.dumps` line, flushed) by
-  default; Rich rendering when `pretty`.
+  default; Rich rendering when `pretty`. With a `sink` it prints nothing and hands
+  each event to the sink — how the scenario runner collects a turn.
+
+### Scenarios (`src/cinna/scenarios.py`)
+
+- `src/cinna/scenarios.py:parse_scenarios()` — the first table under a heading that
+  reads `Say | Expect` (any level, `\|` allowed in the heading), up to the next
+  heading of the same or a higher level; fenced code is skipped. A header row
+  followed by a separator row starts the table; the Say and Expect columns are found
+  by header name (else the first two), extra columns ignored. `_split_row()` keeps
+  `\|` as a literal pipe, `_unwrap_code()` strips one backtick span around Say, and
+  `<br>` becomes a newline. A row with an empty Say is skipped but still counted in
+  `row`. `None` when the file has no such table.
+- `src/cinna/scenarios.py:scenario_files()` / `load_scenarios()` — the folder's
+  `*.md` minus `README.md`, sorted; named FILES are matched by name or stem
+  (`_pick_file()`), an unknown name → an error listing the available files.
+- `src/cinna/scenarios.py:resolve_scenarios_dir()` — `--path`, or the
+  `docs/test_scenarios/` / `workspace/docs/test_scenarios/` inside it; otherwise <!-- nocheck: agent-workspace path -->
+  `account.py:resolve_child_workspace()` and its `workspace/docs/test_scenarios/`.
+  An unsynced agent → an error naming `cinna agent sync` and `--path`.
+- `src/cinna/scenarios.py:run_scenarios_run()` — `account.py:_require_yes_for_json()`;
+  parse; resolve the agent; `_conversation_model()` (best-effort, through
+  `account.py:_agent_environment()` and `_model_view()`); the header and the
+  confirmation; then per case `_run_case()`, printed by `_print_case()` or as one
+  JSON line. A `finally` builds the summary and writes `--out` (`_report_markdown()`)
+  even when the run is interrupted. Any case not `completed` → `CinnaExit` exit 1,
+  code `scenarios_incomplete`.
+- `src/cinna/scenarios.py:_run_case()` — `create_session(mode="conversation")` →
+  `_message_count()` → `send_message()` → `_poll_turn()` with a collecting
+  `_Emitter`. A transient failure after the send → outcome `lost_contact` and the
+  run goes on; any other failure aborts the run; Ctrl-C interrupts the current turn.
+  The result keeps the non-user messages' text (system ones prefixed), `_tool_call()`
+  one-liners for `tool` / `tool_use` events, status messages, attachment names,
+  `session_id`, `duration_s`, and `recover` for every outcome but `completed`.
 
 ## Transport (`src/cinna/client.py:AccountClient`)
 
@@ -163,6 +206,14 @@ refuses `--attach` together with `--show`, and either with a message, `--resume`
 - `_MESSAGE_PAGE` = 500 — message page size (baseline count + drain).
 - `DEFAULT_DOWNLOAD_DIR` = `cinna-chat-files` — attachment download base.
 - `_TRACE_SKIP_TYPES` = `{attachment, attachment_error, done}` — trace exclusions.
+- `src/cinna/scenarios.py:SCENARIOS_SUBDIR` — the scenario folder inside a workspace
+  (`docs/test_scenarios`). <!-- nocheck: agent-workspace path -->
+- `src/cinna/scenarios.py:_TOOL_INPUT_WIDTH` = 160 — characters of a tool call's
+  first input line kept in the per-case list.
+- `src/cinna/scenarios.py:_REPORT_REPLY_WIDTH` = 300 — reply characters kept in the
+  `--out` table (the per-case details keep the whole reply).
+- `cinna agent scenarios run --timeout` defaults to 600 s **per case**, with the same
+  `START_GRACE_SECONDS` and poll retries as `cinna chat`.
 
 ## Edge cases & guardrails (preserve these)
 
@@ -204,3 +255,18 @@ refuses `--attach` together with `--show`, and either with a message, `--resume`
 - **`done.outcome` is always present** — `_emit_done()` sets it from the caller's
   outcome and adds `recover` for `timeout` / `not_started` / `in_progress`,
   independent of the session's `result_state`.
+- **One session per scenario row** — `_run_case()` creates a new session for every
+  row and never resumes one, so an earlier row cannot leak context into a later one.
+  (`tests/test_scenarios.py:test_scenarios_run_sends_each_row_in_its_own_session`)
+- **A scenario that did not complete is not re-sent** — its `recover` command is
+  printed, the next row runs, and the command exits non-zero at the end.
+  (`test_scenarios_run_timeout_on_one_case_does_not_stop_the_rest`)
+- **Scenario `--json` is a pure stream** — it needs `--yes` (a prompt would corrupt
+  it) and prints only `case` lines and one `summary`.
+  (`test_scenarios_run_json_emits_one_object_per_case_and_a_summary`,
+  `test_scenarios_run_json_needs_yes`)
+- **Only the Say | Expect table is a case** — tables under other headings, fenced
+  examples and `README.md` are never sent.
+  (`test_parse_ignores_tables_under_other_headings`,
+  `test_parse_skips_a_heading_inside_a_code_fence`,
+  `test_load_excludes_readme_and_flags_a_file_without_a_table`)

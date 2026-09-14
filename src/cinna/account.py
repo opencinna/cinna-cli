@@ -1962,29 +1962,7 @@ def run_agent_restart_env(agent_ref: str) -> None:
         # bounces the container — if this machine has unsynced local edits or
         # parked conflicts for the agent, the restart can clobber them. Warn (and
         # confirm) before proceeding so the builder can `cinna sync push` first.
-        resolved = resolve_child_workspace(account_root, agent_ref)
-        if resolved is not None:
-            _child_root, child_cfg = resolved
-            try:
-                st = sync_session.status(child_cfg)
-            except Exception:
-                st = None
-            if st is not None and st.exists and (
-                st.pending_to_remote > 0 or st.conflict_count > 0
-            ):
-                bits = []
-                if st.pending_to_remote > 0:
-                    bits.append(f"{st.pending_to_remote} unsynced local change(s)")
-                if st.conflict_count > 0:
-                    bits.append(f"{st.conflict_count} conflict(s)")
-                console.warn(
-                    f"This machine has {' and '.join(bits)} for {agent['name']}. "
-                    "A restart may overwrite them with the backend scaffold. "
-                    "Run 'cinna sync push --agent "
-                    f"{normalize_agent_dir_name(agent['name'])}' first to be safe."
-                )
-                if not console.confirm("Restart anyway?", default=False):
-                    raise click.Abort()
+        _confirm_unsynced_edits(account_root, agent_ref, agent, "restart")
 
         with console.spinner(f"Restarting environment for {agent['name']}..."):
             result = client.restart_agent_env(agent["id"])
@@ -2017,29 +1995,7 @@ def run_agent_rebuild_env(agent_ref: str, yes: bool = False) -> None:
         # Same D2 guard as restart-env, and it matters more here: a rebuild
         # re-materializes the backend scaffold over a freshly recreated
         # container, so unsynced local edits have further to fall.
-        resolved = resolve_child_workspace(account_root, agent_ref)
-        if resolved is not None:
-            _child_root, child_cfg = resolved
-            try:
-                st = sync_session.status(child_cfg)
-            except Exception:
-                st = None
-            if st is not None and st.exists and (
-                st.pending_to_remote > 0 or st.conflict_count > 0
-            ):
-                bits = []
-                if st.pending_to_remote > 0:
-                    bits.append(f"{st.pending_to_remote} unsynced local change(s)")
-                if st.conflict_count > 0:
-                    bits.append(f"{st.conflict_count} conflict(s)")
-                console.warn(
-                    f"This machine has {' and '.join(bits)} for {agent['name']}. "
-                    "A rebuild may overwrite them with the backend scaffold. "
-                    "Run 'cinna sync push --agent "
-                    f"{normalize_agent_dir_name(agent['name'])}' first to be safe."
-                )
-                if not console.confirm("Rebuild anyway?", default=False):
-                    raise click.Abort()
+        _confirm_unsynced_edits(account_root, agent_ref, agent, "rebuild")
 
         if not yes and not console.confirm(
             f"Rebuild {agent['name']}'s environment? This recreates the "
@@ -2054,32 +2010,74 @@ def run_agent_rebuild_env(agent_ref: str, yes: bool = False) -> None:
         ):
             result = client.rebuild_agent_env(agent["id"])
 
-        console.status(f"Environment rebuilt for {agent['name']}")
-        console.console.print(f"  Status: {result.get('status')}")
-        if result.get("status_message"):
-            console.console.print(f"  Message: {result['status_message']}")
+        _report_rebuild(client, agent, result)
 
-        # A rebuild restores the state it found. An environment that was stopped
-        # comes back stopped — a success, but not one the user can act on yet, and
-        # saying nothing here is how "rebuilt successfully" becomes a container
-        # that still answers nothing.
-        if not result.get("was_running") and result.get("status") != "running":
-            console.console.print(
-                "  [dim]It was not running before the rebuild, so it was left "
-                "stopped. Send it a message, or refresh its addons, to start "
-                "it.[/dim]"
-            )
-            return
 
-        # "Rebuilt" and "running" are row states; the server inside the new
-        # container can still be starting. A chat sent into that window sat
-        # streaming with no reply, so wait for the health check to answer and
-        # say plainly when it has not.
-        env_id = result.get("environment_id")
-        if not isinstance(env_id, str) or not env_id:
-            return
-        with console.spinner("Waiting for the environment to answer..."):
-            answered = _wait_for_env_health(client, env_id)
+def _confirm_unsynced_edits(
+    account_root: Path, agent_ref: str, agent: dict, action: str
+) -> None:
+    """Warn and confirm when this machine holds unsynced edits for the agent.
+
+    The D2 guard ahead of anything that re-materializes the backend scaffold
+    (``action`` is ``restart`` or ``rebuild``): pending pushes or parked
+    conflicts in the agent's synced workspace can be overwritten there, so the
+    builder is told to ``cinna sync push`` first. Declining aborts.
+    """
+    resolved = resolve_child_workspace(account_root, agent_ref)
+    if resolved is None:
+        return
+    _child_root, child_cfg = resolved
+    try:
+        st = sync_session.status(child_cfg)
+    except Exception:
+        st = None
+    if st is None or not st.exists or not (
+        st.pending_to_remote > 0 or st.conflict_count > 0
+    ):
+        return
+    bits = []
+    if st.pending_to_remote > 0:
+        bits.append(f"{st.pending_to_remote} unsynced local change(s)")
+    if st.conflict_count > 0:
+        bits.append(f"{st.conflict_count} conflict(s)")
+    console.warn(
+        f"This machine has {' and '.join(bits)} for {agent['name']}. "
+        f"A {action} may overwrite them with the backend scaffold. "
+        "Run 'cinna sync push --agent "
+        f"{normalize_agent_dir_name(agent['name'])}' first to be safe."
+    )
+    if not console.confirm(f"{action.capitalize()} anyway?", default=False):
+        raise click.Abort()
+
+
+def _report_rebuild(client: "AccountClient", agent: dict, result: dict) -> None:
+    """Print a finished rebuild: its status, then whether it is ready to chat."""
+    console.status(f"Environment rebuilt for {agent['name']}")
+    console.console.print(f"  Status: {result.get('status')}")
+    if result.get("status_message"):
+        console.console.print(f"  Message: {result['status_message']}")
+
+    # A rebuild restores the state it found. An environment that was stopped
+    # comes back stopped — a success, but not one the user can act on yet, and
+    # saying nothing here is how "rebuilt successfully" becomes a container
+    # that still answers nothing.
+    if not result.get("was_running") and result.get("status") != "running":
+        console.console.print(
+            "  [dim]It was not running before the rebuild, so it was left "
+            "stopped. Send it a message, or refresh its addons, to start "
+            "it.[/dim]"
+        )
+        return
+
+    # "Rebuilt" and "running" are row states; the server inside the new
+    # container can still be starting. A chat sent into that window sat
+    # streaming with no reply, so wait for the health check to answer and
+    # say plainly when it has not.
+    env_id = result.get("environment_id")
+    if not isinstance(env_id, str) or not env_id:
+        return
+    with console.spinner("Waiting for the environment to answer..."):
+        answered = _wait_for_env_health(client, env_id)
     if answered is True:
         console.status("The environment answers its health check — ready to chat.")
     elif answered is False:
@@ -2117,6 +2115,322 @@ def _wait_for_env_health(client: "AccountClient", environment_id: str) -> bool |
         if time.monotonic() >= deadline:
             return False
         time.sleep(ENV_HEALTH_POLL_SECONDS)
+
+
+# ── Model per mode (show / set) ─────────────────────────────────────────────
+#
+# The model is an environment setting, not an agent field: `PUT agents/<id>`
+# cannot change it. The one write path, `POST environments/{id}/reconfigure`,
+# resets every field its body leaves out, and asked to rebuild it blocks for
+# minutes behind an escape hatch that gives up after 30 s. So `set` copies both
+# modes' current settings, changes only what was asked, stores them with
+# `rebuild: false`, and applies them through the account rebuild route. The
+# hatch skips the build gate that route runs, so `set` checks the listing's
+# build flags first. A stopgap until the platform merges server-side behind an
+# account route of its own.
+
+MODEL_MODES = ("conversation", "building")
+MODEL_DEFAULT = "default"
+RECONFIGURE_FIELDS = (
+    "agent_sdk_conversation",
+    "agent_sdk_building",
+    "model_override_conversation",
+    "model_override_building",
+    "use_default_ai_credentials",
+    "conversation_ai_credential_id",
+    "building_ai_credential_id",
+)
+# The platform's own build-gate sentences (`AgentService.assert_can_build`), so
+# this refusal reads the same as the one `rebuild-env` gets from its route.
+_BUILD_REFUSALS = {
+    "foreign_install": (
+        "This is an installed bundle; its workspace is publisher-managed and "
+        "can't be synced for local development."
+    ),
+    "not_developer": "This action requires the agent-developer role.",
+}
+
+
+def _agent_environment(client: "AccountClient", agent: dict) -> dict:
+    """The agent's active environment record, or one sentence saying why not."""
+    try:
+        env_id = client.get_agent(agent["id"]).get("active_environment_id")
+        if not env_id:
+            raise click.ClickException(
+                f"{agent['name']} has no active environment, so it has no model to "
+                "show or set."
+            )
+        return client.get_environment(env_id)
+    except PlatformError as exc:
+        if exc.status_code == 404:
+            raise click.ClickException(
+                f"No accessible agent matches '{agent['name']}' (the platform answered 404)."
+            ) from exc
+        raise
+
+
+def _model_settings(env: dict) -> dict:
+    """The reconfigure fields as the environment holds them now.
+
+    Refuses when the record lacks one: the route resets a field its body leaves
+    out, so a guessed value would silently change the agent.
+    """
+    missing = [f for f in RECONFIGURE_FIELDS if f not in env]
+    if missing:
+        raise click.ClickException(
+            f"The environment record carries no {', '.join(missing)}, so its model "
+            "cannot be set safely from the CLI. Change it on the agent's page "
+            "under Environments."
+        )
+    settings = {f: env[f] for f in RECONFIGURE_FIELDS}
+    for mode in MODEL_MODES:
+        # "" and null both mean "no override" to the platform.
+        settings[f"model_override_{mode}"] = settings[f"model_override_{mode}"] or None
+    return settings
+
+
+def _apply_model_changes(
+    settings: dict,
+    conversation: str | None = None,
+    building: str | None = None,
+    conversation_credential: str | None = None,
+    building_credential: str | None = None,
+) -> dict:
+    """``settings`` with only the requested changes applied; ``default`` clears.
+
+    Both credentials ``default`` turns the account's default AI credentials
+    back on; any explicit credential id turns them off and keeps the other
+    mode's current pin.
+    """
+    wanted = dict(settings)
+    for mode, value in (("conversation", conversation), ("building", building)):
+        if value is not None:
+            wanted[f"model_override_{mode}"] = None if value == MODEL_DEFAULT else value
+    credentials = {"conversation": conversation_credential, "building": building_credential}
+    for mode, value in credentials.items():
+        if value is not None:
+            wanted[f"{mode}_ai_credential_id"] = None if value == MODEL_DEFAULT else value
+    if all(v == MODEL_DEFAULT for v in credentials.values()):
+        wanted["use_default_ai_credentials"] = True
+    elif any(v not in (None, MODEL_DEFAULT) for v in credentials.values()):
+        wanted["use_default_ai_credentials"] = False
+    return wanted
+
+
+def _model_view(agent: dict, env: dict) -> dict:
+    """Both modes side by side: SDK, override, effective model, credential, health.
+
+    ``effective`` is the platform's answer (``model_health``): the override, or
+    the catalog default when there is none — what the runtime actually uses.
+    """
+    health = env.get("model_health") or {}
+    by_mode = {m.get("mode"): m for m in health.get("modes") or []}
+    view: dict = {
+        "agent_id": agent["id"],
+        "agent_name": agent["name"],
+        "environment_id": env.get("id"),
+        "status": env.get("status"),
+        "use_default_ai_credentials": env.get("use_default_ai_credentials"),
+        "has_warning": bool(health.get("has_warning")),
+    }
+    for mode in MODEL_MODES:
+        mode_health = by_mode.get(mode) or {}
+        view[mode] = {
+            "sdk": env.get(f"agent_sdk_{mode}"),
+            "override": env.get(f"model_override_{mode}") or None,
+            "effective": mode_health.get("model"),
+            "credential_id": env.get(f"{mode}_ai_credential_id"),
+            "health": mode_health.get("status"),
+            "cause": mode_health.get("cause"),
+            "suggested_model": mode_health.get("suggested_model"),
+            "cta": mode_health.get("cta"),
+        }
+    return view
+
+
+def _print_model_view(view: dict) -> None:
+    from rich.table import Table
+
+    console.console.print(
+        f"[bold]{_esc(view['agent_name'])}[/bold] — environment "
+        f"{view['environment_id']} ({_esc(view['status'])})"
+    )
+    table = Table(box=None, padding=(0, 2))
+    for column in ("mode", "SDK", "override", "effective", "health"):
+        table.add_column(column, overflow="fold")
+    for mode in MODEL_MODES:
+        row = view[mode]
+        health = row["health"] or "?"
+        color = "green" if health == "ok" else "yellow"
+        table.add_row(
+            mode,
+            _esc(row["sdk"] or "—"),
+            _esc(row["override"] or "—"),
+            _esc(row["effective"] or "?"),
+            f"[{color}]{_esc(health)}[/{color}]",
+        )
+    console.console.print(table)
+
+    if view["use_default_ai_credentials"]:
+        credentials = "account defaults"
+    else:
+        credentials = ", ".join(
+            f"{mode} {view[mode]['credential_id'] or '—'}" for mode in MODEL_MODES
+        )
+    console.console.print(f"  AI credentials: {credentials}")
+
+    if not view["has_warning"]:
+        return
+    # The remediation text is the platform's own; the CLI does not re-word it.
+    for mode in MODEL_MODES:
+        row = view[mode]
+        if row["health"] in (None, "ok"):
+            continue
+        cause = f" — {row['cause']}" if row["cause"] else ""
+        console.warn(_esc(f"{mode}: {row['health']}{cause}"))
+        if row["cta"]:
+            console.console.print(f"    {_esc(row['cta'])}")
+        if row["suggested_model"]:
+            console.console.print(f"    suggested model: {_esc(row['suggested_model'])}")
+
+
+def _describe_model_change(current: dict, wanted: dict) -> str:
+    parts = []
+    for mode in MODEL_MODES:
+        for field, what in ((f"model_override_{mode}", "model"), (f"{mode}_ai_credential_id", "credential")):
+            if current[field] != wanted[field]:
+                parts.append(
+                    f"{mode} {what} {current[field] or MODEL_DEFAULT} → {wanted[field] or MODEL_DEFAULT}"
+                )
+    if current["use_default_ai_credentials"] != wanted["use_default_ai_credentials"]:
+        state = "on" if wanted["use_default_ai_credentials"] else "off"
+        parts.append(f"account default AI credentials {state}")
+    return "; ".join(parts)
+
+
+def run_agent_model_show(agent_ref: str, as_json: bool = False) -> None:
+    """Show both modes' model settings — `cinna agent model show`."""
+    account_cfg = load_account_config(find_account_root())
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Reading the environment..."):
+            env = _agent_environment(client, agent)
+
+    view = _model_view(agent, env)
+    if as_json:
+        click.echo(json.dumps(view, indent=2, default=str))
+        return
+    _print_model_view(view)
+
+
+def run_agent_model_set(
+    agent_ref: str,
+    conversation: str | None = None,
+    building: str | None = None,
+    conversation_credential: str | None = None,
+    building_credential: str | None = None,
+    rebuild: bool = True,
+    yes: bool = False,
+) -> None:
+    """Change a mode's model or AI credential — `cinna agent model set`.
+
+    Copies both modes' current settings, applies only the requested changes and
+    stores them without a rebuild; then (unless ``rebuild`` is off) rebuilds
+    through the account route with ``rebuild-env``'s guards and endings. A
+    request that changes nothing stops before any prompt or write.
+    """
+    options = {
+        "conversation": conversation,
+        "building": building,
+        "conversation-credential": conversation_credential,
+        "building-credential": building_credential,
+    }
+    if all(value is None for value in options.values()):
+        raise click.UsageError(
+            "Nothing to set: pass --conversation, --building, "
+            "--conversation-credential or --building-credential."
+        )
+    for flag, value in options.items():
+        if value is not None and not value.strip():
+            raise click.UsageError(f"--{flag} needs a value, or '{MODEL_DEFAULT}'.")
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_account_agent(
+            client.list_account_agents().get("data", []), agent_ref
+        )
+        ref = normalize_agent_dir_name(agent["name"])
+        if agent.get("is_foreign_install"):
+            raise CodedRefusal(403, "foreign_install", _BUILD_REFUSALS["foreign_install"])
+        if agent.get("can_build") is False:
+            raise CodedRefusal(403, "not_developer", _BUILD_REFUSALS["not_developer"])
+
+        with console.spinner("Reading the environment..."):
+            env = _agent_environment(client, agent)
+        current = _model_settings(env)
+        wanted = _apply_model_changes(
+            current,
+            conversation=conversation and conversation.strip(),
+            building=building and building.strip(),
+            conversation_credential=conversation_credential and conversation_credential.strip(),
+            building_credential=building_credential and building_credential.strip(),
+        )
+        if wanted == current:
+            console.status(f"{agent['name']} already runs with those settings — nothing changed.")
+            return
+
+        if rebuild:
+            _confirm_unsynced_edits(account_root, agent_ref, agent, "rebuild")
+            if not yes and not console.confirm(
+                f"Change {agent['name']}'s model settings and rebuild its environment? "
+                "This recreates the container and takes a few minutes.",
+                default=False,
+            ):
+                raise click.Abort()
+
+        with console.spinner("Storing the new settings..."):
+            client.reconfigure_environment(env["id"], wanted)
+        console.status(f"Stored for {agent['name']}: {_describe_model_change(current, wanted)}")
+
+        if not rebuild:
+            console.console.print(
+                f"  It applies on the next rebuild — cinna agent rebuild-env {ref}"
+            )
+        else:
+            try:
+                with console.spinner(
+                    f"Rebuilding environment for {agent['name']} (this takes a few "
+                    "minutes)..."
+                ):
+                    result = client.rebuild_agent_env(agent["id"])
+            except (PlatformError, httpx.TransportError):
+                console.warn(
+                    "The new settings are stored, but the rebuild did not finish. "
+                    f"Apply them with 'cinna agent rebuild-env {ref}'."
+                )
+                raise
+            _report_rebuild(client, agent, result)
+
+        env = client.get_environment(env["id"])
+
+    console.console.print()
+    view = _model_view(agent, env)
+    _print_model_view(view)
+    for mode in MODEL_MODES:
+        model = wanted[f"model_override_{mode}"]
+        if (
+            model
+            and model != current[f"model_override_{mode}"]
+            and view[mode]["health"] == "unknown_model"
+        ):
+            console.warn(
+                _esc(
+                    f"The platform does not know '{model}' as a {mode} model — usually "
+                    f"a typo in the model id. Check it and set it again, or "
+                    f"'--{mode} {MODEL_DEFAULT}' for the catalog default."
+                )
+            )
 
 
 def _stdout_is_tty() -> bool:

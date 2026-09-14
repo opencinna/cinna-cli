@@ -26,7 +26,7 @@ not exercise schedules here beyond confirming `cinna agent schedule --help` list
   `python3 -c "import cinna,os;print(os.path.dirname(cinna.__file__))"` must point
   at this repo's `src/cinna`. Confirm `which cinna` resolves and
   `cinna agent --help` lists `sync / unsync / create / restart-env / rebuild-env /
-  show / status` (and `schedule`).
+  show / prompts / model / scenarios / status` (and `schedule`).
 - Run every command from the account root (or a nested folder under it). `git`
   and `mutagen` on `PATH` (for the sync/restart scenarios).
 - At least one agent you own; the create scenario provisions a throwaway one.
@@ -290,6 +290,40 @@ not exercise schedules here beyond confirming `cinna agent schedule --help` list
   change); `pull` overwriting unpushed edits without `--force`; the env's
   `docs/*.md` not updated while the env is running.
 
+### 14. `agent model show | set` changes one field and nothing else
+
+- **Goal:** switch the conversation model without touching the building model or
+  the AI credential pins, and without a hand-built `reconfigure` body.
+- **Setup:** an agent you can build, with a running environment. Note its
+  `active_environment_id` (`cinna api GET agents/<id>`), and one foreign install
+  from `cinna account agents` for the refusal step.
+- **Steps:**
+  ```
+  cinna agent model show acc-test-agent
+  KEEP='{model_override_building, use_default_ai_credentials, conversation_ai_credential_id, building_ai_credential_id}'
+  cinna api GET environments/<env_id> | jq "$KEEP" > /tmp/model-before.json
+  cinna agent model set acc-test-agent --building "$(cinna agent model show acc-test-agent --json | jq -r '.building.override // "default"')"
+  cinna agent model set acc-test-agent --conversation <a-valid-small-model> --yes
+  cinna api GET environments/<env_id> | jq "$KEEP" > /tmp/model-after.json
+  diff /tmp/model-before.json /tmp/model-after.json
+  cinna agent model set acc-test-agent --conversation haikuu --no-rebuild
+  cinna agent model set acc-test-agent --conversation default --yes
+  cinna agent model set "<foreign install>" --conversation haiku --yes; echo "exit=$?"
+  ```
+- **Expected:** `show` lists both modes with SDK, override (`—` when none),
+  effective model and health. The unchanged set prints "nothing changed" with no
+  prompt and no rebuild. The real set prints `Stored for …: conversation model
+  default → <model>`, the rebuild status and "ready to chat", then a table whose
+  conversation row carries the new override and effective model; the `diff` is
+  empty. `haikuu` is stored, names `cinna agent rebuild-env acc-test-agent`, and a
+  health of `unknown_model` comes with "usually a typo in the model id". `default`
+  clears it again. The foreign install is refused with "This is an installed
+  bundle…", `exit=1`, and nothing is written.
+- **Watch for:** the building override or a credential pin reset by the set (a
+  partial reconfigure body); the set failing after about 30 s (a rebuild requested
+  through the escape hatch); an unchanged set that still prompts or rebuilds; an
+  unknown model id accepted with no hint.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **Account-token only.** Every `cinna agent` lifecycle verb runs against
@@ -314,9 +348,15 @@ not exercise schedules here beyond confirming `cinna agent schedule --help` list
   remedy printed for all of them.
 - **Fail-loud `AGENT_REF`.** Unknown → lists agents; ambiguous → demands the id;
   never a silent wrong-agent action.
+- **No silent reset of environment settings.** `agent model set` changes only the
+  fields it was asked to; an unchanged set neither writes nor rebuilds; nothing
+  rebuilds through the escape hatch.
 
 ## Cleanup
 
+- Put the conversation model back to what scenario 14 found
+  (`cinna agent model set acc-test-agent --conversation <original|default> --yes`)
+  and `rm -f /tmp/model-before.json /tmp/model-after.json`.
 - `cinna agent unsync acc-test-agent` to drop the local checkout (preserves
   files; deletes `.cinna/` + registry entry).
 - Remove the throwaway agent created in scenario 1 from the platform UI (or via

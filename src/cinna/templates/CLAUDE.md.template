@@ -225,6 +225,8 @@ After installing, **persist the dependency** by adding it to `workspace_requirem
 | List conflicts, and compare both copies | `cinna sync conflicts [--diff]` |
 | Talk to the agent to test it (conversation) | `cinna chat "<message>"` |
 | Get back a turn after a timeout / lost connection | `cinna chat --attach <session_id>` |
+| Re-run the recorded scenarios (`docs/test_scenarios/`) | `cinna agent scenarios run <agent>` — one fresh session per Say row; you mark each against Expect |
+| Show or switch the model per mode (§10 of the design patterns) | `cinna agent model show <agent>` · `cinna agent model set <agent> --conversation <model>` (rebuilds; re-run the scenarios after) |
 | Refresh expired CLI token | `cinna set-token <token_or_url>` |
 
 Iteration: edit files locally → Mutagen syncs them remotely within seconds → `cinna exec <cmd>` runs the script; stdout/stderr stream back live; exit code matches → inspect `app-data/storage/` for output.
@@ -247,7 +249,7 @@ Conflicts: Mutagen writes `<file>.conflict.<side>.<timestamp>` instead of pickin
 8. **Add its row to the routing table** in `WORKFLOW_PROMPT.md` — the skill name and the questions it owns. Never paste its steps there.
 9. **Smoke-test:** `cinna exec python skills/<name>/scripts/run.py <args>` — confirm exit code 0 and the expected output.
 10. **Verify `knowledge_query`** (if the capability uses it): ask a question the new docs should cover; confirm a hit.
-11. **Record and run a scenario** for it in `workspace/docs/test_scenarios/` (see `CHAT_TESTING.md`), then re-run the rest of the set.
+11. **Record and run a scenario** for it in `workspace/docs/test_scenarios/` (see `CHAT_TESTING.md`), sync it, then re-run the whole set with `cinna agent scenarios run <agent>` and mark each row against its Expect.
 12. **Check sync status:** `cinna sync status` — no conflicts, no pending changes.
 
 ---
