@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import respx
 from click.testing import CliRunner
@@ -510,3 +511,151 @@ def test_upload_file_posts_multipart_to_dedicated_route(client, tmp_path):
     sent = route.calls.last.request
     # Multipart, not JSON.
     assert sent.headers["content-type"].startswith("multipart/form-data")
+
+
+# ── Robustness: poll retries, recovery, --attach / --show ────────────────────
+
+
+class FlakyClient(FakeClient):
+    """The first ``failures`` streaming-status polls time out."""
+
+    def __init__(self, failures: int):
+        super().__init__()
+        self.failures = failures
+
+    def get_streaming_status(self, session_id):
+        if self.failures:
+            self.failures -= 1
+            raise httpx.ReadTimeout("timed out")
+        return {"is_streaming": False}
+
+
+class UnreachableClient(FakeClient):
+    """Every streaming-status poll fails to connect."""
+
+    def get_streaming_status(self, session_id):
+        raise httpx.ConnectError("connection refused")
+
+
+class ExistingSessionClient(FakeClient):
+    """A session whose turn was already sent — attach / show send nothing."""
+
+    def __init__(self, in_progress: bool = False):
+        super().__init__()
+        self.sent = True
+        self.last_content = "Hello!"
+        self.send_calls = 0
+        self.in_progress = in_progress
+
+    def send_message(self, *args, **kwargs):
+        self.send_calls += 1
+        return super().send_message(*args, **kwargs)
+
+    def get_messages(self, session_id, limit=100, offset=0):
+        messages = FakeClient.get_messages(self, session_id, limit, 0)["data"]
+        if self.in_progress:
+            messages[1] = {
+                **messages[1],
+                "message_metadata": {
+                    "streaming_in_progress": True,
+                    "streaming_events": [
+                        {"type": "thinking", "event_seq": 1, "content": "Working."}
+                    ],
+                },
+            }
+        data = messages[offset:]
+        return {"data": data, "count": len(data)}
+
+    def get_streaming_status(self, session_id):
+        return {"is_streaming": self.in_progress}
+
+
+def test_chat_retries_a_failed_poll_instead_of_aborting(runner, account_root, monkeypatch):
+    """One buffered proxy call timing out said nothing about the turn, yet it
+    used to abort the whole command with the turn still running."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setattr("cinna.chat.time.sleep", lambda s: None)
+    fake = FlakyClient(failures=2)
+    monkeypatch.setattr("cinna.chat.AccountClient", lambda cfg: fake)
+
+    result = runner.invoke(cli, ["chat", "--agent", "CRM Agent", "Hello!"])
+    assert result.exit_code == 0, result.output
+
+    events = _ndjson(result.output)
+    warnings = [e for e in events if e["event"] == "warning"]
+    assert [w["attempt"] for w in warnings] == [1, 2]
+    assert "timed out" in warnings[0]["message"]
+    assert events[-1]["event"] == "done"
+    assert events[-1]["outcome"] == "completed"
+    assert "recover" not in events[-1]
+
+
+def test_chat_that_loses_contact_names_the_session_and_the_attach_command(
+    runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setattr("cinna.chat.time.sleep", lambda s: None)
+    fake = UnreachableClient()
+    monkeypatch.setattr("cinna.chat.AccountClient", lambda cfg: fake)
+
+    result = runner.invoke(
+        cli, ["chat", "--agent", "CRM Agent", "--timeout", "0", "Hello!"]
+    )
+    assert result.exit_code == 12
+    events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    error = [e for e in events if e["event"] == "error"][0]
+    assert error["session_id"] == "sess-1"
+    assert error["recover"] == "cinna chat --attach sess-1"
+    assert "cinna chat --attach sess-1" in result.output
+
+
+def test_chat_attach_waits_for_the_turn_without_sending(runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    fake = ExistingSessionClient()
+    monkeypatch.setattr("cinna.chat.AccountClient", lambda cfg: fake)
+
+    result = runner.invoke(cli, ["chat", "--attach", "sess-1", "--no-download"])
+    assert result.exit_code == 0, result.output
+    assert fake.send_calls == 0
+
+    events = _ndjson(result.output)
+    assert events[0]["event"] == "session"
+    assert events[0]["attached"] is True
+    roles = [e["role"] for e in events if e["event"] == "message"]
+    assert roles == ["user", "agent"]
+    assert events[-1]["outcome"] == "completed"
+
+
+def test_chat_show_prints_the_transcript(runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    fake = ExistingSessionClient()
+    monkeypatch.setattr("cinna.chat.AccountClient", lambda cfg: fake)
+
+    result = runner.invoke(cli, ["chat", "--show", "sess-1", "--no-download"])
+    assert result.exit_code == 0, result.output
+    assert fake.send_calls == 0
+    events = _ndjson(result.output)
+    assert [e["role"] for e in events if e["event"] == "message"] == ["user", "agent"]
+    assert events[-1]["outcome"] == "idle"
+    assert "recover" not in events[-1]
+
+
+def test_chat_show_reports_a_turn_still_running(runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    fake = ExistingSessionClient(in_progress=True)
+    monkeypatch.setattr("cinna.chat.AccountClient", lambda cfg: fake)
+
+    result = runner.invoke(cli, ["chat", "--show", "sess-1", "--no-download"])
+    assert result.exit_code == 0, result.output
+    events = _ndjson(result.output)
+    assert any(e["event"] == "status" and e["state"] == "working" for e in events)
+    assert events[-1]["outcome"] == "in_progress"
+    assert events[-1]["recover"] == "cinna chat --attach sess-1"
+
+
+def test_chat_attach_takes_no_message(runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["chat", "--attach", "sess-1", "hello"])
+    assert result.exit_code == 2
+    assert "sends nothing" in result.output

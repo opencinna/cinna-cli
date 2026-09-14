@@ -577,6 +577,45 @@ class AccountClient:
         """
         return self._proxy_json("PUT", f"agents/{agent_id}", json_body=fields)
 
+    def get_agent(self, agent_id: str) -> dict:
+        """GET agents/{id} through the escape hatch — the full agent record.
+
+        The exact stored prompt text (``workflow_prompt``, ``entrypoint_prompt``,
+        ``refiner_prompt``, ``router_trigger_prompt``, ``example_prompts``,
+        ``description``) — what ``cinna agent prompts pull`` writes to files.
+        ``inspect`` truncates nothing either, but carries no router trigger,
+        examples or description.
+        """
+        return self._proxy_json("GET", f"agents/{agent_id}")
+
+    def sync_agent_prompts(self, agent_id: str) -> dict:
+        """POST agents/{id}/sync-prompts — push the doc prompts into the env now.
+
+        Rewrites the running environment's ``docs/*.md`` from the database.
+        Requires a running environment; without one the prompts reach it on
+        its next start anyway.
+        """
+        return self._proxy_json("POST", f"agents/{agent_id}/sync-prompts")
+
+    def list_agent_credentials(self, agent_id: str) -> dict:
+        """GET agents/{id}/credentials — the credentials linked to one agent.
+
+        ``{data: [CredentialPublic], count}``: metadata only (``service_uri``,
+        ``is_placeholder``, ``status``, ``type``, ``id``), never a secret. The
+        one listing that answers "which slot does this agent's credential
+        fill" — ``inspect`` carries name and type alone.
+        """
+        return self._proxy_json("GET", f"agents/{agent_id}/credentials")
+
+    def get_environment_health(self, environment_id: str) -> dict:
+        """GET environments/{id}/health — does the container's server answer.
+
+        ``{status: "healthy", message, timestamp, …}`` when the agent server in
+        the container responds. Distinct from the environment row's ``status``,
+        which can read ``running`` before the server inside is listening.
+        """
+        return self._proxy_json("GET", f"environments/{environment_id}/health")
+
     # --- Schedules (full CRUD via dedicated account verbs) ---
 
     def list_schedules(self, agent_id: str) -> dict:

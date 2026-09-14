@@ -65,7 +65,24 @@
   first unpublished skill the caller may share.
 - `src/cinna/account.py:_print_addons()` — one table row per addon; prints the
   `counts` line and warns when `skills_error` is set, so a partial list is never
-  mistaken for a complete one.
+  mistaken for a complete one. Adds the `Credentials` column (and
+  `_print_credential_readiness()` beneath) only when some row declares a slot, so
+  an agent without any keeps its shape.
+- `src/cinna/account.py:run_skills_list()` fetches `_fetch_linked_credentials()`
+  only when `_needs_linked_credentials()` — a **non-catalog** row declares a slot —
+  and never under `--json` (the raw payload stays raw).
+- `src/cinna/account.py:_declared_slots()` — the slots a row's `skills[].credentials`
+  declare (first declaration of a slot wins).
+- `src/cinna/account.py:_slot_readiness()` — `(state, credential)` per slot: a
+  `credential_issues` entry for the slot wins (its `reason`); a catalog row with no
+  entry is `ready` (the platform computed it); otherwise matched against the linked
+  credentials by `service_uri` → `not_linked` / `type_mismatch` / `not_configured` /
+  `ready`, and `unknown` when the listing is `None` or a `_SLOT_UNVERIFIED`
+  credential could be the carrier.
+- `src/cinna/account.py:_addon_credentials_cell()` / `_slot_remedy()` /
+  `_print_credential_readiness()` — the column cell (amber, never red: an unfilled
+  skill slot never blocks the agent), the per-state command, and the block under
+  the table.
 - `src/cinna/account.py:_addon_status_cell()` — colours `ok` / `warning` /
   `error` and puts the server's `status_code` in the column: codes are the
   contract, and a code keeps the row one line.
@@ -193,10 +210,18 @@ uuid}`).
 All four routes are ordinary platform routes reached through the account escape
 hatch, `POST /api/v1/cli/account/api-proxy`:
 
+- `GET /api/v1/agents/{agent_id}/credentials` and the account's
+  `GET /api/v1/cli/account/credentials` — read together by
+  `_fetch_linked_credentials()` for slot readiness: the first says which
+  credentials are linked, the second supplies each one's `service_uri`,
+  `is_placeholder` and `status` by id, because the first returns `service_uri:
+  null` for a credential that has a slot (observed on a live instance).
 - `GET /api/v1/agents/{agent_id}/addons` — the deduplicated projection
   (`AgentAddonsPublic`). Consumed fields: `addons[]` (`AddonPublic`: `key`,
   `kind`, `source`, `name`, `display_name`, `version`, `marketplace_name`,
-  `status`, `status_code`, `orphan`, `can_share`, `published_package_id`, and
+  `status`, `status_code`, `orphan`, `can_share`, `published_package_id`,
+  `credential_issues` (`slot` + `reason`, computed for catalog rows only),
+  `skills[].credentials` (`slot`, `type`, `description`), and
   **`link`**), `counts` (`plugins`, `skills`, `local_skills`), and
   `skills_error`. `link` is an `AgentPluginLinkWithUpdateInfo`: `id`,
   `installed_version`, `latest_version`, `has_update`, `disabled`,

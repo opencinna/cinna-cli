@@ -53,10 +53,20 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
    workspace clone → context/MCP files → `mutagen.yml`). If the agent is
    git-versioned it auto-links the git working tree (see
    [Git Versioning](../git_versioning/git_versioning.md)).
-2. Re-running sync for an agent **already synced** in that folder is refused
+2. It then **starts the sync session and flushes it once**, while local and
+   remote are still the same clone. That shared starting state is what later
+   edits are reconciled against; a session first created by a later
+   `cinna sync push` has none, so the builder's own edits used to come back as
+   conflicts against untouched remote originals. A session that cannot start is a
+   warning naming `cinna sync push --agent <slug>` to run *before* editing — never
+   a failed sync.
+3. Re-running sync for an agent **already synced** in that folder is refused
    (with a `cinna agent unsync` / `cinna set-token` hint) — it never silently
    re-clones or duplicates.
-3. Afterward `cd agents/<slug> && cinna dev`, or stay at the account root and use
+4. The workspace lands at `agents/<slug>/<subdir>/` (the Model-A nested layout;
+   `<subdir>` is the slug unless the agent is git-versioned with another subdir) —
+   the command prints the exact path. Afterward `cd` there and `cinna dev`, or stay
+   at the account root and use `cinna sync push --agent <slug>` /
    `cinna exec --agent <slug> <cmd>`.
 
 ### Detach a workspace (unsync)
@@ -99,12 +109,40 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
    the state it found, so an environment that was stopped comes back stopped —
    successfully. The command says so rather than letting "rebuilt successfully"
    mean a container that still answers nothing.
+6. For an environment that came back running, it then **waits for the
+   container's health check to answer** (up to 180 s). "Rebuilt" and "running" are
+   row states; the server inside can still be starting, and a chat sent into that
+   window sat streaming with no reply. It ends with "ready to chat", or a warning
+   that the environment has not answered yet.
 
 ### Inspect what's live
-1. `cinna agent show <agent_ref>` prints the **effective prompts** (entrypoint,
-   workflow, refiner — as the runtime reads them), enabled features, connected
-   credential names/types (never secret values), and the REST-API status when
-   enabled. `--prompts` shows only prompts; `--full` prints long prompts whole.
+1. `cinna agent show <agent_ref>` prints the **effective prompts** (each under its
+   `[entrypoint]` / `[workflow]` / `[refiner]` label — as the runtime reads them),
+   enabled features, the connected credentials (never secret values), and the
+   REST-API status when enabled. `--prompts` shows only prompts; `--full` prints
+   long prompts whole.
+   - Each credential line carries name, type, **slot** (its service URI), a
+     placeholder / needs-setup marker, and id — the slot being what a skill's
+     `credentials:` block names. A credential shared by someone else whose slot
+     this account cannot see reads `slot: unknown`, never `no slot`. When the
+     agent's credential listing cannot be read, it falls back to name + type.
+
+### Edit the prompts as files
+1. `cinna agent prompts pull <agent_ref>` writes `workflow.md`, `entrypoint.md`,
+   `refiner.md`, `router_trigger.md`, `description.md` and `example_prompts.json`
+   into `prompts/<slug>/` at the account root (`--dir` to choose), and records
+   what it pulled. Not under `agents/`: that tree is the synced workspace, and for a
+   git-versioned agent a git working tree.
+2. Edit the files. `cinna agent prompts diff <agent_ref>` shows each edit against
+   the platform, and flags a field the platform changed since the pull.
+3. `cinna agent prompts push <agent_ref>` sends **only the fields edited since the
+   pull** in one bulk write, then pushes the three doc-backed prompts into the
+   running environment's `docs/*.md` (`--no-sync-env` to skip; a stopped
+   environment gets them on its next start, and the command says so).
+   `--dry-run` shows the diff and writes nothing.
+4. Why files: changing one line used to take a raw GET, a hand-built JSON body, a
+   raw PUT and a raw `sync-prompts` call — and building that JSON inline let the
+   shell command-substitute the prompt's Markdown backticks.
 2. `cinna agent status show <agent_ref>` prints the agent's cached `STATUS.md`
    snapshot (severity, summary, age) plus the configured refresh pre-command.
 3. `cinna agent status refresh <agent_ref>` forces a **live** re-read — wakes a
@@ -133,7 +171,21 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
   warning is shown only when a local workspace for the agent has pending pushes
   or conflicts; otherwise it proceeds straight to the bounce.
 - **`agent show` / `agent status` never print secrets.** Credentials surface as
-  name + type only; status is a published `STATUS.md` snapshot.
+  metadata only — name, type, slot, placeholder/setup state, id; status is a
+  published `STATUS.md` snapshot.
+- **A slot is never claimed without evidence.** A credential's slot is read from
+  the account's own credential listing (the agent credential route reports none),
+  and a credential shared by someone else whose slot is invisible reads `unknown`.
+- **Prompt push never reverts what it did not edit.** Only fields changed since
+  the pull are sent; a field changed on the platform since the pull and edited
+  locally too is refused until `--force` (or `pull --force` to take the
+  platform's). `pull` refuses to overwrite unpushed edits, files it did not write,
+  or another agent's prompts without `--force`. The agent config stays
+  authoritative; hand-editing the synced `docs/*.md` as well is a last-writer-wins
+  race — pick one path.
+- **Rebuild readiness is stated, not assumed.** A rebuilt, running environment is
+  "ready to chat" only after its health check answers; a timeout is a warning, and
+  an unreadable health answer says nothing rather than guessing.
 - **`status refresh` never raises.** A force-refresh that can't reach the env or
   whose pre-command fails returns the cached snapshot (and may carry a
   `refresh_command_warning`), so inspection is always answerable.

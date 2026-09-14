@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import click
 import httpx
 import pytest
 import respx
@@ -23,6 +24,15 @@ from cinna.client import AccountClient
 from cinna.config import CinnaConfig, lookup_agent_registry, save_config, upsert_agent_registry
 from cinna.errors import AuthenticationError, CodedRefusal, PlatformError
 from cinna.main import cli
+
+
+@pytest.fixture(autouse=True)
+def no_real_sync_session(monkeypatch):
+    """`cinna agent sync` now starts the Mutagen session; never let a test
+    reach the real daemon. The tests of that step call it explicitly."""
+    monkeypatch.setattr(
+        "cinna.account._establish_sync_session", lambda *a, **k: True
+    )
 
 
 @pytest.fixture
@@ -5310,3 +5320,780 @@ def test_failed_and_unsupported_syncs_are_reported_as_the_two_things_they_are(
     assert "1 of 3 environment(s) did not pick it up" in result.output
     assert "restart-env" in result.output
     assert "Skill added" not in result.output
+
+
+# --- Prompt labels, credential slots, skill credential readiness ---
+
+# Imported at module load, before the autouse fixture replaces the attribute.
+from cinna.account import _establish_sync_session as _real_establish_sync_session  # noqa: E402
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_show_labels_each_prompt(mock_client_cls, runner, account_root, monkeypatch):
+    """Rich read a bare `[workflow]` as a style tag and dropped it, so every
+    prompt printed with no name above it — three unlabelled blocks."""
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.inspect_agent.return_value = {
+        "id": "agent-123",
+        "name": "CRM Agent",
+        "features": {},
+        "prompts": {"entrypoint": "EP text", "workflow": "WF text", "refiner": None},
+        "credentials": [],
+        "agent_api_status": None,
+    }
+
+    result = runner.invoke(cli, ["agent", "show", "CRM Agent", "--prompts"])
+    assert result.exit_code == 0, result.output
+    assert "[entrypoint]" in result.output
+    assert "[workflow]" in result.output
+    assert "[refiner] (empty)" in result.output
+    mock_client.list_agent_credentials.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_show_prints_each_credentials_slot(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The slot is the concept a skill depends on; inspect alone carries name
+    and type, so the agent's own credential listing supplies the rest."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.inspect_agent.return_value = {
+        "id": "agent-123",
+        "name": "CRM Agent",
+        "features": {},
+        "prompts": {},
+        "credentials": [{"name": "API Token", "type": "api_token"}],
+        "agent_api_status": None,
+    }
+    mock_client.list_agent_credentials.return_value = {
+        "data": [
+            {
+                "id": "cred-tok",
+                "name": "API Token",
+                "type": "api_token",
+                "service_uri": "some-token.com",
+                "is_placeholder": False,
+                "status": "complete",
+            },
+            {
+                "id": "cred-draft",
+                "name": "Odoo",
+                "type": "odoo",
+                "service_uri": None,
+                "is_placeholder": True,
+                "status": "incomplete",
+            },
+        ],
+        "count": 2,
+    }
+    mock_client.list_credentials.return_value = mock_client.list_agent_credentials.return_value
+
+    result = runner.invoke(cli, ["agent", "show", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.list_agent_credentials.assert_called_once_with("agent-123")
+    assert "Connected credentials (2)" in result.output
+    assert "API Token (api_token)" in result.output
+    assert "slot: some-token.com" in result.output
+    assert "cred-tok" in result.output
+    assert "no slot" in result.output
+    assert "placeholder" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_show_falls_back_to_inspect_when_the_listing_is_refused(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.inspect_agent.return_value = {
+        "id": "agent-123",
+        "name": "CRM Agent",
+        "features": {},
+        "prompts": {},
+        "credentials": [{"name": "OpenAI Key", "type": "ai"}],
+        "agent_api_status": None,
+    }
+    mock_client.list_agent_credentials.side_effect = PlatformError(403, "denied")
+
+    result = runner.invoke(cli, ["agent", "show", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "OpenAI Key (ai)" in result.output
+    # An absent slot is not an empty one: nothing is claimed about it.
+    assert "slot" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_list_shows_each_slot(mock_client_cls, runner, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_credentials.return_value = {
+        "count": 2,
+        "data": [
+            {
+                "id": "cred-1",
+                "name": "Token",
+                "type": "api_token",
+                "status": "complete",
+                "service_uri": "some-token.com",
+            },
+            {
+                "id": "cred-2",
+                "name": "Draft",
+                "type": "api_token",
+                "status": "incomplete",
+                "service_uri": None,
+                "is_placeholder": True,
+            },
+        ],
+    }
+
+    result = runner.invoke(cli, ["account", "credentials", "list"])
+    assert result.exit_code == 0, result.output
+    assert "Slot" in result.output
+    assert "some-token.com" in result.output
+    assert "placeholder" in result.output
+    assert "--service-uri <slot>" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_list_json_prints_the_raw_listing(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_credentials.return_value = CREDENTIALS_LISTING
+
+    result = runner.invoke(cli, ["account", "credentials", "list", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == CREDENTIALS_LISTING
+
+
+def _slot_skill_row(
+    name="dad-jokes", source="local", slots=(("some-token.com", "api_token"),), issues=()
+):
+    return {
+        "key": f"skill:{source}:{name}",
+        "kind": "skill",
+        "source": source,
+        "name": name,
+        "display_name": name,
+        "version": "1.1.0",
+        "status": "warning" if issues else "ok",
+        "status_code": "credential_missing" if issues else None,
+        "skills": [
+            {
+                "name": name,
+                "source": source,
+                "has_scripts": True,
+                "credentials": [{"slot": s, "type": t} for s, t in slots],
+            }
+        ],
+        "credential_issues": list(issues),
+        "can_share": False,
+        "published_package_id": None,
+    }
+
+
+def _addons_with(*rows):
+    return {
+        "addons": list(rows),
+        "counts": {"plugins": 0, "skills": len(rows), "local_skills": len(rows)},
+        "skills_error": None,
+        "can_add": True,
+    }
+
+
+def _linked(*creds):
+    return {"data": list(creds), "count": len(creds)}
+
+
+def _invoke_skills_list(
+    mock_client_cls, runner, account_root, monkeypatch, payload, linked, account=None
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = payload
+    if isinstance(linked, Exception):
+        mock_client.list_agent_credentials.side_effect = linked
+    else:
+        mock_client.list_agent_credentials.return_value = linked
+        # The account listing is where a slot is read from (see
+        # _fetch_linked_credentials); by default it agrees with the agent's.
+        if account is None:
+            account = linked
+    if account is not None:
+        mock_client.list_credentials.return_value = account
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    return result, mock_client
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_names_a_local_skills_unfilled_slot_and_the_credential_to_give_it(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The platform computes `credential_issues` for catalog installs only, so a
+    local skill's row read `ok` while nothing carried its slot and its script
+    could never find the token. The linked api_token with no slot is the
+    obvious candidate — the remedy names it."""
+    result, mock_client = _invoke_skills_list(
+        mock_client_cls,
+        runner,
+        account_root,
+        monkeypatch,
+        _addons_with(_slot_skill_row()),
+        _linked(
+            {
+                "id": "cred-tok",
+                "name": "API Token - SOMETOKEN",
+                "type": "api_token",
+                "service_uri": None,
+                "is_placeholder": False,
+                "status": "complete",
+            }
+        ),
+    )
+    mock_client.list_agent_credentials.assert_called_once_with("agent-123")
+    assert "Credentials" in result.output
+    assert "some-token.com" in result.output
+    assert "not_linked" in result.output
+    assert (
+        "cinna account credentials update cred-tok --service-uri some-token.com"
+        in result.output
+    )
+    assert "checked only when its script asks for it" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_suggests_a_draft_when_nothing_could_carry_the_slot(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    result, _ = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch,
+        _addons_with(_slot_skill_row()), _linked(),
+    )
+    assert "not_linked" in result.output
+    assert (
+        'cinna account credentials create --name "some-token.com" --type api_token '
+        "--service-uri some-token.com --agent crm-agent" in result.output
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_marks_a_filled_slot_ready(mock_client_cls, runner, account_root, monkeypatch):
+    result, _ = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch,
+        _addons_with(_slot_skill_row()),
+        _linked(
+            {
+                "id": "cred-tok",
+                "name": "Token",
+                "type": "api_token",
+                "service_uri": "some-token.com",
+                "is_placeholder": False,
+                "status": "complete",
+            }
+        ),
+    )
+    assert "✓ some-token.com" in result.output
+    assert "needs slot" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_reports_a_placeholder_slot_as_not_configured(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    result, _ = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch,
+        _addons_with(_slot_skill_row()),
+        _linked(
+            {
+                "id": "cred-ph",
+                "name": "Token draft",
+                "type": "api_token",
+                "service_uri": "some-token.com",
+                "is_placeholder": True,
+                "status": "incomplete",
+            }
+        ),
+    )
+    assert "not_configured" in result.output
+    assert "fill it in the web UI" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_reports_a_slot_carried_by_the_wrong_type(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    result, _ = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch,
+        _addons_with(_slot_skill_row()),
+        _linked(
+            {
+                "id": "cred-odoo",
+                "name": "ERP",
+                "type": "odoo",
+                "service_uri": "some-token.com",
+                "status": "complete",
+            }
+        ),
+    )
+    assert "type_mismatch" in result.output
+    assert "the skill declares api_token" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_trusts_the_platforms_reason_for_a_catalog_install(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """For a catalog row the platform already computed readiness — the CLI
+    renders its reason and never second-guesses it with its own lookup."""
+    row = _slot_skill_row(
+        source="catalog", issues=[{"slot": "some-token.com", "reason": "access_revoked"}]
+    )
+    result, mock_client = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch, _addons_with(row), _linked()
+    )
+    mock_client.list_agent_credentials.assert_not_called()
+    assert "access_revoked" in result.output
+    assert "no longer shared" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_says_when_slots_could_not_be_checked(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    result, _ = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch,
+        _addons_with(_slot_skill_row()), PlatformError(502, "bad gateway"),
+    )
+    assert "? some-token.com" in result.output
+    assert "could not be confirmed" in result.output
+    assert "not_linked" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_reads_the_slot_from_the_account_listing(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """Seen live: `GET agents/{id}/credentials` returned `service_uri: null`
+    for a credential whose slot the account listing reported, so a filled slot
+    read `not_linked` and the remedy said to set a slot that was already set."""
+    token = {
+        "id": "cred-tok",
+        "name": "API Token - SOMETOKEN",
+        "type": "api_token",
+        "is_placeholder": False,
+        "status": "complete",
+    }
+    result, _ = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch,
+        _addons_with(_slot_skill_row()),
+        _linked({**token, "service_uri": None}),
+        account=_linked({**token, "service_uri": "some-token.com"}),
+    )
+    assert "✓ some-token.com" in result.output
+    assert "not_linked" not in result.output
+    assert "credentials update" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_never_calls_a_slot_unlinked_when_a_shared_credential_hides_it(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A credential shared by someone else is linked but absent from this
+    account's listing, so its slot is unknown — it may well be the carrier."""
+    result, _ = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch,
+        _addons_with(_slot_skill_row()),
+        _linked(
+            {
+                "id": "cred-shared",
+                "name": "Publisher token",
+                "type": "api_token",
+                "service_uri": None,
+                "status": "complete",
+            }
+        ),
+        account=_linked(),
+    )
+    assert "? some-token.com" in result.output
+    assert "not_linked" not in result.output
+    assert "could not be confirmed" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_show_marks_a_shared_credentials_slot_unknown(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.inspect_agent.return_value = {
+        "id": "agent-123", "name": "CRM Agent", "features": {}, "prompts": {},
+        "credentials": [], "agent_api_status": None,
+    }
+    mock_client.list_agent_credentials.return_value = _linked(
+        {"id": "cred-shared", "name": "Publisher token", "type": "api_token", "service_uri": None}
+    )
+    mock_client.list_credentials.return_value = _linked()
+
+    result = runner.invoke(cli, ["agent", "show", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "slot: unknown" in result.output
+    assert "no slot" not in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_without_declared_slots_keeps_its_shape(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent_addons.return_value = ADDONS_PAYLOAD
+
+    result = runner.invoke(cli, ["skills", "list", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "Credentials" not in result.output
+    mock_client.list_agent_credentials.assert_not_called()
+
+
+# --- rebuild-env waits for the health check ---
+
+
+def _rebuilt(mock_client):
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.rebuild_agent_env.return_value = {
+        "environment_id": "env-1",
+        "status": "running",
+        "status_message": "Environment rebuilt successfully",
+        "was_running": True,
+    }
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_rebuild_env_waits_for_the_health_check(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """"Rebuilt" and "running" are row states; a chat sent while the new
+    container's server was still starting sat streaming with no reply."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    monkeypatch.setattr("cinna.account.time.sleep", lambda s: None)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    _rebuilt(mock_client)
+    mock_client.get_environment_health.side_effect = [
+        {"status": "starting"},
+        {"status": "healthy"},
+    ]
+
+    result = runner.invoke(cli, ["agent", "rebuild-env", "CRM Agent", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert mock_client.get_environment_health.call_count == 2
+    mock_client.get_environment_health.assert_called_with("env-1")
+    assert "ready to chat" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_rebuild_env_says_when_the_environment_never_answers(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    monkeypatch.setattr("cinna.account.time.sleep", lambda s: None)
+    monkeypatch.setattr("cinna.account.ENV_HEALTH_WAIT_SECONDS", 0.0)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    _rebuilt(mock_client)
+    mock_client.get_environment_health.side_effect = PlatformError(502, "not up")
+
+    result = runner.invoke(cli, ["agent", "rebuild-env", "CRM Agent", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "has not answered its health check" in result.output
+    assert "ready to chat" not in result.output
+
+
+# --- agent sync starts the sync session on the fresh clone ---
+
+
+@patch("cinna.account.PlatformClient")
+@patch("cinna.account.provision_workspace")
+@patch("cinna.account.AccountClient")
+def test_agent_sync_starts_the_sync_session_on_the_fresh_clone(
+    mock_client_cls, mock_provision, mock_platform, runner, account_root, monkeypatch
+):
+    """A session first created by a later push has no common ancestor, so the
+    builder's own edits read as conflicts against untouched remote originals."""
+    calls = []
+    monkeypatch.setattr(
+        "cinna.account._establish_sync_session",
+        lambda config, root, ref: calls.append((config.agent_id, root, ref)) or True,
+    )
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.mint_agent_token.return_value = MINT_RESPONSE
+    mock_platform.return_value.get_git_coordinates.return_value = {"vcs_enabled": False}
+
+    result = runner.invoke(cli, ["agent", "sync", "HR Manager Agent"])
+    assert result.exit_code == 0, result.output
+    ws = account_root / "agents" / "hr-manager-agent" / "hr-manager-agent"
+    assert calls == [("agent-789", ws, "hr-manager-agent")]
+    assert "cinna sync push --agent hr-manager-agent" in result.output
+
+
+def test_establish_sync_session_flushes_a_baseline(monkeypatch, sample_config, tmp_path):
+    from cinna.sync_session import SyncStatus
+
+    ensured = []
+    monkeypatch.setattr(
+        "cinna.account.sync_session.ensure_session", lambda c, r: ensured.append(r)
+    )
+    monkeypatch.setattr(
+        "cinna.account.sync_session.flush",
+        lambda c: SyncStatus(session_name="cinna-agent123", state="watching"),
+    )
+
+    assert _real_establish_sync_session(sample_config, tmp_path, "crm") is True
+    assert ensured == [tmp_path]
+
+
+def test_establish_sync_session_failure_names_the_push_to_run_first(
+    monkeypatch, sample_config, tmp_path, capsys
+):
+    monkeypatch.setenv("COLUMNS", "400")
+
+    def refuse(config, root):
+        raise click.ClickException("Cannot reach the agent environment.\nmore detail")
+
+    monkeypatch.setattr("cinna.account.sync_session.ensure_session", refuse)
+
+    assert _real_establish_sync_session(sample_config, tmp_path, "crm") is False
+    out = capsys.readouterr().out
+    assert "Cannot reach the agent environment." in out
+    assert "cinna sync push --agent crm" in out
+    assert "more detail" not in out
+
+
+# --- agent prompts pull / diff / push ---
+
+
+AGENT_RECORD = {
+    "id": "agent-123",
+    "name": "CRM Agent",
+    "workflow_prompt": "You run `report.py` for the period.",
+    "entrypoint_prompt": "Run the report.",
+    "refiner_prompt": None,
+    "router_trigger_prompt": "Reports on CRM pipelines.",
+    "description": "CRM reporting",
+    "example_prompts": ["run the report"],
+}
+
+
+def _prompts_client(mock_client_cls, account_root, monkeypatch):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.get_agent.return_value = dict(AGENT_RECORD)
+    return mock_client
+
+
+def _pull_prompts(runner, account_root):
+    result = runner.invoke(cli, ["agent", "prompts", "pull", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    return account_root / "prompts" / "crm-agent"
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_pull_writes_files_and_a_baseline(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _prompts_client(mock_client_cls, account_root, monkeypatch)
+
+    folder = _pull_prompts(runner, account_root)
+    mock_client.get_agent.assert_called_once_with("agent-123")
+    # Backticks survive byte-for-byte — no shell ever sees the text.
+    assert (folder / "workflow.md").read_text() == "You run `report.py` for the period.\n"
+    assert (folder / "refiner.md").read_text() == ""
+    assert (folder / "description.md").read_text() == "CRM reporting\n"
+    assert json.loads((folder / "example_prompts.json").read_text()) == ["run the report"]
+    baseline = json.loads((folder / ".pulled.json").read_text())
+    assert baseline["agent_id"] == "agent-123"
+    assert baseline["fields"]["workflow_prompt"] == AGENT_RECORD["workflow_prompt"]
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_pull_refuses_to_discard_unpushed_edits(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    _prompts_client(mock_client_cls, account_root, monkeypatch)
+    folder = _pull_prompts(runner, account_root)
+    (folder / "workflow.md").write_text("My unpushed edit.\n")
+
+    result = runner.invoke(cli, ["agent", "prompts", "pull", "CRM Agent"])
+    assert result.exit_code != 0
+    assert "Unpushed edits" in result.output
+    assert "workflow.md" in result.output
+    assert (folder / "workflow.md").read_text() == "My unpushed edit.\n"
+
+    result = runner.invoke(cli, ["agent", "prompts", "pull", "CRM Agent", "--force"])
+    assert result.exit_code == 0, result.output
+    assert (folder / "workflow.md").read_text() == "You run `report.py` for the period.\n"
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_pull_refuses_files_it_did_not_write(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    _prompts_client(mock_client_cls, account_root, monkeypatch)
+    folder = account_root / "prompts" / "crm-agent"
+    folder.mkdir(parents=True)
+    (folder / "workflow.md").write_text("Hand-written.\n")
+
+    result = runner.invoke(cli, ["agent", "prompts", "pull", "CRM Agent"])
+    assert result.exit_code != 0
+    assert "not pulled by this command" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_push_sends_only_the_edited_field_and_syncs_the_env(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _prompts_client(mock_client_cls, account_root, monkeypatch)
+    folder = _pull_prompts(runner, account_root)
+    (folder / "workflow.md").write_text("You run `report.py` twice.\n")
+
+    result = runner.invoke(cli, ["agent", "prompts", "push", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.update_agent_config.assert_called_once_with(
+        "agent-123", {"workflow_prompt": "You run `report.py` twice."}
+    )
+    mock_client.sync_agent_prompts.assert_called_once_with("agent-123")
+    assert "Pushed workflow.md" in result.output
+    assert "docs/*.md now carry them" in result.output
+
+    # The baseline advanced: the same files have nothing left to send.
+    mock_client.update_agent_config.reset_mock()
+    mock_client.get_agent.return_value = {
+        **AGENT_RECORD,
+        "workflow_prompt": "You run `report.py` twice.",
+    }
+    result = runner.invoke(cli, ["agent", "prompts", "push", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "Nothing to push" in result.output
+    mock_client.update_agent_config.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_push_never_reverts_a_platform_change_it_did_not_edit(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _prompts_client(mock_client_cls, account_root, monkeypatch)
+    folder = _pull_prompts(runner, account_root)
+    (folder / "description.md").write_text("Reconciles CRM pipelines.\n")
+    mock_client.get_agent.return_value = {**AGENT_RECORD, "workflow_prompt": "Changed in the UI."}
+
+    result = runner.invoke(cli, ["agent", "prompts", "push", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.update_agent_config.assert_called_once_with(
+        "agent-123", {"description": "Reconciles CRM pipelines."}
+    )
+    # Only config-only fields changed: nothing to push into the env's docs.
+    mock_client.sync_agent_prompts.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_push_refuses_a_field_changed_on_both_sides(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _prompts_client(mock_client_cls, account_root, monkeypatch)
+    folder = _pull_prompts(runner, account_root)
+    (folder / "workflow.md").write_text("My version.\n")
+    mock_client.get_agent.return_value = {**AGENT_RECORD, "workflow_prompt": "Their version."}
+
+    result = runner.invoke(cli, ["agent", "prompts", "push", "CRM Agent"])
+    assert result.exit_code != 0
+    assert "Changed on the platform since you pulled, and locally too" in result.output
+    mock_client.update_agent_config.assert_not_called()
+
+    result = runner.invoke(cli, ["agent", "prompts", "push", "CRM Agent", "--force"])
+    assert result.exit_code == 0, result.output
+    mock_client.update_agent_config.assert_called_once_with(
+        "agent-123", {"workflow_prompt": "My version."}
+    )
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_push_without_a_running_env_says_when_the_docs_arrive(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _prompts_client(mock_client_cls, account_root, monkeypatch)
+    folder = _pull_prompts(runner, account_root)
+    (folder / "entrypoint.md").write_text("Run this week's report.\n")
+    mock_client.sync_agent_prompts.side_effect = PlatformError(400, "Environment is not running")
+
+    result = runner.invoke(cli, ["agent", "prompts", "push", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_client.update_agent_config.assert_called_once()
+    assert "next start" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_push_dry_run_writes_nothing(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _prompts_client(mock_client_cls, account_root, monkeypatch)
+    folder = _pull_prompts(runner, account_root)
+    (folder / "example_prompts.json").write_text('["run the report", "show failed deals"]\n')
+
+    result = runner.invoke(cli, ["agent", "prompts", "push", "CRM Agent", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "Would push to CRM Agent: example_prompts.json" in result.output
+    assert '+  "show failed deals"' in result.output
+    mock_client.update_agent_config.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_push_rejects_examples_that_are_not_a_list_of_strings(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _prompts_client(mock_client_cls, account_root, monkeypatch)
+    folder = _pull_prompts(runner, account_root)
+    (folder / "example_prompts.json").write_text('{"not": "a list"}\n')
+
+    result = runner.invoke(cli, ["agent", "prompts", "push", "CRM Agent"])
+    assert result.exit_code != 0
+    assert "must be a JSON list of strings" in result.output
+    mock_client.update_agent_config.assert_not_called()
+
+
+@patch("cinna.account.AccountClient")
+def test_agent_prompts_diff_shows_edits_and_flags_platform_moves(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    mock_client = _prompts_client(mock_client_cls, account_root, monkeypatch)
+    folder = _pull_prompts(runner, account_root)
+    (folder / "workflow.md").write_text("You run `report.py` twice.\n")
+    mock_client.get_agent.return_value = {
+        **AGENT_RECORD,
+        "router_trigger_prompt": "Changed in the UI.",
+    }
+
+    result = runner.invoke(cli, ["agent", "prompts", "diff", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "+You run `report.py` twice." in result.output
+    assert "-You run `report.py` for the period." in result.output
+    assert "router_trigger.md" in result.output
+    assert "push leaves it alone" in result.output

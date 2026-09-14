@@ -205,6 +205,49 @@ session lifecycle, or resolution — that's where the subtle bugs live.
 - **Watch for:** the local file syncing up and clobbering managed credentials; a
   conflict on a credentials file the user was told never to edit.
 
+### 15. First push after `agent sync` reports no false conflicts
+
+- **Goal:** edits made right after attaching an agent sync as plain changes — the
+  regression where the first `sync push` reported the two edited files as
+  conflicts although the remote copies were untouched originals.
+- **Setup:** an agent not yet synced on this machine (`cinna agent unsync <slug>`
+  first if needed), from the account root.
+- **Steps:**
+  ```
+  cinna agent sync <agent>                 # prints "Sync session started"
+  cinna sync status --agent <slug>         # State: connected (not "missing")
+  echo "# edit" >> agents/<slug>/<subdir>/workspace/docs/WORKFLOW_PROMPT.md
+  echo "x = 1"  >  agents/<slug>/<subdir>/workspace/scripts/new_file.py
+  cinna sync push --agent <slug>
+  cinna exec --agent <slug> tail -1 /app/workspace/docs/WORKFLOW_PROMPT.md
+  ```
+- **Expected:** `agent sync` ends with "Sync session started"; status shows a live
+  session before any push; the push prints "Sync settled" with **0** conflicts; the
+  remote file carries the edit.
+- **Watch for:** `State: missing` right after `agent sync`; `2 conflict(s) remain` on
+  the first push; `agent sync` failing outright when Mutagen cannot start (it must
+  only warn and name `cinna sync push --agent <slug>`).
+
+### 16. `sync conflicts --diff` shows what differs before choosing a winner
+
+- **Goal:** decide `--prefer local|remote` from the facts, without `cinna exec cat`.
+- **Setup:** a real conflict (#7): the same file edited on both sides, plus one
+  file made identical on both sides after conflicting.
+- **Steps:**
+  ```
+  cinna sync push --agent <slug>            # warns: N conflict(s) remain … --diff
+  cinna sync conflicts --agent <slug> --diff
+  ```
+- **Expected:** the push does **not** print "Sync settled"; its warning names
+  `cinna sync conflicts --diff`. The diff lists each path with local and remote
+  size + sha256; a unified diff (`remote/<path>` → `local/<path>`) for the text file;
+  "Identical content — resolving either way changes nothing." for the identical one.
+  With the environment stopped, the remote side reads `unknown` under a warning and
+  the command still exits 0.
+- **Watch for:** a green "settled" line above the conflict warning; a path with a
+  space reported missing on the remote; binary files dumped as text; the command
+  failing when the container is asleep.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **No silent clobber / no silent loss** — a two-sided edit always parks a conflict;

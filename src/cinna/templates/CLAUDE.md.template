@@ -199,8 +199,9 @@ After installing, **persist the dependency** by adding it to `workspace_requirem
 | Run any command in the remote env | `cinna exec <command>` |
 | Install a Python package | `cinna exec uv pip install <pkg>` then add to `workspace_requirements.txt` |
 | Sync status from another terminal | `cinna sync status` |
-| List conflict copies | `cinna sync conflicts` |
+| List conflicts, and compare both copies | `cinna sync conflicts [--diff]` |
 | Talk to the agent to test it (conversation) | `cinna chat "<message>"` |
+| Get back a turn after a timeout / lost connection | `cinna chat --attach <session_id>` |
 | Refresh expired CLI token | `cinna set-token <token_or_url>` |
 
 Iteration: edit files locally → Mutagen syncs them remotely within seconds → `cinna exec <cmd>` runs the script; stdout/stderr stream back live; exit code matches → inspect `app-data/storage/` for output.

@@ -154,8 +154,13 @@ each with its own token, registry entry, and Mutagen session.
   (the CLI sends no secret) in the active workspace and prints exactly which
   fields the user must complete plus the UI link. `--agent` attaches it in one
   step; `--workspace` overrides the target workspace.
-- `cinna account credentials list` shows credentials with their setup status
-  (complete / needs setup) — metadata only.
+- `cinna account credentials list` shows credentials with their type, **slot**,
+  setup status (complete / needs setup, plus a placeholder marker) and full id —
+  metadata only. The slot is the credential's service URI: the non-secret id a
+  skill's `credentials:` block names and a script looks the credential up by, so
+  it is the column that answers "which credential fills this skill's slot". The
+  hint under the table names `cinna account credentials update <id> --service-uri
+  <slot>`. `--json` prints the raw listing.
 - `cinna account credentials update <id>` edits metadata (name/notes/service-uri/
   sharing), never a secret. `cinna account credentials share-with-agent <id>
   --agent <ref>` attaches an existing credential. `cinna account credentials

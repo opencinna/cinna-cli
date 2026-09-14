@@ -195,6 +195,61 @@ depends on — assert on parsed events, not on prose.
 - **Watch for:** a stack trace instead of a clear message; a silent fallback to a
   per-agent token.
 
+### 12. A dead chat is recovered with `--attach`
+
+- **Goal:** get the reply to a turn whose `cinna chat` command died mid-wait —
+  the case that used to leave a session streaming with no CLI way back in.
+- **Steps:**
+  ```
+  cinna chat --agent "<Agent Name>" --timeout 3 "Tell me something that takes a while" \
+    > /tmp/chat12.ndjson
+  SID=$(jq -r 'select(.event=="session") | .session_id' /tmp/chat12.ndjson)
+  jq -c 'select(.event=="timeout" or .event=="done")' /tmp/chat12.ndjson
+  cinna chat --attach "$SID" > /tmp/chat12b.ndjson
+  jq -c 'select(.event=="session" or .event=="done")' /tmp/chat12b.ndjson
+  jq -r 'select(.event=="message" and .role=="agent") | .content' /tmp/chat12b.ndjson
+  ```
+- **Expected:** the first run's `timeout` and `done` both carry
+  `"recover": "cinna chat --attach <SID>"` and `done.outcome` is `timeout`. The
+  attach sends no message (the session's message count grows by the agent reply
+  only), opens with `"attached": true`, replays the latest user message, prints
+  the agent's reply once it lands, and ends `done.outcome == "completed"`.
+- **Watch for:** `--attach` sending a message or re-running the turn; history
+  before the latest user message being re-printed; Ctrl-C during attach
+  interrupting the turn (it must only stop watching).
+
+### 13. A flaky connection does not abort the turn
+
+- **Goal:** a single proxy request failing mid-poll is retried, not fatal.
+- **Steps:** start a longer turn, then briefly break the connection to the backend
+  (stop and restart the API, or drop the network for ~10 s) while it runs:
+  ```
+  cinna chat --agent "<Agent Name>" "Summarize everything you can do" > /tmp/chat13.ndjson
+  jq -c 'select(.event=="warning" or .event=="error" or .event=="done")' /tmp/chat13.ndjson
+  ```
+- **Expected:** one or more `warning` events (`poll request failed (…); retrying in
+  Ns`, with `attempt`), then the reply and `done.outcome == "completed"`, exit 0.
+  If the outage outlasts `--timeout`: exit 12, an `error` event with `session_id` and
+  `recover`, and stderr naming the same `--attach` command.
+- **Watch for:** exit on the first failed request (`Could not reach …/api-proxy`);
+  the error omitting the session id; retries continuing past `--timeout`.
+
+### 14. `--show` reads a session without touching it
+
+- **Goal:** inspect an existing transcript — including one still being written.
+- **Steps:**
+  ```
+  cinna chat --show "$SID" --no-download | jq -c '{event, role, outcome, recover}'
+  # while a turn is running in another terminal:
+  cinna chat --show "$SID" --no-download | jq -c 'select(.event=="status" or .event=="done")'
+  cinna chat --show "$SID" "hello"    # refused: --show sends nothing
+  ```
+- **Expected:** every message in order, then `done.outcome == "idle"`. Mid-turn: a
+  `status: working` event with the trace so far, and `done.outcome ==
+  "in_progress"` with `recover`. The third command exits 2 with a usage error.
+- **Watch for:** `--show` blocking on a running turn; an in-progress message
+  emitted as final; a message silently sent.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **NDJSON contract** — default output is one JSON object per line; the first event

@@ -79,6 +79,22 @@ message itself.
   in a TTY with no message — an interactive prompt. With no message and no file,
   the command errors cleanly rather than hanging.
 
+### Get back a turn a dead command left running
+- The agent's turn runs on the platform whether or not anyone is polling. When a
+  `cinna chat` command dies mid-turn (lost connection, a timeout, a closed
+  terminal), its error — and any `timeout` / start-grace warning — names the
+  session and the command that recovers it.
+- `cinna chat --attach <session_id>` sends nothing: it replays the session from its
+  latest user message and waits for that turn to settle, exactly like a fresh chat.
+  Ctrl-C only stops watching; the turn is not interrupted.
+
+### Read a session without touching it
+- `cinna chat --show <session_id>` prints the whole transcript once and waits for
+  nothing. A message still being written shows as `working` with its trace so far,
+  and the closing `done` says `in_progress` with the `--attach` command.
+- `--attach` / `--show` take no message, `--resume`, `--file` or `--agent` — they
+  name an existing session and send nothing.
+
 ## Business rules / guardrails
 
 - **Account workspace required, fail-loud.** No `.cinna/account.json` up the tree
@@ -93,7 +109,18 @@ message itself.
   growing); the CLI re-reads it on the next poll.
 - **Bounded waiting.** A start-grace window (120 s) covers env wake / queueing
   before the turn begins; an overall `--timeout` (default 600 s) bounds the whole
-  wait. Either bound emits a `warning`/`timeout` event rather than hanging.
+  wait. Either bound emits a `warning`/`timeout` event rather than hanging, and
+  both name `cinna chat --attach <sid>` — the turn may still be running.
+- **A failed poll is not a failed turn.** One buffered proxy request timing out, a
+  429 or a 5xx says nothing about the turn, which runs server-side regardless. Such
+  a failure is retried with backoff inside the same `--timeout` budget, each retry
+  announced as a `warning` event. Only when the budget runs out does the command
+  give up — with an `error` event and exit 12 that carry the session id and the
+  `--attach` command, never a bare "could not reach" line.
+- **`done` always says how the wait ended.** Its `outcome` is the CLI's own
+  account — `completed`, `timeout`, `not_started` (or `in_progress` / `idle` for
+  `--show`) — because the session's `result_state` can be empty. A non-final
+  outcome carries `recover`.
 - **Ctrl-C interrupts the remote turn.** It calls the session's interrupt route,
   emits an `interrupted` event, and exits 130 — it does not leave the turn running
   unobserved.

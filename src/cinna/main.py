@@ -428,11 +428,17 @@ def account_credentials():
     default=None,
     help="Filter by workspace id ('default' = the Default/unassigned workspace).",
 )
-def account_credentials_list(workspace: str | None):
-    """List your credentials with their setup status (metadata only)."""
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
+def account_credentials_list(workspace: str | None, as_json: bool):
+    """List your credentials: name, type, slot, setup status, id (metadata only).
+
+    The SLOT column is the credential's service URI — the id a skill's
+    ``credentials:`` block names and a script looks the credential up by.
+    Set it with ``cinna account credentials update <id> --service-uri <slot>``.
+    """
     from cinna.account import run_credentials_list
 
-    run_credentials_list(workspace)
+    run_credentials_list(workspace, as_json=as_json)
 
 
 @account_credentials.command(name="types")
@@ -766,6 +772,10 @@ def agent_restart_env(agent_ref: str):
     raw API escape hatch. Blocks until the env is back, then prints its status.
     Use this when a producer's REST API is stuck reporting an old error, or the
     env is otherwise wedged.
+
+    A restart re-runs the same image: it does NOT update the container's core
+    or SDK helpers. An environment missing a newer feature (e.g. the
+    credential slot helpers) needs 'cinna agent rebuild-env'.
     """
     from cinna.account import run_agent_restart_env
 
@@ -825,6 +835,90 @@ def agent_show(agent_ref: str, prompts_only: bool, full: bool):
     from cinna.account import run_agent_show
 
     run_agent_show(agent_ref, prompts_only, full)
+
+
+# ─── agent prompts subgroup ────────────────────────────────────────────────
+
+
+_PROMPTS_DIR_HELP = (
+    "Folder holding the prompt files (default: prompts/<agent-slug>/ at the "
+    "account root)."
+)
+
+
+@agent.group(name="prompts")
+def agent_prompts():
+    """Edit an agent's prompts as local files: pull, diff, push.
+
+    \b
+    pull   writes workflow.md, entrypoint.md, refiner.md, router_trigger.md,
+           description.md and example_prompts.json, and records what it pulled
+    diff   shows local edits against the platform, and flags a field the
+           platform changed since the pull
+    push   sends only the fields you edited, then pushes the doc prompts into
+           the running environment
+
+    The agent's config (the database) is authoritative. The environment's
+    docs/*.md mirror three of these prompts; editing those synced files as
+    well as these is a last-writer-wins race — pick one path.
+    """
+
+
+@agent_prompts.command(name="pull")
+@click.argument("agent_ref")
+@click.option("--dir", "dir_opt", default=None, help=_PROMPTS_DIR_HELP)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite the folder even if it holds unpushed edits or another agent's prompts.",
+)
+def agent_prompts_pull(agent_ref: str, dir_opt: str | None, force: bool):
+    """Write AGENT_REF's prompts, description and examples to files."""
+    from cinna.account import run_agent_prompts_pull
+
+    run_agent_prompts_pull(agent_ref, dir_opt, force)
+
+
+@agent_prompts.command(name="diff")
+@click.argument("agent_ref")
+@click.option("--dir", "dir_opt", default=None, help=_PROMPTS_DIR_HELP)
+def agent_prompts_diff(agent_ref: str, dir_opt: str | None):
+    """Show how the local prompt files differ from AGENT_REF's config."""
+    from cinna.account import run_agent_prompts_diff
+
+    run_agent_prompts_diff(agent_ref, dir_opt)
+
+
+@agent_prompts.command(name="push")
+@click.argument("agent_ref")
+@click.option("--dir", "dir_opt", default=None, help=_PROMPTS_DIR_HELP)
+@click.option(
+    "--sync-env/--no-sync-env",
+    "sync_env",
+    default=True,
+    show_default=True,
+    help="After the write, push workflow/entrypoint/refiner into the running "
+    "environment's docs/*.md (without it they arrive on its next start).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Push a field even if the platform changed it since the pull.",
+)
+@click.option("--dry-run", is_flag=True, help="Show what would be pushed; write nothing.")
+def agent_prompts_push(
+    agent_ref: str, dir_opt: str | None, sync_env: bool, force: bool, dry_run: bool
+):
+    """Write the edited prompt files back to AGENT_REF in one bulk write.
+
+    Only fields whose file changed since the pull are sent. A field the
+    platform changed since the pull is left alone when you did not edit it,
+    and refused when you did (unless --force) — so a stale file never silently
+    reverts someone else's change. Delete a file to leave its field untouched.
+    """
+    from cinna.account import run_agent_prompts_push
+
+    run_agent_prompts_push(agent_ref, dir_opt, sync_env, force, dry_run)
 
 
 # ─── agent schedule subgroup ───────────────────────────────────────────────
@@ -1932,6 +2026,21 @@ def _run_remote_exec(config, command_str: str, timeout: int = 1800) -> int:
     help="Continue an existing session instead of starting a new one.",
 )
 @click.option(
+    "--attach",
+    "attach",
+    default=None,
+    metavar="SESSION_ID",
+    help="Send nothing: wait for SESSION_ID's current turn to finish and print "
+    "it — the recovery when a chat command died while the agent kept working.",
+)
+@click.option(
+    "--show",
+    "show",
+    default=None,
+    metavar="SESSION_ID",
+    help="Send nothing, wait for nothing: print SESSION_ID's transcript.",
+)
+@click.option(
     "--file",
     "files",
     multiple=True,
@@ -1988,6 +2097,8 @@ def _run_remote_exec(config, command_str: str, timeout: int = 1800) -> int:
 def chat_cmd(
     agent_ref: str | None,
     resume: str | None,
+    attach: str | None,
+    show: str | None,
     files: tuple[str, ...],
     mode: str,
     title: str | None,
@@ -2024,7 +2135,56 @@ def chat_cmd(
       cinna chat --agent crm-agent --file report.csv "Validate this export"
       cinna chat --resume 3f2c… "And now break it down by region"
       echo "ping" | cinna chat --agent crm-agent
+      cinna chat --attach 3f2c…    # wait for a turn a dead command left running
+      cinna chat --show 3f2c…      # print a session's transcript
+
+    A poll request that fails (a proxy timeout, a 5xx) is retried within
+    --timeout. If contact is lost for good, the error names the session and
+    the --attach command: the agent's turn keeps running on the platform.
+    The closing "done" event carries "outcome": completed, timeout or
+    not_started (in_progress or idle for --show).
     """
+    if attach or show:
+        if attach and show:
+            raise click.UsageError("--attach and --show are alternatives; pass one.")
+        flag = "--attach" if attach else "--show"
+        extras = [
+            name
+            for name, value in (
+                ("--resume", resume),
+                ("--file", files),
+                ("--agent", agent_ref),
+                ("message", message),
+            )
+            if value
+        ]
+        if extras:
+            raise click.UsageError(
+                f"{flag} names an existing session and sends nothing, so it "
+                f"takes no {' or '.join(extras)}."
+            )
+        from cinna.chat import run_chat_attach, run_chat_show
+
+        if attach:
+            run_chat_attach(
+                attach,
+                download_dir=download_dir,
+                no_download=no_download,
+                interval=interval,
+                timeout=timeout,
+                pretty=pretty,
+                include_events=include_events,
+            )
+        else:
+            run_chat_show(
+                show,
+                download_dir=download_dir,
+                no_download=no_download,
+                pretty=pretty,
+                include_events=include_events,
+            )
+        return
+
     from cinna.chat import run_chat
 
     run_chat(
@@ -2517,14 +2677,24 @@ def sync_status(agent_ref: str | None):
     default=None,
     help="Target a synced agent from the account root",
 )
-def sync_conflicts(agent_ref: str | None):
+@click.option(
+    "--diff",
+    "show_diff",
+    is_flag=True,
+    help="Compare each conflicted file's local and remote copies: size, sha256, "
+    "and a unified diff (remote → local) for text files.",
+)
+def sync_conflicts(agent_ref: str | None, show_diff: bool):
     """List sync conflicts the Mutagen daemon has parked.
 
     Sources from the daemon's conflict list (authoritative), so this agrees
     with the count shown by ``cinna sync status`` — two-way-safe does not write
     ``.conflict.*`` files on disk, so a disk walk would always look empty.
+
+    With ``--diff`` each path is compared across the two sides, so choosing a
+    winner no longer takes a manual ``cinna exec cat`` per file.
     """
-    _root, config = _resolve_sync_target(agent_ref)
+    root, config = _resolve_sync_target(agent_ref)
 
     paths = sync_session.daemon_conflict_paths(config)
     if not paths:
@@ -2539,10 +2709,166 @@ def sync_conflicts(agent_ref: str | None):
     for i, p in enumerate(paths, 1):
         table.add_row(str(i), p)
     console.console.print(table)
+    if show_diff:
+        _print_conflict_diffs(root, config, paths)
     console.console.print(
         "\nResolve with 'cinna sync resolve --prefer local' (your local edits "
         "win) or '--prefer remote' (the container's version wins)."
     )
+
+
+# Text above this size is compared by hash only — a diff of it would not be read.
+_CONFLICT_TEXT_LIMIT = 200_000
+_CONFLICT_DIFF_LINES = 80
+
+# Runs inside the agent's container: one JSON line of facts per requested path.
+# Content travels only for small UTF-8 files, and only to render the diff.
+_REMOTE_FACTS_SCRIPT = f"""\
+import hashlib, json, sys
+out = {{}}
+for rel in sys.argv[1:]:
+    try:
+        with open("/app/workspace/" + rel, "rb") as fh:
+            data = fh.read()
+    except FileNotFoundError:
+        out[rel] = {{"exists": False}}
+        continue
+    except IsADirectoryError:
+        out[rel] = {{"exists": True, "directory": True}}
+        continue
+    facts = {{"exists": True, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}}
+    if len(data) <= {_CONFLICT_TEXT_LIMIT}:
+        try:
+            facts["text"] = data.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    out[rel] = facts
+print(json.dumps(out))
+"""
+
+
+def _local_file_facts(path: Path) -> dict:
+    """The same facts the remote script reports, for the local copy."""
+    import hashlib
+
+    if path.is_dir():
+        return {"exists": True, "directory": True}
+    if not path.is_file():
+        return {"exists": False}
+    data = path.read_bytes()
+    facts: dict = {
+        "exists": True,
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    if len(data) <= _CONFLICT_TEXT_LIMIT:
+        try:
+            facts["text"] = data.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    return facts
+
+
+def _remote_file_facts(config, relpaths: list[str]) -> dict | None:
+    """Facts for each remote path in one exec, or ``None`` when unreadable."""
+    import json
+
+    cmd = shlex.join(["python3", "-c", _REMOTE_FACTS_SCRIPT, *relpaths])
+    stdout: list[str] = []
+    exit_code = 1
+    try:
+        with PlatformClient(config) as client:
+            for event in client.stream_exec(config.agent_id, cmd, timeout=120):
+                etype = event.get("type")
+                if etype == "tool_result_delta":
+                    if (event.get("metadata") or {}).get("stream", "stdout") == "stdout":
+                        stdout.append(event.get("content") or "")
+                elif etype == "done":
+                    exit_code = int(event.get("exit_code", 0))
+                elif etype == "error":
+                    logger.error("remote facts error: %s", event.get("content"))
+                    return None
+    except Exception as exc:  # network / stream failure
+        logger.error("remote facts failed: %s", exc)
+        return None
+    if exit_code != 0:
+        return None
+    lines = "".join(stdout).strip().splitlines()
+    try:
+        parsed = json.loads(lines[-1])
+    except (ValueError, IndexError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _facts_line(facts: dict | None) -> str:
+    if facts is None:
+        return "[dim]unknown[/dim]"
+    if not facts.get("exists"):
+        return "[yellow]missing[/yellow]"
+    if facts.get("directory"):
+        return "directory"
+    return f"{facts['size']:,} bytes  [dim]sha256 {facts['sha256'][:12]}[/dim]"
+
+
+def _conflict_verdict(local: dict, remote: dict | None) -> str | None:
+    """The one conclusion the facts support, when there is one."""
+    if remote is None:
+        return None
+    if local.get("exists") and not remote.get("exists"):
+        return "Only the local copy exists."
+    if remote.get("exists") and not local.get("exists"):
+        return "Only the remote copy exists."
+    if local.get("sha256") and local.get("sha256") == remote.get("sha256"):
+        return "Identical content — resolving either way changes nothing."
+    return None
+
+
+def _print_conflict_diffs(root: Path, config, relpaths: list[str]) -> None:
+    """Local vs remote facts per conflicted path, plus a diff for text."""
+    import difflib
+
+    from rich.markup import escape
+
+    with console.spinner("Reading the remote copies…"):
+        remote = _remote_file_facts(config, relpaths)
+    if remote is None:
+        console.warn(
+            "Could not read the remote copies (is the environment running?) — "
+            "showing the local side only."
+        )
+    workspace = sync_session.workspace_dir(root)
+    for i, rel in enumerate(relpaths, 1):
+        local = _local_file_facts(workspace / rel)
+        far = None if remote is None else remote.get(rel)
+        console.console.print()
+        console.console.print(f"[bold]{i}. {escape(rel)}[/bold]")
+        console.console.print(f"   local : {_facts_line(local)}")
+        console.console.print(f"   remote: {_facts_line(far)}")
+        verdict = _conflict_verdict(local, far)
+        if verdict:
+            console.console.print(f"   [dim]{verdict}[/dim]")
+        if (
+            far is not None
+            and local.get("text") is not None
+            and far.get("text") is not None
+            and local.get("sha256") != far.get("sha256")
+        ):
+            diff = list(
+                difflib.unified_diff(
+                    far["text"].splitlines(),
+                    local["text"].splitlines(),
+                    fromfile=f"remote/{rel}",
+                    tofile=f"local/{rel}",
+                    lineterm="",
+                )
+            )
+            for line in diff[:_CONFLICT_DIFF_LINES]:
+                click.echo(f"   {line}")
+            if len(diff) > _CONFLICT_DIFF_LINES:
+                console.console.print(
+                    f"   [dim]… {len(diff) - _CONFLICT_DIFF_LINES} more diff line(s)[/dim]"
+                )
 
 
 @sync.command("push")
@@ -2590,12 +2916,7 @@ def sync_push(agent_ref: str | None, force: bool):
     # --force resolution direction, not the flush itself.
     with console.spinner("Flushing sync…"):
         st = sync_session.flush(config)
-    console.status(f"Sync settled ({st.state}).")
-    if st.conflict_count:
-        console.warn(
-            f"{st.conflict_count} conflict(s) remain — your edits are NOT fully live. "
-            "Re-run with --force (local wins) or 'cinna sync resolve'."
-        )
+    _report_flush(st, winner="local")
 
 
 @sync.command("pull")
@@ -2639,12 +2960,25 @@ def sync_pull(agent_ref: str | None, force: bool):
     # --force resolution direction, not the flush itself.
     with console.spinner("Flushing sync…"):
         st = sync_session.flush(config)
-    console.status(f"Sync settled ({st.state}).")
-    if st.conflict_count:
-        console.warn(
-            f"{st.conflict_count} conflict(s) remain. "
-            "Re-run with --force (remote wins) or 'cinna sync resolve'."
-        )
+    _report_flush(st, winner="remote")
+
+
+def _report_flush(st, winner: str) -> None:
+    """Say how a one-shot flush ended — never "settled" over parked conflicts.
+
+    A flush that finished with conflicts did not settle: the conflicted files
+    are exactly the edits that are not live. Leading with a green check there
+    is how a push that changed nothing read as a success.
+    """
+    if not st.conflict_count:
+        console.status(f"Sync settled ({st.state}).")
+        return
+    note = " — your edits are NOT fully live" if winner == "local" else ""
+    console.warn(
+        f"Sync flushed ({st.state}), but {st.conflict_count} conflict(s) "
+        f"remain{note}. See what differs with 'cinna sync conflicts --diff', then "
+        f"re-run with --force ({winner} wins) or 'cinna sync resolve'."
+    )
 
 
 @sync.command("resolve")

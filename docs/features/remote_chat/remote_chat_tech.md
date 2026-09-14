@@ -19,18 +19,27 @@ all logic lives in `src/cinna/`, tests in `tests/`.
   (`find_workspace_root`, `load_config`).
 - Tests: `tests/test_chat.py` (NDJSON emission, reasoning/tool trace, `--no-events`,
   attachment download, `--no-download`, upload + file-id wiring, `--resume`,
-  missing-message error, account-workspace requirement, and the proxy/upload
-  client-method tests).
+  missing-message error, account-workspace requirement, poll retries and the
+  lost-contact recovery hint, `--attach`, `--show`, the `--attach` usage guard,
+  and the proxy/upload client-method tests).
 
 ## Command surface
 
 - `cinna chat` → `src/cinna/main.py:chat_cmd()` → `src/cinna/chat.py:run_chat()`.
+- `cinna chat --attach SID` → `src/cinna/main.py:chat_cmd()` →
+  `src/cinna/chat.py:run_chat_attach()`.
+- `cinna chat --show SID` → `src/cinna/main.py:chat_cmd()` →
+  `src/cinna/chat.py:run_chat_show()`.
 
-Key options (all on `chat_cmd`): `--agent`, `--resume`, `--file` (repeatable),
-`--mode` (`conversation`|`building`, new sessions only), `--title`,
-`--download-dir`, `--no-download`, `--interval`, `--timeout`,
+Key options (all on `chat_cmd`): `--agent`, `--resume`, `--attach`, `--show`,
+`--file` (repeatable), `--mode` (`conversation`|`building`, new sessions only),
+`--title`, `--download-dir`, `--no-download`, `--interval`, `--timeout`,
 `--events/--no-events`, `--pretty`. The trailing `MESSAGE` is `nargs=-1` with
-`ignore_unknown_options`, so the message can be unquoted free text.
+`ignore_unknown_options`, so the message can be unquoted free text. They are
+options rather than `chat wait` / `chat show` subcommands because `chat` takes
+free text: `cinna chat show me the report` must stay a message. `chat_cmd`
+refuses `--attach` together with `--show`, and either with a message, `--resume`,
+`--file` or `--agent` (a usage error, exit 2).
 
 ## Key functions & flow
 
@@ -53,17 +62,38 @@ Key options (all on `chat_cmd`): `--agent`, `--resume`, `--file` (repeatable),
   `config.agent_id`; else fail-loud.
 - `src/cinna/chat.py:_message_count()` — pages `get_messages` by `_MESSAGE_PAGE`
   (500) to get the total already-present count (the starting `offset`).
-- `src/cinna/chat.py:_poll_turn()` — the poll loop:
+- `src/cinna/chat.py:_poll_turn()` — the poll loop; returns the **outcome** and
+  leaves the closing `done` to its caller:
   - Inner drain: `get_messages(offset=consumed)`; emit each finalized message and
     advance `consumed`; **stop at the first** message flagged
     `message_metadata.streaming_in_progress` (emit a one-shot `status: working`).
   - `get_streaming_status()` → `is_streaming`. Settle when `turn_started and not
-    streaming and not in_progress`.
+    streaming and not in_progress` → `completed`. A changed, non-null
+    `stream_info` is passed through as a `status: streaming` event.
   - `turn_started` flips on the first non-user message or `is_streaming` true;
     `expect_turn` seeds it (no expected turn ⇒ already started).
-  - `START_GRACE_SECONDS` (120) bounds time-to-start (emit `warning`); `--timeout`
-    bounds the whole wait (emit `timeout`); `--interval` (2.0 s) between polls.
-  - Always ends with `_emit_done()`.
+  - `START_GRACE_SECONDS` (120) bounds time-to-start (emit `warning`, return
+    `not_started`); `--timeout` bounds the whole wait (emit `timeout`, return
+    `timeout`); both events carry `recover`. `--interval` (2.0 s) between polls.
+  - Every poll request goes through `_with_poll_retry()` with the same deadline.
+- `src/cinna/chat.py:_with_poll_retry()` — retries a request that failed
+  transiently (`_is_transient()`: `httpx.TransportError`, a 429, or a 5xx) with
+  `_POLL_RETRY_DELAYS` backoff capped by the remaining `--timeout`, emitting a
+  `warning` event per attempt; anything else, or an exhausted deadline, re-raises.
+- `src/cinna/chat.py:_abort_with_recovery()` — when polling gives up on a
+  transient failure: emits an `error` event (NDJSON mode) with `session_id` and
+  `recover: cinna chat --attach <sid>`, then raises `CinnaExit` (exit 12, code
+  `chat_poll_failed`) carrying the same two fields.
+- `src/cinna/chat.py:run_chat_attach()` — `--attach`: `_open_session()`, emit
+  `session` with `attached: true`, `_all_messages()` to put the cursor on the
+  latest user message, then `_poll_turn(expect_turn=True)` and `_emit_done()`.
+  Ctrl-C emits `detached` and exits 130 **without** calling interrupt.
+- `src/cinna/chat.py:run_chat_show()` — `--show`: emit every finalized message via
+  `_emit_message()`; an in-progress one as `status: working` plus its trace; then
+  `done` with outcome `in_progress` or `idle`.
+- `src/cinna/chat.py:_session_event()` / `_open_session()` / `_all_messages()` —
+  the shared `session` event, a session fetch whose refusal is one sentence, and a
+  paged read of every message.
 - `src/cinna/chat.py:_emit_message()` — builds the `message` event (id/role/seq/
   timestamp/content/status), attaches the `events` trace (unless `--no-events`),
   and the `attachments` list (downloading each when a `dl_dir` is set).
@@ -157,3 +187,20 @@ Key options (all on `chat_cmd`): `--agent`, `--resume`, `--file` (repeatable),
 - **Hatch refusal is distinguishable** — the absent `x-cinna-proxied` marker maps
   to an "escape hatch refused" error, separate from a mirrored inner-route status.
   (`tests/test_chat.py`)
+- **Retry only what says nothing about the turn** — `_is_transient()` admits
+  transport errors, 429 and 5xx; a 4xx (e.g. the session is gone) raises at once.
+  Retries share the `--timeout` deadline, so they can never extend the wait.
+  (`tests/test_chat.py:test_chat_retries_a_failed_poll_instead_of_aborting`)
+- **Giving up names the way back** — the `error` event, the exit-12 `CinnaExit`
+  and its `extra` all carry `session_id` + `recover`; in `--pretty` mode the event is
+  skipped so the error is not printed twice.
+  (`test_chat_that_loses_contact_names_the_session_and_the_attach_command`)
+- **`--attach` never sends and never interrupts** — it starts the cursor at the
+  latest user message and treats Ctrl-C as `detached`.
+  (`test_chat_attach_waits_for_the_turn_without_sending`, `test_chat_attach_takes_no_message`)
+- **`--show` never waits** — an in-progress message is reported as `status:
+  working`, never emitted as final; `done.outcome` is `in_progress` with `recover`.
+  (`test_chat_show_prints_the_transcript`, `test_chat_show_reports_a_turn_still_running`)
+- **`done.outcome` is always present** — `_emit_done()` sets it from the caller's
+  outcome and adds `recover` for `timeout` / `not_started` / `in_progress`,
+  independent of the session's `result_state`.

@@ -71,6 +71,12 @@ authenticate the tunnel and auto-wake a suspended environment.
 - `cinna sync conflicts` lists the paths Mutagen has parked, sourced from the daemon
   JSON so the list agrees with the count `cinna sync status` reports. It is
   read-only: it names the files but changes nothing.
+- `cinna sync conflicts --diff` compares each conflicted path across the two sides
+  — size and sha256 for both copies, a unified diff (remote → local) for text, and
+  the one conclusion the facts support ("identical content", "only the local copy
+  exists"). Picking a winner no longer takes a manual `cinna exec cat` per file.
+  The remote side is read in one exec; if the environment cannot answer, the local
+  side is still shown and the gap is stated.
 
 ### One-shot flush (headless / scripted)
 
@@ -82,6 +88,19 @@ authenticate the tunnel and auto-wake a suspended environment.
   regenerated managed files.
 - Both accept `--force`, which clears conflicts *in their direction* before flushing:
   `push --force` = local wins, `pull --force` = remote wins.
+- A flush that ends with conflicts **did not settle** and never says so: it warns
+  with the count, points at `cinna sync conflicts --diff`, and names the `--force`
+  direction. "Sync settled" is printed only over zero conflicts.
+
+### Attaching an agent from the account workspace
+
+- `cinna agent sync <agent>` starts the session and flushes it once, right after the
+  clone, so the first reconciliation happens while both sides are still identical.
+  Mutagen judges later edits against that agreed state. A session first created by
+  a later `cinna sync push` had no agreed state, so every file edited in between
+  looked changed on both sides — a first push used to report the builder's own
+  edits as conflicts against untouched remote originals. See
+  [Agent Management](../agent_management/agent_management.md).
 
 ### Resolving conflicts
 

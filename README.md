@@ -174,7 +174,9 @@ cinna account credentials types                                   # types + the 
 cinna account credentials create --name "Stripe Key" --type api_token \
     --agent billing-agent                                         # create a draft and attach it in one step
 #   → prints required fields (e.g. api_token) + a link to fill them in
-cinna account credentials list                                    # name, type, status (complete / needs setup)
+cinna account credentials list                                    # name, type, slot, status (complete / needs setup), id
+cinna account credentials list --json                             # the raw listing
+cinna account credentials update <cred_id> --service-uri some-token.com   # give it the slot a skill declares
 cinna account credentials share-with-agent <cred_id> --agent crm-agent
 cinna account credentials update <cred_id> --name "Stripe (live)"
 cinna account credentials delete <cred_id> --yes
@@ -226,18 +228,35 @@ cinna agent sync crm-agent
 
 ### `cinna agent sync <agent>`
 
-Mint a per-agent CLI token (no UI interaction) and materialize a standard workspace under `agents/<slug>/`. `<agent>` is the display name, slug, or agent ID from `cinna account agents`. The result is identical to what `cinna setup` produces — own `.cinna/config.json`, registry entry, generated `CLAUDE.md` / `BUILDING_AGENT.md` / MCP configs / `mutagen.yml`, and the initial workspace clone — so afterwards:
+Mint a per-agent CLI token (no UI interaction) and materialize a standard workspace under `agents/<slug>/<subdir>/` (the Model-A nested layout — `<subdir>` is the slug unless the agent is git-versioned with another one; the command prints the exact path). `<agent>` is the display name, slug, or agent ID from `cinna account agents`. The result is identical to what `cinna setup` produces — own `.cinna/config.json`, registry entry, generated `CLAUDE.md` / `BUILDING_AGENT.md` / MCP configs / `mutagen.yml`, and the initial workspace clone — so afterwards:
 
 ```bash
-cd agents/hr-manager-agent/
+cd agents/hr-manager-agent/hr-manager-agent/
 cinna dev
 ```
 
 works exactly as for a manually set-up agent. Synced agents also appear in `cinna list` and in the agent's Integrations-tab session list like any other CLI session. The backend gates minting on building rights: foreign bundle installs and view-only agents are rejected with the server's error message.
 
+It also **starts the sync session and flushes it once**, while local and remote are still the same clone, so edits made afterwards sync as plain changes — a session first created by a later `cinna sync push` has no common starting point and reported the builder's own edits as conflicts. If the session cannot start (Mutagen missing, environment unreachable) the sync still succeeds with a warning to run `cinna sync push --agent <slug>` before editing.
+
 ### `cinna agent unsync <agent>`
 
 Detach a synced workspace: stop its sync session, revoke the minted CLI token server-side (via the account-scoped revoke endpoint, authenticated with the account token; idempotent), then perform the equivalent of `cinna disconnect`: remove `.cinna/`, generated files, and the registry entry. Workspace files under `agents/<slug>/workspace/` are preserved. The revoke degrades gracefully — if it fails (no connection, or a workspace synced before token-id tracking), a warning is printed and the local teardown still completes; the token then expires on its own or can be revoked from the agent's Integrations tab.
+
+### `cinna agent prompts pull | diff | push <agent> [--dir DIR]`
+
+Edit an agent's prompts as files instead of raw `cinna api` calls (whose inline JSON let the shell command-substitute a prompt's Markdown backticks).
+
+```bash
+cinna agent prompts pull crm-agent        # → prompts/crm-agent/{workflow,entrypoint,refiner,router_trigger,description}.md + example_prompts.json
+cinna agent prompts diff crm-agent        # local edits vs the platform
+cinna agent prompts push crm-agent --dry-run
+cinna agent prompts push crm-agent        # one bulk write, then the doc prompts into the running env
+```
+
+`pull` records what it pulled in `.pulled.json` and refuses to overwrite unpushed edits, files it did not write, or another agent's prompts without `--force`. `push` sends **only the fields edited since the pull**: a field the platform changed meanwhile is left alone when you did not edit it, and refused when you did (`--force` keeps yours; `pull --force` takes the platform's). After the write it calls the env's prompt sync when a workflow/entrypoint/refiner field changed (`--no-sync-env` to skip; a stopped environment picks them up on its next start). Delete a file to leave its field untouched. The agent config is authoritative — hand-editing the synced `workspace/docs/*.md` as well is a last-writer-wins race.
+
+`cinna agent show <agent>` prints each prompt under its `[entrypoint]` / `[workflow]` / `[refiner]` label and each connected credential with its type, slot, setup state and id. `cinna agent rebuild-env <agent>` waits after the rebuild until the environment answers its health check, and says "ready to chat" only then. `cinna agent restart-env` re-runs the same image and does not update the container's core or SDK helpers.
 
 ### `cinna agent import <path> [--name TEXT] [--workspace REF] [--update] [--dry-run] [--no-push] [--yes]`
 
@@ -290,6 +309,8 @@ before skills carried one, which fills in after the next refresh or publish.
 ```
 
 The **Version** column is what the agent carries (`installed_version`), and an installed addon whose catalog has moved since reads `1.0.0 → 1.1.0` with the update command named under the table — an agent sitting two revisions back must not look identical to a current one. `Name` is the engine-facing folder name — the string `cinna skills publish` takes back — with the display name beside it when they differ. `· published` marks a local skill that already has a catalog package, so a re-publish appends a revision instead of creating a second package. The status column carries the server's own code (`secrets`, `oversized`, `shadowed` for warnings; `missing_description`, `name_mismatch`, `source_unavailable`, `orphan` for errors), and the platform's own sentence for each flagged row — with the offending files for `secrets` — follows under the table. Reads the server's cache, so it never wakes a sleeping environment: when the skill half could not be read the plugin rows still list and the reason is printed (`env_not_running`, `adapter_error`, `parse_error`) instead of a short list looking complete. `--json` prints the raw payload (`addons`, `counts`, `skills_error`) for a script or a local coding agent.
+
+When any skill declares credential slots (a `credentials:` block in its `SKILL.md`), a **Credentials** column lists each slot: `✓` filled, `! <reason>` not usable yet, `?` unchecked. Beneath the table each unusable slot gets its fix — e.g. naming the linked `api_token` credential that has no slot with `cinna account credentials update <id> --service-uri <slot>`, or a `credentials create … --service-uri <slot> --agent <agent>` draft when nothing could carry it. For a catalog install the reason is the platform's own (`not_linked`, `not_configured`, `access_revoked`); for a local or bundle skill the platform computes nothing, so the CLI checks the agent's linked credentials itself (`not_linked`, `not_configured`, `type_mismatch`). A slot's value is read from the account credential listing, because the agent's own credential route reports none; a credential shared by someone else whose slot is not visible makes the slot `?`, never `not_linked`. The check is display-only: `--json` stays the raw payload.
 
 ### `cinna skills publish <agent> <name> [--visibility public|private|users] [--grant EMAIL ...] [--version V] [--notes TEXT] [--package-id ID] [--dry-run] [--yes] [--json]`
 
@@ -451,6 +472,9 @@ Run it from the account workspace (or any synced agent folder under it). The rep
 - Each `message` carries the agent's reasoning/tool trace under **`events`** — an ordered list of the `thinking` blocks, `tool` calls (with their full `tool_input` payload) and tool results behind the reply, so you see *what the agent did*, not just its final `content`. Pass `--no-events` to drop the trace and keep only the final text.
 - Files the agent attaches to its replies are downloaded under `./cinna-chat-files/<session_id>/` (override with `--download-dir`, or skip with `--no-download` to just report the file ids). Downloads are bounded by the api-proxy's 8 MiB response cap.
 - `--interval` / `--timeout` tune the poll cadence and the maximum wait for a turn. Ctrl-C interrupts the agent's turn and exits.
+- A poll request that fails transiently (a proxy timeout, a 429, a 5xx) is **retried within `--timeout`**, each retry announced as a `warning` event — the turn runs on the platform regardless. If contact is lost for good the command exits `12` with an `error` event carrying `session_id` and `recover`.
+- The closing `done` event always carries `outcome` — `completed`, `timeout` or `not_started` (`in_progress` / `idle` for `--show`) — plus `recover` when the turn may still be running.
+- `--attach <session_id>` sends nothing: it waits for that session's current turn and prints it, the way back into a turn a dead command left running (Ctrl-C only stops watching). `--show <session_id>` prints a session's transcript once and waits for nothing.
 
 ```bash
 cinna chat --agent crm-agent "Summarize today's leads"
@@ -458,9 +482,11 @@ cinna chat --agent crm-agent --file report.csv "Validate this export"
 cinna chat --resume 3fa85f64-5717-4562-b3fc-2c963f66afa6 "Now break it down by region"
 echo "ping" | cinna chat --agent crm-agent          # message from stdin
 cinna chat --agent crm-agent "hi" | jq -c 'select(.event=="message")'
+cinna chat --attach 3fa85f64-5717-4562-b3fc-2c963f66afa6   # recover a turn after a timeout
+cinna chat --show 3fa85f64-5717-4562-b3fc-2c963f66afa6     # read a transcript
 ```
 
-The session id is printed in the first `session` event — capture it to drive a multi-turn conversation with `--resume`.
+The session id is printed in the first `session` event — capture it to drive a multi-turn conversation with `--resume`, or to re-attach with `--attach`.
 
 ### `cinna dev`
 
@@ -482,8 +508,8 @@ cinna redev    # remote wins the initial conflicts, then a normal dev session
 Inspect and drive the sync session. `status` / `conflicts` are read-only views (safe alongside a live `cinna dev`); `push` / `pull` / `resolve` are for scripted (headless) builders who aren't running the TUI. All accept `--agent <ref>` to target a synced child workspace from the account root.
 
 - `status` — state, pending changes, conflict count. Warns loudly when conflicts mean your edits aren't fully live.
-- `conflicts` — list conflicted paths (sourced from the Mutagen daemon, so it agrees with `status`; two-way-safe writes no `.conflict.*` files on disk).
-- `push [--force]` — ensure a session, then flush and block until settled. `--force` resolves any parked conflicts in favor of **local** first ("my local is the truth"). The session persists in the daemon so later edits keep syncing.
+- `conflicts [--diff]` — list conflicted paths (sourced from the Mutagen daemon, so it agrees with `status`; two-way-safe writes no `.conflict.*` files on disk). `--diff` compares both copies of each path — size, sha256, a unified diff (remote → local) for text, and "identical content" / "only one copy exists" when the facts say so — reading the remote side in one `cinna exec`, and still showing the local side if the environment cannot answer.
+- `push [--force]` — ensure a session, then flush and block until settled. `--force` resolves any parked conflicts in favor of **local** first ("my local is the truth"). The session persists in the daemon so later edits keep syncing. A flush that ends with conflicts never prints "Sync settled": it warns with the count and points at `conflicts --diff`. (`cinna agent sync` already started the session on the fresh clone, so edits made after attaching don't come back as conflicts.)
 - `pull [--force]` — the mirror; `--force` resolves in favor of **remote** (e.g. after the backend regenerates managed files).
 - `resolve --prefer local|remote` — clear parked conflicts in one command. `local` deletes the remote losing copies (your version propagates out); `remote` backs up your local copies under `.cinna/sync/` and takes the container's version. Replaces the manual kill/delete/restart dance.
 
@@ -615,7 +641,7 @@ claude        # or: opencode
 
 ## Sync & Conflict Resolution
 
-`cinna sync` drives Mutagen in `two-way-safe` mode with VCS-aware ignores (including the backend-managed `credentials/` directory, so it never conflicts on files you're told not to edit). When the same file changes on both sides, Mutagen parks a conflict (it does **not** pick a winner, and does not write `.conflict.*` files in this mode) — list them with `cinna sync conflicts`, then clear them with `cinna sync resolve --prefer local` (your edits win) or `--prefer remote` (the container's version wins). For a non-interactive flush, `cinna sync push` / `cinna sync pull` settle the session and exit.
+`cinna sync` drives Mutagen in `two-way-safe` mode with VCS-aware ignores (including the backend-managed `credentials/` directory, so it never conflicts on files you're told not to edit). When the same file changes on both sides, Mutagen parks a conflict (it does **not** pick a winner, and does not write `.conflict.*` files in this mode) — list them with `cinna sync conflicts` (add `--diff` to compare the two copies of each), then clear them with `cinna sync resolve --prefer local` (your edits win) or `--prefer remote` (the container's version wins). For a non-interactive flush, `cinna sync push` / `cinna sync pull` settle the session and exit.
 
 Large binary files and build artifacts are ignored by default (see `mutagen.yml`). Add your own ignores there if needed.
 

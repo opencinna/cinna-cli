@@ -84,6 +84,18 @@ child via `--agent`).
   session's `conflicts[]` (`alphaChanges`/`betaChanges` paths, falling back to the
   conflict `root`). This is the authoritative source `cinna sync conflicts` uses, so
   it agrees with the status count.
+- `src/cinna/main.py:_print_conflict_diffs()` — `cinna sync conflicts --diff`:
+  `_remote_file_facts()` runs `_REMOTE_FACTS_SCRIPT` once through
+  `PlatformClient.stream_exec` (`python3 -c <script> <paths…>`, quoted with
+  `shlex.join`) and parses its single JSON stdout line into per-path
+  `{exists, size, sha256, text?}`; `_local_file_facts()` computes the same for the
+  local copy; `_conflict_verdict()` names identical / one-sided copies; text at or
+  under `_CONFLICT_TEXT_LIMIT` gets a `difflib` unified diff capped at
+  `_CONFLICT_DIFF_LINES`. A failed exec returns `None` and only the local side is
+  printed.
+- `src/cinna/main.py:_report_flush()` — the shared ending of `sync push` / `pull`:
+  "Sync settled" only with zero conflicts; otherwise a warning naming the count,
+  `cinna sync conflicts --diff`, and the `--force` direction.
 - `resolve_conflicts(config, workspace_root, prefer, remote_delete=…)` — the
   delete-loser + `mutagen sync reset` recipe applied to all conflicted paths per
   round (`_REDEV_MAX_ROUNDS = 3` rounds for daemon settle): `prefer="remote"` moves
@@ -197,3 +209,17 @@ child via `--agent`).
   `test_ensure_patch_mismatch_allowed`.)
 - **Initial-clone extraction is hardened.** `src/cinna/sync.py` rejects path traversal,
   symlinks, and files over 100 MB. (`tests/test_sync.py`.)
+- **The session starts on the fresh clone.** `src/cinna/account.py:_establish_sync_session()`
+  runs `ensure_session` + `flush` at the end of `run_agent_sync()`, before any edit,
+  so Mutagen has a common ancestor; without it `two-way-safe` treats every file
+  edited before the first push as a both-sides conflict. Failure is a warning, never
+  a failed sync. (`tests/test_account.py:test_agent_sync_starts_the_sync_session_on_the_fresh_clone`,
+  `test_establish_sync_session_failure_names_the_push_to_run_first`.)
+- **Never "settled" over conflicts.** `_report_flush()` prints the green line only
+  when `conflict_count == 0`. (`tests/test_main.py:test_sync_push_with_conflicts_never_reads_settled`.)
+- **`--diff` reads the remote side in one exec and degrades to local-only.** Paths
+  travel as separate argv entries through `shlex.join`, so a space never splits one;
+  a non-zero exit, an `error` event or unparseable stdout yields `None` rather than a
+  crash. (`tests/test_main.py:test_sync_conflicts_diff_compares_both_copies`,
+  `test_remote_file_facts_reads_one_json_line_from_exec`,
+  `test_remote_file_facts_is_none_when_the_exec_fails`.)

@@ -216,6 +216,16 @@ Related (documented here as integration points): `cinna agent sync` →
 - `src/cinna/account.py:run_credentials_update()` — refuses an empty update;
   metadata fields only (`name`/`notes`/`service_uri`/`allow_sharing`).
 - `src/cinna/account.py:_credential_status_cell()` — complete / needs setup / —.
+- `src/cinna/account.py:run_credentials_list()` — `--json` echoes the listing
+  untouched; otherwise the table adds a `Slot` column (`_credential_slot_cell()`,
+  the escaped `service_uri` or a dim dash), marks `is_placeholder`, never wraps the
+  id, and prints the `--service-uri` hint. Names and types go through `_esc()`.
+  (`tests/test_account.py:test_credentials_list_shows_each_slot`,
+  `test_credentials_list_json_prints_the_raw_listing`.)
+- The account listing is also the authority for a linked credential's slot
+  elsewhere: `src/cinna/account.py:_fetch_linked_credentials()` overlays its
+  `service_uri` / `is_placeholder` / `status` by id onto the agent credential
+  route, which returns `service_uri: null` (see Agent Management).
 
 ## Config & registry
 

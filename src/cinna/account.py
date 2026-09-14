@@ -1537,6 +1537,8 @@ def run_agent_sync(agent_ref: str, machine_name: str | None) -> None:
     finally:
         agent_client.close()
 
+    session_started = _establish_sync_session(config, workspace_root, dir_name)
+
     rel_dir = workspace_root.relative_to(account_root)
     console.status(f"Agent synced under {rel_dir}/")
     console.console.print()
@@ -1544,10 +1546,50 @@ def run_agent_sync(agent_ref: str, machine_name: str | None) -> None:
     console.console.print(
         "  cinna dev                         # start a foreground dev session"
     )
+    if session_started:
+        console.console.print(
+            f"  cinna sync push --agent {dir_name}   # after editing, from the account root"
+        )
     console.console.print(
         f"  cinna exec --agent {dir_name} <cmd>   # or exec from the account root"
     )
     console.console.print()
+
+
+def _establish_sync_session(config: CinnaConfig, workspace_root: Path, ref: str) -> bool:
+    """Start the agent's sync session while local and remote are one clone.
+
+    Mutagen reconciles against the last state both sides agreed on. A session
+    first created by a later ``cinna sync push`` has no such state, so every
+    file edited since the clone looks changed on both sides — and the first
+    push reported the builder's own edits as conflicts against untouched
+    remote originals. Starting (and flushing) the session here, before any
+    edit, gives it that baseline.
+
+    Best-effort: the workspace is complete without it, so a failure is a
+    warning naming the command that starts it later, never a failed sync.
+    """
+    try:
+        with console.spinner("Starting the sync session..."):
+            sync_session.ensure_session(config, workspace_root)
+            st = sync_session.flush(config)
+    except Exception as exc:  # noqa: BLE001 — mutagen / transport, all non-fatal here
+        logger.warning("sync session not started after agent sync: %s", exc)
+        detail = exc.format_message() if isinstance(exc, click.ClickException) else str(exc)
+        console.warn(
+            f"The sync session did not start ({detail.splitlines()[0] if detail else exc}). "
+            f"Run 'cinna sync push --agent {ref}' BEFORE editing files, or the "
+            "first push reports your edits as conflicts."
+        )
+        return False
+    if st.conflict_count:
+        console.warn(
+            f"The sync session started with {st.conflict_count} conflict(s) — see "
+            f"'cinna sync conflicts --agent {ref} --diff'."
+        )
+    else:
+        console.status("Sync session started — later edits sync as plain changes.")
+    return True
 
 
 def run_agent_unsync(agent_ref: str) -> None:
@@ -2012,21 +2054,69 @@ def run_agent_rebuild_env(agent_ref: str, yes: bool = False) -> None:
         ):
             result = client.rebuild_agent_env(agent["id"])
 
-    console.status(f"Environment rebuilt for {agent['name']}")
-    console.console.print(f"  Status: {result.get('status')}")
-    if result.get("status_message"):
-        console.console.print(f"  Message: {result['status_message']}")
+        console.status(f"Environment rebuilt for {agent['name']}")
+        console.console.print(f"  Status: {result.get('status')}")
+        if result.get("status_message"):
+            console.console.print(f"  Message: {result['status_message']}")
 
-    # A rebuild restores the state it found. An environment that was stopped
-    # comes back stopped — a success, but not one the user can act on yet, and
-    # saying nothing here is how "rebuilt successfully" becomes a container
-    # that still answers nothing.
-    if not result.get("was_running") and result.get("status") != "running":
-        console.console.print(
-            "  [dim]It was not running before the rebuild, so it was left "
-            "stopped. Send it a message, or refresh its addons, to start "
-            "it.[/dim]"
+        # A rebuild restores the state it found. An environment that was stopped
+        # comes back stopped — a success, but not one the user can act on yet, and
+        # saying nothing here is how "rebuilt successfully" becomes a container
+        # that still answers nothing.
+        if not result.get("was_running") and result.get("status") != "running":
+            console.console.print(
+                "  [dim]It was not running before the rebuild, so it was left "
+                "stopped. Send it a message, or refresh its addons, to start "
+                "it.[/dim]"
+            )
+            return
+
+        # "Rebuilt" and "running" are row states; the server inside the new
+        # container can still be starting. A chat sent into that window sat
+        # streaming with no reply, so wait for the health check to answer and
+        # say plainly when it has not.
+        env_id = result.get("environment_id")
+        if not isinstance(env_id, str) or not env_id:
+            return
+        with console.spinner("Waiting for the environment to answer..."):
+            answered = _wait_for_env_health(client, env_id)
+    if answered is True:
+        console.status("The environment answers its health check — ready to chat.")
+    elif answered is False:
+        console.warn(
+            f"The environment has not answered its health check after "
+            f"{int(ENV_HEALTH_WAIT_SECONDS)}s. A message sent now may sit "
+            f"unanswered — check again with 'cinna agent status refresh "
+            f"{normalize_agent_dir_name(agent['name'])}' before 'cinna chat'."
         )
+
+
+ENV_HEALTH_WAIT_SECONDS = 180.0
+ENV_HEALTH_POLL_SECONDS = 3.0
+
+
+def _wait_for_env_health(client: "AccountClient", environment_id: str) -> bool | None:
+    """Poll the environment's health route until its server answers.
+
+    ``True`` once it reports healthy, ``False`` after
+    ``ENV_HEALTH_WAIT_SECONDS`` without that, ``None`` when the route's answer
+    is not something this build can read — an unknown shape is not evidence of
+    an unhealthy container, so it is reported as nothing rather than a warning.
+    """
+    deadline = time.monotonic() + ENV_HEALTH_WAIT_SECONDS
+    while True:
+        try:
+            health = client.get_environment_health(environment_id)
+        except (PlatformError, httpx.TransportError) as exc:
+            logger.debug("health check not answering yet: %s", exc)
+            health = {}
+        if not isinstance(health, dict):
+            return None
+        if str(health.get("status", "")).lower() in ("healthy", "ok"):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(ENV_HEALTH_POLL_SECONDS)
 
 
 def _stdout_is_tty() -> bool:
@@ -2057,6 +2147,7 @@ def run_agent_show(
         )
         with console.spinner("Inspecting agent..."):
             info = client.inspect_agent(agent["id"])
+            linked = None if prompts_only else _fetch_linked_credentials(client, agent["id"])
 
     show_full = full or not _stdout_is_tty()
 
@@ -2066,15 +2157,17 @@ def run_agent_show(
     console.console.print("Prompts (as the runtime reads them):")
     for label in ("entrypoint", "workflow", "refiner"):
         value = prompts.get(label)
+        # The label is escaped: Rich reads a bare `[workflow]` as a style tag
+        # and drops it, which printed every prompt with no name above it.
         if value:
             if show_full or len(value) <= 2000:
                 preview = value
             else:
                 preview = value[:2000] + "\n…(truncated, pass --full for all)"
-            console.console.print(f"  [{label}]")
+            console.console.print(f"  {_esc(f'[{label}]')}")
             click.echo(preview)
         else:
-            console.console.print(f"  [{label}] (empty)")
+            console.console.print(f"  {_esc(f'[{label}]')} (empty)")
 
     if prompts_only:
         return
@@ -2084,17 +2177,370 @@ def run_agent_show(
     for key, value in (info.get("features") or {}).items():
         console.console.print(f"  {key}: {value}")
 
-    creds = info.get("credentials") or []
+    # The agent's own credential listing carries the slot and placeholder
+    # state; inspect carries name and type only. Fall back to inspect when the
+    # listing cannot be read, rather than printing nothing.
+    creds = linked if linked is not None else (info.get("credentials") or [])
     console.console.print()
     console.console.print(f"Connected credentials ({len(creds)}):")
     for cred in creds:
-        console.console.print(f"  - {cred.get('name')}  [{cred.get('type')}]")
+        console.console.print(f"  - {_credential_summary(cred)}")
 
     status = info.get("agent_api_status")
     if status:
         console.console.print()
         console.console.print("Agent REST API:")
         _print_agent_api_status(status)
+
+
+# ── Prompts as files (pull / diff / push) ───────────────────────────────────
+#
+# Changing one line of a prompt used to take a raw GET, a hand-built JSON body,
+# a raw PUT and a raw sync-prompts call — and building that JSON inline in a
+# shell let zsh command-substitute the prompt's Markdown backticks. Files
+# remove the quoting hazard; the baseline recorded at pull time is what lets a
+# push tell "you edited this" from "the platform changed this since".
+
+PROMPTS_DIR = "prompts"
+PROMPTS_BASELINE = ".pulled.json"
+PROMPT_TEXT_FILES = (
+    ("workflow_prompt", "workflow.md"),
+    ("entrypoint_prompt", "entrypoint.md"),
+    ("refiner_prompt", "refiner.md"),
+    ("router_trigger_prompt", "router_trigger.md"),
+    ("description", "description.md"),
+)
+PROMPT_EXAMPLES_FILE = ("example_prompts", "example_prompts.json")
+# The three prompts the environment also holds as docs/*.md.
+DOC_BACKED_PROMPTS = ("workflow_prompt", "entrypoint_prompt", "refiner_prompt")
+
+
+def _prompt_file_name(field: str) -> str:
+    for f, name in (*PROMPT_TEXT_FILES, PROMPT_EXAMPLES_FILE):
+        if f == field:
+            return name
+    return field
+
+
+def _prompts_folder(account_root: Path, agent: dict, dir_opt: str | None) -> Path:
+    """``--dir``, else ``prompts/<slug>/`` at the account root.
+
+    Not inside ``agents/``: that tree is the synced workspace (and, for a
+    git-versioned agent, a git working tree), and a folder there with no
+    ``.cinna/`` would confuse the child-workspace discovery.
+    """
+    if dir_opt:
+        return Path(dir_opt).expanduser().resolve()
+    return account_root / PROMPTS_DIR / normalize_agent_dir_name(agent.get("name", ""))
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
+
+
+def _prompt_text(value) -> str:
+    """Prompt text as compared and sent: trailing whitespace is not content."""
+    return str(value or "").rstrip()
+
+
+def _prompt_same(field: str, a, b) -> bool:
+    if field == PROMPT_EXAMPLES_FILE[0]:
+        return list(a or []) == list(b or [])
+    return _prompt_text(a) == _prompt_text(b)
+
+
+def _platform_prompt_fields(record: dict) -> dict:
+    fields = {field: record.get(field) for field, _ in PROMPT_TEXT_FILES}
+    fields[PROMPT_EXAMPLES_FILE[0]] = record.get(PROMPT_EXAMPLES_FILE[0])
+    return fields
+
+
+def _read_prompt_files(folder: Path) -> dict:
+    """The fields whose files exist; a deleted file means "leave it alone"."""
+    out: dict = {}
+    for field, name in PROMPT_TEXT_FILES:
+        path = folder / name
+        if path.is_file():
+            out[field] = path.read_text(encoding="utf-8")
+    field, name = PROMPT_EXAMPLES_FILE
+    path = folder / name
+    if path.is_file():
+        try:
+            examples = json.loads(path.read_text(encoding="utf-8") or "[]")
+        except ValueError as exc:
+            raise click.ClickException(f"{_display_path(path)} is not valid JSON: {exc}")
+        if not isinstance(examples, list) or not all(isinstance(e, str) for e in examples):
+            raise click.ClickException(
+                f"{_display_path(path)} must be a JSON list of strings."
+            )
+        out[field] = examples
+    return out
+
+
+def _load_prompt_baseline(folder: Path) -> dict | None:
+    path = folder / PROMPTS_BASELINE
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _save_prompt_baseline(folder: Path, agent: dict, fields: dict) -> None:
+    baseline = {
+        "agent_id": agent.get("id"),
+        "agent_name": agent.get("name"),
+        "pulled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "fields": fields,
+    }
+    (folder / PROMPTS_BASELINE).write_text(
+        json.dumps(baseline, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
+def _baseline_fields_for(baseline: dict | None, agent: dict) -> dict | None:
+    """The pulled values, only when the folder was pulled from this agent."""
+    if not baseline or baseline.get("agent_id") != agent.get("id"):
+        return None
+    fields = baseline.get("fields")
+    return fields if isinstance(fields, dict) else None
+
+
+def run_agent_prompts_pull(agent_ref: str, dir_opt: str | None, force: bool) -> None:
+    """Write an agent's prompts to files — `cinna agent prompts pull`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Reading the agent's prompts..."):
+            record = client.get_agent(agent["id"])
+
+    ref = _agent_ref_for_hint(agent)
+    folder = _prompts_folder(account_root, agent, dir_opt)
+    baseline = _load_prompt_baseline(folder)
+    local = _read_prompt_files(folder) if folder.is_dir() else {}
+
+    if local and not force:
+        if baseline is None:
+            raise click.ClickException(
+                f"{_display_path(folder)}/ already holds prompt files that were not "
+                f"pulled by this command. Pick another --dir, or pass --force to "
+                f"overwrite them."
+            )
+        if baseline.get("agent_id") != agent["id"]:
+            raise click.ClickException(
+                f"{_display_path(folder)}/ holds the prompts of another agent "
+                f"({baseline.get('agent_name')}). Pick another --dir, or pass "
+                f"--force to overwrite them."
+            )
+        pulled = _baseline_fields_for(baseline, agent) or {}
+        edited = [f for f, v in local.items() if not _prompt_same(f, v, pulled.get(f))]
+        if edited:
+            raise click.ClickException(
+                f"Unpushed edits in {_display_path(folder)}/: "
+                f"{', '.join(_prompt_file_name(f) for f in edited)}.\n"
+                f"Push them with 'cinna agent prompts push {ref}', or pull with "
+                f"--force to discard them."
+            )
+
+    remote = _platform_prompt_fields(record)
+    folder.mkdir(parents=True, exist_ok=True)
+    for field, name in PROMPT_TEXT_FILES:
+        text = str(remote.get(field) or "")
+        if text and not text.endswith("\n"):
+            text += "\n"
+        (folder / name).write_text(text, encoding="utf-8")
+    field, name = PROMPT_EXAMPLES_FILE
+    (folder / name).write_text(
+        json.dumps(remote.get(field) or [], indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    _save_prompt_baseline(folder, agent, remote)
+
+    console.status(f"Pulled {agent['name']}'s prompts into {_display_path(folder)}/")
+    for field, name in (*PROMPT_TEXT_FILES, PROMPT_EXAMPLES_FILE):
+        value = remote.get(field)
+        if field == PROMPT_EXAMPLES_FILE[0]:
+            size = f"{len(value or [])} example(s)"
+        else:
+            size = f"{len(_prompt_text(value))} chars" if value else "empty"
+        console.console.print(f"  {name:<22} [dim]{size}[/dim]")
+    console.console.print(
+        f"[dim]Edit the files, then: cinna agent prompts diff {ref} · "
+        f"cinna agent prompts push {ref}[/dim]"
+    )
+
+
+def _prompt_field_diff(field: str, platform_value, local_value) -> list[str]:
+    import difflib
+
+    if field == PROMPT_EXAMPLES_FILE[0]:
+        before = json.dumps(platform_value or [], indent=2, ensure_ascii=False).splitlines()
+        after = json.dumps(local_value or [], indent=2, ensure_ascii=False).splitlines()
+    else:
+        before = _prompt_text(platform_value).splitlines()
+        after = _prompt_text(local_value).splitlines()
+    name = _prompt_file_name(field)
+    return list(
+        difflib.unified_diff(
+            before, after, fromfile=f"platform/{name}", tofile=f"local/{name}", lineterm=""
+        )
+    )
+
+
+def run_agent_prompts_diff(agent_ref: str, dir_opt: str | None) -> None:
+    """Local prompt files vs the platform — `cinna agent prompts diff`."""
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        folder = _prompts_folder(account_root, agent, dir_opt)
+        local = _read_prompt_files(folder) if folder.is_dir() else {}
+        if not local:
+            raise click.ClickException(
+                f"No prompt files in {_display_path(folder)}/. Pull them first: "
+                f"cinna agent prompts pull {_agent_ref_for_hint(agent)}"
+            )
+        with console.spinner("Reading the agent's prompts..."):
+            record = client.get_agent(agent["id"])
+
+    remote = _platform_prompt_fields(record)
+    pulled = _baseline_fields_for(_load_prompt_baseline(folder), agent)
+    differs = False
+    for field, value in local.items():
+        if _prompt_same(field, value, remote.get(field)):
+            continue
+        differs = True
+        moved = (
+            pulled is not None
+            and field in pulled
+            and not _prompt_same(field, remote.get(field), pulled[field])
+        )
+        edited = pulled is None or field not in pulled or not _prompt_same(field, value, pulled[field])
+        if moved and edited:
+            note = " — changed on the platform since you pulled, and locally too"
+        elif moved:
+            note = " — changed on the platform since you pulled (push leaves it alone)"
+        else:
+            note = ""
+        console.console.print()
+        console.console.print(f"[bold]{_esc(_prompt_file_name(field))}[/bold][dim]{_esc(note)}[/dim]")
+        for line in _prompt_field_diff(field, remote.get(field), value):
+            click.echo(line)
+    if not differs:
+        console.status("The local prompt files match the platform.")
+
+
+def run_agent_prompts_push(
+    agent_ref: str,
+    dir_opt: str | None,
+    sync_env: bool,
+    force: bool,
+    dry_run: bool,
+) -> None:
+    """Write edited prompt files back to the agent — `cinna agent prompts push`.
+
+    Sends only the fields edited since the pull. A field the platform changed
+    since the pull while the local file did not is left alone — pushing the
+    stale file would silently revert it — and a field changed on both sides is
+    refused unless ``force``.
+    """
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        ref = _agent_ref_for_hint(agent)
+        folder = _prompts_folder(account_root, agent, dir_opt)
+        local = _read_prompt_files(folder) if folder.is_dir() else {}
+        if not local:
+            raise click.ClickException(
+                f"No prompt files in {_display_path(folder)}/. Pull them first: "
+                f"cinna agent prompts pull {ref}"
+            )
+        baseline = _load_prompt_baseline(folder)
+        if baseline and baseline.get("agent_id") != agent["id"] and not force:
+            raise click.ClickException(
+                f"{_display_path(folder)}/ was pulled from another agent "
+                f"({baseline.get('agent_name')}). Pass --force to push it to "
+                f"{agent['name']} anyway."
+            )
+        pulled = _baseline_fields_for(baseline, agent)
+
+        with console.spinner("Reading the agent's prompts..."):
+            remote = _platform_prompt_fields(client.get_agent(agent["id"]))
+
+        body: dict = {}
+        both_changed: list[str] = []
+        for field, value in local.items():
+            known = pulled is not None and field in pulled
+            if known and _prompt_same(field, value, pulled[field]):
+                continue  # not edited here — never revert a platform-side change
+            if _prompt_same(field, value, remote.get(field)):
+                continue
+            if known and not _prompt_same(field, remote.get(field), pulled[field]):
+                both_changed.append(field)
+            body[field] = value if field == PROMPT_EXAMPLES_FILE[0] else _prompt_text(value)
+
+        if both_changed and not force:
+            raise click.ClickException(
+                "Changed on the platform since you pulled, and locally too: "
+                f"{', '.join(_prompt_file_name(f) for f in both_changed)}.\n"
+                f"See both with 'cinna agent prompts diff {ref}', then pull --force "
+                f"to take the platform's version or push --force to keep yours."
+            )
+        if not body:
+            console.status("Nothing to push — no prompt file differs from the platform.")
+            return
+        if dry_run:
+            console.status(
+                f"Would push to {agent['name']}: "
+                f"{', '.join(_prompt_file_name(f) for f in body)}"
+            )
+            for field in body:
+                for line in _prompt_field_diff(field, remote.get(field), local[field]):
+                    click.echo(line)
+            return
+
+        with console.spinner("Writing prompts..."):
+            client.update_agent_config(agent["id"], body)
+
+        env_synced = None
+        if sync_env and any(f in body for f in DOC_BACKED_PROMPTS):
+            try:
+                with console.spinner("Pushing the doc prompts into the environment..."):
+                    client.sync_agent_prompts(agent["id"])
+                env_synced = True
+            except (PlatformError, httpx.TransportError) as exc:
+                logger.info("sync-prompts not applied: %s", exc)
+                env_synced = False
+
+    # Fields not pushed keep their pulled value, so a platform-side change the
+    # files never saw still reads as "not edited here" on the next push.
+    new_baseline = dict(pulled) if pulled is not None else dict(remote)
+    new_baseline.update(body)
+    _save_prompt_baseline(folder, agent, new_baseline)
+
+    console.status(
+        f"Pushed {', '.join(_prompt_file_name(f) for f in body)} to {agent['name']}"
+    )
+    if env_synced is True:
+        console.console.print(
+            "  [dim]The running environment's docs/*.md now carry them.[/dim]"
+        )
+    elif env_synced is False:
+        console.console.print(
+            "  [dim]Saved. The environment is not running, so its docs/*.md pick "
+            "them up on its next start.[/dim]"
+        )
+    console.console.print(f"  [dim]Verify: cinna agent show {ref} --prompts[/dim]")
 
 
 # ── Schedules (full CRUD) ────────────────────────────────────────────────────
@@ -2792,7 +3238,91 @@ def _credential_status_cell(status: str | None) -> str:
     return "[dim]—[/dim]"
 
 
-def run_credentials_list(workspace: str | None) -> None:
+def _credential_slot_cell(cred: dict) -> str:
+    """A credential's slot (its ``service_uri``), or a dim dash for none."""
+    slot = cred.get("service_uri")
+    return _esc(slot) if slot else "[dim]—[/dim]"
+
+
+def _credential_summary(cred: dict) -> str:
+    """One linked credential on one line: name, type, slot, state, id.
+
+    Fields are printed only when the payload carries them — the agent's own
+    credential listing has all of them, the inspect fallback has name and
+    type alone, and an absent slot is not the same fact as an empty one.
+    Parentheses, not brackets, around the type: ``[api_token]`` is a Rich tag.
+    """
+    parts = [f"{_esc(cred.get('name', '?'))} [dim]({_esc(cred.get('type', '?'))})[/dim]"]
+    if "service_uri" in cred:
+        slot = cred.get("service_uri")
+        if slot:
+            parts.append(f"slot: {_esc(slot)}")
+        elif cred.get(_SLOT_UNVERIFIED):
+            parts.append("[dim]slot: unknown[/dim]")
+        else:
+            parts.append("[dim]no slot[/dim]")
+    if cred.get("is_placeholder"):
+        parts.append("[yellow]placeholder[/yellow]")
+    elif cred.get("status") == "incomplete":
+        parts.append("[yellow]needs setup[/yellow]")
+    if cred.get("id"):
+        parts.append(f"[dim]{_esc(cred['id'])}[/dim]")
+    return "  ".join(parts)
+
+
+# Set on a linked credential whose slot could not be confirmed: the agent's
+# listing reported none, and the account listing (the one that carries it) has
+# no row for this id — a credential shared by someone else, or an unreadable
+# listing. "No slot" would be a claim; this is the absence of one.
+_SLOT_UNVERIFIED = "_slot_unverified"
+_ACCOUNT_AUTHORITATIVE_FIELDS = ("service_uri", "is_placeholder", "status")
+
+
+def _fetch_linked_credentials(client: "AccountClient", agent_id: str) -> list[dict] | None:
+    """The credentials linked to an agent, or ``None`` when unreadable.
+
+    ``GET agents/{id}/credentials`` says which credentials are linked, but
+    returns ``service_uri: null`` even for a credential that has a slot — seen
+    live, the same credential id read ``some-token.com`` in the account
+    listing and ``null`` here, which made a filled slot look ``not_linked``.
+    So the slot, placeholder flag and status are taken from the account
+    listing by id, and a linked credential absent from it keeps an unverified
+    slot rather than an empty one.
+
+    Best-effort by design: every caller has something useful to print without
+    it, and a refusal here must not turn a read command into a failure.
+    """
+    try:
+        payload = client.list_agent_credentials(agent_id)
+    except (PlatformError, httpx.TransportError) as exc:
+        logger.warning("agent credentials listing unavailable: %s", exc)
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return None
+    linked = [dict(c) for c in data if isinstance(c, dict)]
+
+    owned: dict[str, dict] = {}
+    try:
+        account = client.list_credentials()
+        rows = account.get("data") if isinstance(account, dict) else None
+        if isinstance(rows, list):
+            owned = {str(r["id"]): r for r in rows if isinstance(r, dict) and r.get("id")}
+    except (PlatformError, httpx.TransportError) as exc:
+        logger.warning("account credentials listing unavailable: %s", exc)
+
+    for cred in linked:
+        row = owned.get(str(cred.get("id")))
+        if row is not None:
+            for field in _ACCOUNT_AUTHORITATIVE_FIELDS:
+                if field in row:
+                    cred[field] = row[field]
+        elif not cred.get("service_uri"):
+            cred[_SLOT_UNVERIFIED] = True
+    return linked
+
+
+def run_credentials_list(workspace: str | None, as_json: bool = False) -> None:
     """List the account's credentials (metadata only) — `... credentials list`."""
     from rich.table import Table
 
@@ -2808,6 +3338,10 @@ def run_credentials_list(workspace: str | None) -> None:
         with AccountClient(account_cfg) as client:
             listing = client.list_credentials(user_workspace_id=ws_filter)
 
+    if as_json:
+        click.echo(json.dumps(listing, indent=2, default=str))
+        return
+
     items = listing.get("data", [])
     if not items:
         console.status("No credentials on this account.")
@@ -2819,18 +3353,28 @@ def run_credentials_list(workspace: str | None) -> None:
     )
     table.add_column("Name")
     table.add_column("Type", style="dim")
+    table.add_column("Slot", overflow="fold")
     table.add_column("Status")
-    table.add_column("ID", style="dim", overflow="fold")
+    table.add_column("ID", style="dim", overflow="fold", no_wrap=True)
 
     for c in items:
+        status_cell = _credential_status_cell(c.get("status"))
+        if c.get("is_placeholder"):
+            status_cell += " [dim]placeholder[/dim]"
         table.add_row(
-            c.get("name", "?"),
-            c.get("type", "?"),
-            _credential_status_cell(c.get("status")),
+            _esc(c.get("name", "?")),
+            _esc(c.get("type", "?")),
+            _credential_slot_cell(c),
+            status_cell,
             c.get("id", "?"),
         )
 
     console.console.print(table)
+    console.console.print(
+        "[dim]Slot = the credential's service URI, which a skill's `credentials:` "
+        "block names. Set it: cinna account credentials update <id> "
+        "--service-uri <slot>[/dim]"
+    )
 
 
 def run_credentials_types() -> None:
@@ -3165,12 +3709,187 @@ def _addon_source_cell(addon: dict) -> str:
     return _esc(source)
 
 
-def _print_addons(payload: dict, agent_ref: str = "<agent>") -> None:
+# ── Skill credential readiness ───────────────────────────────────────────────
+#
+# A skill declares the credential slots its scripts need, and a slot is filled
+# by a credential linked to the agent whose service URI equals it. The platform
+# reports unusable slots in `credential_issues` for **catalog** installs only: a
+# local skill's row reads `ok` whether or not anything carries its slot, which
+# is how a skill looked healthy while its script could never find its token.
+# For every non-catalog row the CLI checks the agent's linked credentials.
+
+
+def _declared_slots(addon: dict) -> list[dict]:
+    """Every credential slot the row's skills declare (first declaration wins)."""
+    seen: dict[str, dict] = {}
+    for skill in addon.get("skills") or []:
+        for decl in skill.get("credentials") or []:
+            if isinstance(decl, dict) and decl.get("slot"):
+                seen.setdefault(str(decl["slot"]), decl)
+    return list(seen.values())
+
+
+def _needs_linked_credentials(payload: dict) -> bool:
+    """Whether any row's readiness has to be checked by the CLI itself."""
+    return any(
+        a.get("source") != "catalog" and _declared_slots(a)
+        for a in payload.get("addons") or []
+    )
+
+
+def _slot_readiness(
+    addon: dict, decl: dict, linked: list[dict] | None
+) -> tuple[str, dict | None]:
+    """``(state, credential)`` for one declared slot on one addon row.
+
+    ``ready``; the platform's reasons ``not_linked`` / ``not_configured`` /
+    ``access_revoked``; ``type_mismatch`` when the credential carrying the slot
+    is not the declared type; ``unknown`` when the agent's credentials could
+    not be read. ``credential`` is the linked one carrying the slot, if any.
+    """
+    slot = decl.get("slot")
+    for issue in addon.get("credential_issues") or []:
+        if isinstance(issue, dict) and issue.get("slot") == slot:
+            return str(issue.get("reason") or "credential_missing"), None
+    if addon.get("source") == "catalog":
+        # The platform computed this row's slots and named no issue for this one.
+        return "ready", None
+    if linked is None:
+        return "unknown", None
+    carriers = [c for c in linked if c.get("service_uri") == slot]
+    if not carriers:
+        # A linked credential whose slot is invisible to this account could be
+        # the carrier; "not_linked" would send the user to fix a filled slot.
+        if any(c.get(_SLOT_UNVERIFIED) for c in linked):
+            return "unknown", None
+        return "not_linked", None
+    declared_type = decl.get("type")
+    typed = [c for c in carriers if not declared_type or c.get("type") == declared_type]
+    if not typed:
+        return "type_mismatch", carriers[0]
+    usable = [
+        c for c in typed if not c.get("is_placeholder") and c.get("status") != "incomplete"
+    ]
+    if not usable:
+        return "not_configured", typed[0]
+    return "ready", usable[0]
+
+
+def _addon_credentials_cell(addon: dict, linked: list[dict] | None) -> str:
+    """One line per declared slot: ✓ filled, ! not usable yet, ? unchecked."""
+    lines = []
+    for decl in _declared_slots(addon):
+        state, _cred = _slot_readiness(addon, decl, linked)
+        slot = _esc(decl.get("slot"))
+        if state == "ready":
+            lines.append(f"[green]✓[/green] {slot}")
+        elif state == "unknown":
+            lines.append(f"[dim]? {slot}[/dim]")
+        else:
+            # Amber, never red: an unfilled skill slot never blocks the agent.
+            lines.append(f"[yellow]! {slot}[/yellow] [dim]({_esc(state)})[/dim]")
+    return "\n".join(lines)
+
+
+def _slot_remedy(
+    state: str,
+    decl: dict,
+    cred: dict | None,
+    linked: list[dict] | None,
+    agent_ref: str,
+) -> list[str]:
+    """What to run for one unusable slot. Plain text; the caller escapes it."""
+    slot = decl.get("slot")
+    declared_type = decl.get("type") or "<type>"
+    if state == "not_linked":
+        spare = [
+            c
+            for c in linked or []
+            if c.get("type") == declared_type and not c.get("service_uri") and c.get("id")
+        ]
+        if spare:
+            return [
+                f"'{spare[0].get('name')}' is a linked {declared_type} credential with "
+                f"no slot. Give it this one:",
+                f"cinna account credentials update {spare[0]['id']} --service-uri {slot}",
+            ]
+        return [
+            "Nothing linked to this agent carries that slot. Draft one (the user "
+            "fills the secret in the UI):",
+            f'cinna account credentials create --name "{slot}" --type {declared_type} '
+            f"--service-uri {slot} --agent {agent_ref}",
+        ]
+    if state == "not_configured":
+        name = (cred or {}).get("name") or "The credential carrying the slot"
+        return [f"'{name}' carries the slot but is not filled in yet — fill it in the web UI."]
+    if state == "type_mismatch":
+        name = (cred or {}).get("name", "?")
+        return [
+            f"'{name}' carries the slot but is a {(cred or {}).get('type')} credential; "
+            f"the skill declares {declared_type}. Fix the type in SKILL.md, or link a "
+            f"{declared_type} credential with this slot.",
+        ]
+    if state == "access_revoked":
+        return [
+            "The credential carrying the slot is no longer shared with you. Provide "
+            "your own, or ask the publisher.",
+        ]
+    return ["Check the agent's Credentials tab."]
+
+
+def _print_credential_readiness(
+    addons: list[dict], linked: list[dict] | None, agent_ref: str
+) -> None:
+    """Name every declared slot that is not usable yet, with its fix."""
+    pending = []
+    unchecked = False
+    for addon in addons:
+        for decl in _declared_slots(addon):
+            state, cred = _slot_readiness(addon, decl, linked)
+            if state == "unknown":
+                unchecked = True
+            elif state != "ready":
+                pending.append((addon, decl, state, cred))
+
+    for addon, decl, state, cred in pending:
+        console.console.print()
+        console.console.print(
+            f"[yellow]![/yellow] {_esc(addon.get('name', '?'))} needs slot "
+            f"{_esc(decl.get('slot'))} [dim]({_esc(decl.get('type') or '?')})[/dim]: "
+            f"{_esc(state)}"
+        )
+        for line in _slot_remedy(state, decl, cred, linked, agent_ref):
+            console.console.print(f"    [dim]{_esc(line)}[/dim]")
+    if pending:
+        console.console.print(
+            "[dim]A skill's credential is checked only when its script asks for it: "
+            "the agent keeps working, and that script fails until the slot is "
+            "filled.[/dim]"
+        )
+    if unchecked:
+        console.console.print()
+        console.console.print(
+            "[dim]? A slot could not be confirmed: the agent's linked credentials "
+            "were unreadable, or one of them is shared by someone else and its slot "
+            "is not visible to this account.[/dim]"
+        )
+
+
+def _print_addons(
+    payload: dict,
+    agent_ref: str = "<agent>",
+    linked_credentials: list[dict] | None = None,
+) -> None:
     """Render an ``AgentAddonsPublic`` payload as one row per addon.
 
     ``agent_ref`` is how the caller's agent should be spelled back in the
     suggested commands under the table — a name the user can retype, not the
     id the payload carries.
+
+    ``linked_credentials`` is the agent's own credential listing, which the
+    readiness of a non-catalog skill's slots is checked against; ``None``
+    leaves those slots marked unchecked. The Credentials column appears only
+    when some skill declares a slot, so an agent without any keeps its shape.
     """
     from rich.table import Table
 
@@ -3187,6 +3906,7 @@ def _print_addons(payload: dict, agent_ref: str = "<agent>") -> None:
             )
     else:
         counts = payload.get("counts") or {}
+        declares_slots = any(_declared_slots(a) for a in addons)
         table = Table(title=f"Addons ({len(addons)})", title_style="bold")
         table.add_column("#", style="dim", justify="right")
         table.add_column("Kind")
@@ -3194,16 +3914,21 @@ def _print_addons(payload: dict, agent_ref: str = "<agent>") -> None:
         table.add_column("Status")
         table.add_column("Name")
         table.add_column("Version")
+        if declares_slots:
+            table.add_column("Credentials")
 
         for i, addon in enumerate(addons, 1):
-            table.add_row(
+            cells = [
                 str(i),
                 addon.get("kind", "?"),
                 _addon_source_cell(addon),
                 _addon_status_cell(addon),
                 _addon_name_cell(addon),
                 _addon_version_cell(addon),
-            )
+            ]
+            if declares_slots:
+                cells.append(_addon_credentials_cell(addon, linked_credentials))
+            table.add_row(*cells)
 
         console.console.print(table)
         console.console.print(
@@ -3212,6 +3937,8 @@ def _print_addons(payload: dict, agent_ref: str = "<agent>") -> None:
             f"({counts.get('local_skills', 0)} of them this agent's own).[/dim]"
         )
         _print_addon_issues(addons)
+        if declares_slots:
+            _print_credential_readiness(addons, linked_credentials, agent_ref)
         _print_pending_update_hint(addons, agent_ref)
         _print_version_staleness_hint(addons)
 
@@ -3288,13 +4015,20 @@ def run_skills_list(agent_ref: str, as_json: bool = False) -> None:
         with AccountClient(account_cfg) as client:
             agent = _resolve_one_agent(client, agent_ref)
             payload = client.get_agent_addons(agent["id"])
+            # Only when a non-catalog skill declares a slot: that readiness is
+            # the one the platform leaves to the reader.
+            linked = (
+                _fetch_linked_credentials(client, agent["id"])
+                if not as_json and _needs_linked_credentials(payload)
+                else None
+            )
 
     if as_json:
         click.echo(json.dumps(payload, indent=2, default=str))
         return
 
     console.console.print(f"Agent: [bold]{_esc(agent['name'])}[/bold]")
-    _print_addons(payload, normalize_agent_dir_name(agent["name"]))
+    _print_addons(payload, normalize_agent_dir_name(agent["name"]), linked)
 
     publishable = [
         a.get("name")

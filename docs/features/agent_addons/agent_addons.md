@@ -76,6 +76,24 @@ without `cinna api`, and without anyone typing a UUID.
    gone.
 5. When the skill half could not be read, the plugin rows still list and the
    reason is stated (`env_not_running`, `adapter_error`, `parse_error`).
+6. When any skill declares credential slots, a **Credentials** column lists each
+   slot: `✓` filled, `!` not usable yet with its reason, `?` unchecked. Beneath
+   the table every unusable slot gets its fix, and the note that a skill's
+   credential is checked only when its script asks for it — the agent keeps
+   working, that script fails.
+   - For a **catalog** install the platform already computed readiness
+     (`credential_issues`, one reason per slot: `not_linked`, `not_configured`,
+     `access_revoked`), and the CLI renders it as-is.
+   - For every **other** row the platform computes nothing — a local skill read
+     `ok` while nothing carried its slot. The CLI checks the agent's linked
+     credentials itself: no credential with that service URI → `not_linked`; one of
+     another type → `type_mismatch`; only a placeholder or an unfilled one →
+     `not_configured`.
+   - The remedy is specific: a linked credential of the declared type with no slot
+     is named with the `credentials update <id> --service-uri <slot>` command;
+     otherwise the `credentials create … --service-uri <slot> --agent <agent>` draft.
+   - A linked credential shared by someone else whose slot this account cannot see
+     makes the slot `?`, never `not_linked` — it may well be the carrier.
 
 ### Publish a skill to the catalog
 

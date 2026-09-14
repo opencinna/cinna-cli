@@ -689,3 +689,105 @@ def test_sync_conflicts_lists_daemon_paths(
     assert result.exit_code == 0, result.output
     assert "a.txt" in result.output
     assert "dir/b.txt" in result.output
+
+
+@patch("cinna.main.sync_session.flush")
+@patch("cinna.main.sync_session.ensure_session")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_sync_push_with_conflicts_never_reads_settled(
+    mock_load, mock_find, mock_ensure, mock_flush, runner, workspace_root, sample_config,
+    monkeypatch,
+):
+    """A flush that ended with conflicts did not settle — the green check over
+    parked conflicts is how a push that changed nothing read as a success."""
+    from cinna.sync_session import SyncStatus
+
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_flush.return_value = SyncStatus(
+        session_name="cinna-abc", state="watching", conflict_count=2
+    )
+
+    result = runner.invoke(cli, ["sync", "push"])
+    assert result.exit_code == 0, result.output
+    assert "Sync settled" not in result.output
+    assert "2 conflict(s) remain" in result.output
+    assert "cinna sync conflicts --diff" in result.output
+
+
+@patch("cinna.main._remote_file_facts")
+@patch("cinna.main.sync_session.daemon_conflict_paths")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_sync_conflicts_diff_compares_both_copies(
+    mock_load, mock_find, mock_paths, mock_remote, runner, workspace_root, sample_config,
+    monkeypatch,
+):
+    from cinna.main import _local_file_facts
+
+    monkeypatch.setenv("COLUMNS", "240")
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    ws = workspace_root / "workspace"
+    (ws / "skills").mkdir()
+    (ws / "skills" / "SKILL.md").write_text("name: x\nversion: 2\n")
+    (ws / "same.txt").write_text("same\n")
+    mock_paths.return_value = ["skills/SKILL.md", "same.txt", "gone.txt"]
+    mock_remote.return_value = {
+        "skills/SKILL.md": {
+            "exists": True,
+            "size": 18,
+            "sha256": "0" * 64,
+            "text": "name: x\nversion: 1\n",
+        },
+        "same.txt": _local_file_facts(ws / "same.txt"),
+        "gone.txt": {"exists": True, "size": 3, "sha256": "1" * 64, "text": "hi\n"},
+    }
+
+    result = runner.invoke(cli, ["sync", "conflicts", "--diff"])
+    assert result.exit_code == 0, result.output
+    mock_remote.assert_called_once_with(
+        sample_config, ["skills/SKILL.md", "same.txt", "gone.txt"]
+    )
+    assert "-version: 1" in result.output
+    assert "+version: 2" in result.output
+    assert "Identical content" in result.output
+    assert "Only the remote copy exists." in result.output
+
+
+@patch("cinna.main.PlatformClient")
+def test_remote_file_facts_reads_one_json_line_from_exec(mock_platform, sample_config):
+    from cinna.main import _REMOTE_FACTS_SCRIPT, _remote_file_facts
+
+    # The script runs in the container; it must at least be valid Python.
+    compile(_REMOTE_FACTS_SCRIPT, "<remote facts>", "exec")
+
+    client = mock_platform.return_value.__enter__.return_value
+    client.stream_exec.return_value = iter(
+        [
+            {"type": "exec_id", "exec_id": "x"},
+            {
+                "type": "tool_result_delta",
+                "content": '{"a b.txt": {"exists": false}}\n',
+                "metadata": {"stream": "stdout"},
+            },
+            {"type": "done", "exit_code": 0},
+        ]
+    )
+
+    assert _remote_file_facts(sample_config, ["a b.txt"]) == {"a b.txt": {"exists": False}}
+    command = client.stream_exec.call_args[0][1]
+    assert command.startswith("python3 -c ")
+    # A path with a space stays one argument for the remote shell.
+    assert command.endswith(" 'a b.txt'")
+
+
+@patch("cinna.main.PlatformClient")
+def test_remote_file_facts_is_none_when_the_exec_fails(mock_platform, sample_config):
+    from cinna.main import _remote_file_facts
+
+    client = mock_platform.return_value.__enter__.return_value
+    client.stream_exec.return_value = iter([{"type": "done", "exit_code": 127}])
+    assert _remote_file_facts(sample_config, ["a.txt"]) is None

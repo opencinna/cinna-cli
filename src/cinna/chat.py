@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 import click
+import httpx
 
 from cinna import console
 from cinna.account import (
@@ -36,7 +37,7 @@ from cinna.account import (
 )
 from cinna.client import AccountClient
 from cinna.config import find_workspace_root, load_config
-from cinna.errors import PlatformError
+from cinna.errors import EXIT_NETWORK, CinnaExit, PlatformError
 
 logger = logging.getLogger("cinna.chat")
 
@@ -49,6 +50,12 @@ START_GRACE_SECONDS = 120
 _MESSAGE_PAGE = 500
 
 DEFAULT_DOWNLOAD_DIR = "cinna-chat-files"
+
+# Backoff between retries of a failed poll request. A single buffered proxy
+# call timing out (or a 5xx while the env restarts) says nothing about the
+# turn, which runs server-side regardless — so a poll failure is retried
+# inside the --timeout budget instead of aborting the command.
+_POLL_RETRY_DELAYS = (2.0, 4.0, 8.0, 15.0, 30.0)
 
 
 class _Emitter:
@@ -124,8 +131,18 @@ class _Emitter:
                     console.console.print(f"  [dim]{etype}: {ev['content']}[/dim]")
         elif kind == "done":
             console.console.print(
-                f"[dim]done — result: {event.get('result_state')}[/dim]"
+                f"[dim]done — outcome: {event.get('outcome')}, "
+                f"result: {event.get('result_state')}[/dim]"
             )
+            if event.get("recover"):
+                console.console.print(f"[dim]  wait for it: {event['recover']}[/dim]")
+        elif kind in ("warning", "timeout"):
+            message = event.get("message") or (
+                f"no reply within {event.get('seconds')}s — the turn may still be running"
+            )
+            console.warn(message)
+        elif kind == "detached":
+            console.console.print("[dim]stopped watching — the turn keeps running[/dim]")
         elif kind == "error":
             console.error(event.get("message", "error"))
         else:
@@ -188,16 +205,7 @@ def run_chat(
             session = client.create_session(agent_id, mode=mode, title=title)
             session_id = session["id"]
 
-        emit.emit(
-            {
-                "event": "session",
-                "session_id": session_id,
-                "agent_id": session.get("agent_id"),
-                "mode": session.get("mode"),
-                "title": session.get("title"),
-                "resumed": bool(resume),
-            }
-        )
+        emit.emit(_session_event(session_id, session, resumed=bool(resume)))
 
         # 5. Upload attachments → file_ids.
         file_ids: list[str] = []
@@ -226,7 +234,7 @@ def run_chat(
         # 8. Poll until the turn finishes.
         dl_dir = None if no_download else _download_dir(download_dir, session_id)
         try:
-            _poll_turn(
+            outcome = _poll_turn(
                 client,
                 session_id,
                 emit,
@@ -244,6 +252,199 @@ def run_chat(
                 pass
             emit.emit({"event": "interrupted", "session_id": session_id})
             sys.exit(130)
+        except (httpx.TransportError, PlatformError) as exc:
+            if not _is_transient(exc):
+                raise
+            _abort_with_recovery(emit, session_id, exc)
+        _emit_done(client, emit, session_id, outcome)
+
+
+def run_chat_attach(
+    session_id: str,
+    download_dir: str | None,
+    no_download: bool,
+    interval: float,
+    timeout: int,
+    pretty: bool,
+    include_events: bool = True,
+) -> None:
+    """Re-attach to a session's current turn — `cinna chat --attach`.
+
+    Sends nothing. Replays the session from its latest user message, then waits
+    for that turn to settle exactly as a fresh ``cinna chat`` would — the
+    recovery for a chat whose command died while the agent kept working.
+    Ctrl-C only stops watching: the turn is not interrupted.
+    """
+    emit = _Emitter(pretty)
+    account_cfg = load_account_config(find_account_root())
+
+    with AccountClient(account_cfg) as client:
+        session = _open_session(client, session_id)
+        emit.emit(_session_event(session_id, session, attached=True))
+
+        messages = _all_messages(client, session_id)
+        user_positions = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+        cursor = user_positions[-1] if user_positions else 0
+
+        dl_dir = None if no_download else _download_dir(download_dir, session_id)
+        try:
+            outcome = _poll_turn(
+                client,
+                session_id,
+                emit,
+                cursor,
+                True,
+                dl_dir,
+                interval,
+                timeout,
+                include_events,
+            )
+        except KeyboardInterrupt:
+            emit.emit({"event": "detached", "session_id": session_id})
+            sys.exit(130)
+        except (httpx.TransportError, PlatformError) as exc:
+            if not _is_transient(exc):
+                raise
+            _abort_with_recovery(emit, session_id, exc)
+        _emit_done(client, emit, session_id, outcome)
+
+
+def run_chat_show(
+    session_id: str,
+    download_dir: str | None,
+    no_download: bool,
+    pretty: bool,
+    include_events: bool = True,
+) -> None:
+    """Print an existing session's transcript once — `cinna chat --show`.
+
+    Sends nothing and waits for nothing. A message still being written is
+    reported as ``working`` with its trace so far, and the closing ``done``
+    says ``in_progress`` with the ``--attach`` command that waits for it.
+    """
+    emit = _Emitter(pretty)
+    account_cfg = load_account_config(find_account_root())
+
+    with AccountClient(account_cfg) as client:
+        session = _open_session(client, session_id)
+        emit.emit(_session_event(session_id, session))
+
+        dl_dir = None if no_download else _download_dir(download_dir, session_id)
+        in_progress = False
+        for m in _all_messages(client, session_id):
+            if (m.get("message_metadata") or {}).get("streaming_in_progress"):
+                in_progress = True
+                emit.emit({"event": "status", "state": "working", "message_id": m.get("id")})
+                if include_events:
+                    _emit_delta(emit, m, {})
+                continue
+            _emit_message(client, emit, m, dl_dir, include_events)
+
+        streaming = in_progress
+        if not streaming:
+            try:
+                streaming = bool(client.get_streaming_status(session_id).get("is_streaming"))
+            except (httpx.TransportError, PlatformError) as exc:
+                logger.warning("streaming status unavailable: %s", exc)
+        _emit_done(client, emit, session_id, "in_progress" if streaming else "idle")
+
+
+def _open_session(client: AccountClient, session_id: str) -> dict:
+    """Fetch a session a caller named, turning a refusal into one sentence."""
+    try:
+        return client.get_session(session_id)
+    except PlatformError as e:
+        raise click.ClickException(f"Could not open session {session_id}: {e}")
+
+
+def _session_event(
+    session_id: str, session: dict, *, resumed: bool = False, attached: bool = False
+) -> dict:
+    """The opening ``session`` event every chat mode emits first."""
+    event = {
+        "event": "session",
+        "session_id": session_id,
+        "agent_id": session.get("agent_id"),
+        "mode": session.get("mode"),
+        "title": session.get("title"),
+        "resumed": resumed,
+    }
+    if attached:
+        event["attached"] = True
+    return event
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """A failure that says nothing about the turn: transport, 429 or 5xx."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, PlatformError):
+        return exc.status_code == 429 or exc.status_code >= 500
+    return False
+
+
+def _describe_error(exc: BaseException) -> str:
+    if isinstance(exc, CinnaExit):
+        return exc.detail
+    return str(exc) or type(exc).__name__
+
+
+def _with_poll_retry(call, emit: "_Emitter", session_id: str, deadline: float):
+    """Run one poll request, retrying transient failures until ``deadline``.
+
+    Each retry is announced as a ``warning`` event, so a caller watching the
+    stream sees the platform was slow rather than a silent pause.
+    """
+    attempt = 0
+    while True:
+        try:
+            return call()
+        except (httpx.TransportError, PlatformError) as exc:
+            remaining = deadline - time.monotonic()
+            if not _is_transient(exc) or remaining <= 0:
+                raise
+            delay = min(
+                _POLL_RETRY_DELAYS[min(attempt, len(_POLL_RETRY_DELAYS) - 1)], remaining
+            )
+            attempt += 1
+            logger.warning("chat poll failed (attempt %d): %s", attempt, exc)
+            emit.emit(
+                {
+                    "event": "warning",
+                    "session_id": session_id,
+                    "message": f"poll request failed ({_describe_error(exc)}); "
+                    f"retrying in {delay:.0f}s",
+                    "attempt": attempt,
+                }
+            )
+            time.sleep(delay)
+
+
+def _abort_with_recovery(emit: "_Emitter", session_id: str, exc: BaseException):
+    """Give up polling, naming the session and the command that gets it back.
+
+    The agent's turn runs server-side whether or not anyone is polling, so a
+    lost connection is never the end of the turn — only of this command.
+    """
+    recover = f"cinna chat --attach {session_id}"
+    detail = _describe_error(exc)
+    if not emit.pretty:
+        emit.emit(
+            {
+                "event": "error",
+                "session_id": session_id,
+                "message": f"lost contact with the session while waiting for the reply: {detail}",
+                "recover": recover,
+            }
+        )
+    raise CinnaExit(
+        EXIT_NETWORK,
+        "chat_poll_failed",
+        f"Lost contact with session {session_id} while waiting for the reply "
+        f"({detail}).\nThe agent's turn keeps running on the platform. "
+        f"Re-attach with: {recover}",
+        extra={"session_id": session_id, "recover": recover},
+    )
 
 
 def _resolve_agent_id(client: AccountClient, agent_ref: str | None) -> str:
@@ -275,6 +476,17 @@ def _message_count(client: AccountClient, session_id: str) -> int:
         offset += n
 
 
+def _all_messages(client: AccountClient, session_id: str) -> list[dict]:
+    """Every message in the session, in ``sequence_number`` order."""
+    out: list[dict] = []
+    while True:
+        page = client.get_messages(session_id, limit=_MESSAGE_PAGE, offset=len(out))
+        batch = page.get("data", [])
+        out.extend(batch)
+        if len(batch) < _MESSAGE_PAGE:
+            return out
+
+
 def _poll_turn(
     client: AccountClient,
     session_id: str,
@@ -285,8 +497,18 @@ def _poll_turn(
     interval: float,
     timeout: int,
     include_events: bool = True,
-) -> None:
-    """Emit each finalized message as it appears; return when the turn settles."""
+) -> str:
+    """Emit each finalized message as it appears; return how the wait ended.
+
+    ``completed`` — the turn ran and settled. ``timeout`` — ``timeout`` elapsed
+    first; the turn may still be running (``--attach`` waits for it).
+    ``not_started`` — no turn began within the start-grace window. The caller
+    emits the closing ``done`` event carrying this outcome.
+
+    Every poll request is retried on a transient failure within the same
+    ``timeout`` budget: the turn runs server-side regardless of whether one
+    buffered proxy call timed out.
+    """
     started = time.monotonic()
     deadline = started + timeout
     start_deadline = started + START_GRACE_SECONDS
@@ -298,13 +520,17 @@ def _poll_turn(
     # only what's new since the last poll instead of going silent until the
     # whole (possibly many-minutes-long) message finalizes.
     shown_event_count: dict[str, int] = {}
+    last_stream_info = None
+
+    def poll(fn, *args, **kwargs):
+        return _with_poll_retry(lambda: fn(*args, **kwargs), emit, session_id, deadline)
 
     while True:
         # Drain newly-finalized messages; stop at the first in-progress one
         # (its content is still growing — re-read it next poll).
         in_progress = False
         while True:
-            page = client.get_messages(session_id, limit=_MESSAGE_PAGE, offset=consumed)
+            page = poll(client.get_messages, session_id, limit=_MESSAGE_PAGE, offset=consumed)
             batch = page.get("data", [])
             advanced = False
             for m in batch:
@@ -329,30 +555,49 @@ def _poll_turn(
             if in_progress or len(batch) < _MESSAGE_PAGE or not advanced:
                 break
 
-        streaming = bool(client.get_streaming_status(session_id).get("is_streaming"))
+        stream = poll(client.get_streaming_status, session_id)
+        streaming = bool(stream.get("is_streaming"))
         if streaming:
             turn_started = True
+        # Whatever the platform says about the running turn (phase, current
+        # tool, …) is passed through when it changes — it is the only signal
+        # that tells "waiting for the environment" from "the model is working".
+        stream_info = stream.get("stream_info")
+        if stream_info and stream_info != last_stream_info:
+            emit.emit(
+                {
+                    "event": "status",
+                    "state": "streaming",
+                    "session_id": session_id,
+                    "stream_info": stream_info,
+                }
+            )
+        last_stream_info = stream_info
 
         # Settled: the turn ran and nothing is in flight any more.
         if turn_started and not streaming and not in_progress:
-            break
+            return "completed"
         if not turn_started and time.monotonic() > start_deadline:
             emit.emit(
                 {
                     "event": "warning",
                     "message": "agent turn did not start within the grace period",
                     "session_id": session_id,
+                    "recover": f"cinna chat --attach {session_id}",
                 }
             )
-            break
+            return "not_started"
         if time.monotonic() > deadline:
             emit.emit(
-                {"event": "timeout", "session_id": session_id, "seconds": timeout}
+                {
+                    "event": "timeout",
+                    "session_id": session_id,
+                    "seconds": timeout,
+                    "recover": f"cinna chat --attach {session_id}",
+                }
             )
-            break
+            return "timeout"
         time.sleep(interval)
-
-    _emit_done(client, emit, session_id)
 
 
 def _emit_delta(
@@ -504,9 +749,25 @@ def _download_attachment(client: AccountClient, att: dict, dl_dir: Path) -> None
         logger.warning("attachment download failed (%s): %s", fid, e)
 
 
-def _emit_done(client: AccountClient, emit: _Emitter, session_id: str) -> None:
-    """Emit the terminal ``done`` event with the session's settled state."""
+def _emit_done(
+    client: AccountClient,
+    emit: _Emitter,
+    session_id: str,
+    outcome: str | None = None,
+) -> None:
+    """Emit the terminal ``done`` event with the session's settled state.
+
+    ``outcome`` is the CLI's own account of how the wait ended (``completed`` /
+    ``timeout`` / ``not_started``, or ``in_progress`` / ``idle`` for
+    ``--show``) — always present, unlike the session's ``result_state``, which
+    the platform can leave empty. A turn that may still be running carries the
+    ``--attach`` command that waits for it.
+    """
     event: dict = {"event": "done", "session_id": session_id}
+    if outcome:
+        event["outcome"] = outcome
+        if outcome in ("timeout", "not_started", "in_progress"):
+            event["recover"] = f"cinna chat --attach {session_id}"
     try:
         session = client.get_session(session_id)
         event["interaction_status"] = session.get("interaction_status")

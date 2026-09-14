@@ -124,10 +124,10 @@ not exercise schedules here beyond confirming `cinna agent schedule --help` list
   cinna agent show acc-test-agent --full | head -50
   ```
 - **Expected:** `--prompts` prints the `entrypoint` / `workflow` / `refiner`
-  blocks the runtime reads, with the edit reflected in `workflow`. The full form
-  adds `Features:` and `Connected credentials (N):` listing name + type only (no
-  secret values). Long prompts truncate in the TTY but `--full` (and piping)
-  print them whole.
+  blocks the runtime reads, each under its `[label]`, with the edit reflected in
+  `workflow`. The full form adds `Features:` and `Connected credentials (N):`
+  listing name, type, slot, setup state and id (no secret values — see #11).
+  Long prompts truncate in the TTY but `--full` (and piping) print them whole.
 - **Watch for:** secret values leaking into the credential list; truncation
   silently swallowing content when output is redirected (must auto-full off a
   TTY); the edited prompt not reflected (prompt-sync not yet applied).
@@ -227,6 +227,68 @@ not exercise schedules here beyond confirming `cinna agent schedule --help` list
   id.
 - **Watch for:** a wrong-agent match; an unknown ref silently picking the first
   agent; an ambiguous slug resolving instead of erroring.
+
+### 11. `agent show` names every prompt and every credential's slot
+
+- **Goal:** tell the three prompt blocks apart, and see which slot each linked
+  credential fills.
+- **Setup:** an agent with a linked credential whose service URI is set
+  (`cinna account credentials update <id> --service-uri some-token.com`).
+- **Steps:**
+  ```
+  cinna agent show acc-test-agent --prompts | grep -E '^\s+\[(entrypoint|workflow|refiner)\]'
+  cinna agent show acc-test-agent | sed -n '/Connected credentials/,$p'
+  cinna account credentials list | grep some-token.com
+  ```
+- **Expected:** three label lines, one per prompt (`[refiner] (empty)` when unset).
+  The credential line reads `<name> (api_token)  slot: some-token.com  <id>`, and
+  the slot agrees with `credentials list`.
+- **Watch for:** unlabelled prompt blocks (Rich swallowing `[label]`); `no slot`
+  for a credential whose slot is set — the agent credential route returns
+  `service_uri: null`, so the slot must come from the account listing.
+
+### 12. `agent rebuild-env` waits until the environment answers
+
+- **Goal:** a chat sent right after a rebuild gets a reply.
+- **Steps:**
+  ```
+  cinna agent rebuild-env acc-test-agent --yes
+  cinna chat --agent acc-test-agent "ping" | jq -c 'select(.event=="done")'
+  ```
+- **Expected:** after `Environment rebuilt …` a spinner `Waiting for the
+  environment to answer…`, then `The environment answers its health check — ready
+  to chat.` The chat that follows ends `outcome: completed`. If the container never
+  answers within 180 s: a warning naming `cinna agent status refresh`, exit 0.
+- **Watch for:** "ready" printed before the server inside answers; a chat right
+  after the rebuild hanging with `is_streaming: true`; the wait running for an
+  environment that was left stopped.
+
+### 13. `agent prompts pull | diff | push` round-trips one edit
+
+- **Goal:** change one line of the workflow prompt without raw API calls, and
+  without reverting a change someone made in the UI meanwhile.
+- **Steps:**
+  ```
+  cinna agent prompts pull acc-test-agent
+  sed -i.bak 's/$/ Use `report.py`./' prompts/acc-test-agent/refiner.md
+  cinna agent prompts diff acc-test-agent
+  # meanwhile, edit the agent's router trigger in the web UI
+  cinna agent prompts push acc-test-agent --dry-run
+  cinna agent prompts push acc-test-agent
+  cinna agent show acc-test-agent --prompts | sed -n '/\[refiner\]/,$p'
+  cinna exec --agent acc-test-agent cat /app/workspace/docs/REFINER_PROMPT.md
+  cinna agent prompts pull acc-test-agent       # refused? only if unpushed edits remain
+  ```
+- **Expected:** `pull` lists six files; `diff` shows the refiner edit with the
+  backticks intact and marks `router_trigger.md` as changed on the platform (push
+  leaves it alone). `--dry-run` names only `refiner.md`. `push` prints `Pushed
+  refiner.md`, then that the running environment's docs carry it; `agent show` and
+  the env's doc file both show the edit; the UI's router trigger change survives.
+  Editing the same field in the UI *and* locally makes `push` refuse until
+  `--force` or `pull --force`.
+- **Watch for:** backticks mangled; a push sending every field (reverting the UI
+  change); `pull` overwriting unpushed edits without `--force`; the env's
+  `docs/*.md` not updated while the env is running.
 
 ## Cross-cutting invariants (must hold across all scenarios)
 

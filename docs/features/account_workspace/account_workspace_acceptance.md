@@ -161,6 +161,17 @@ the silent-secret and scope-drift bugs live.
 - **Watch for:** any secret-bearing field being sent from the CLI; the draft
   showing `complete` before the user fills it; the credential landing in the
   wrong workspace.
+- **Then check the slot surfaces:**
+  ```
+  cinna account credentials update <cred-id> --service-uri stripe.com
+  cinna account credentials list | grep "Stripe Key"
+  cinna account credentials list --json | jq '.data[] | select(.id=="<cred-id>") | .service_uri'
+  ```
+  **Expected:** the table's `Slot` column reads `stripe.com` for that row (and `—`
+  for credentials without one), the full id is unbroken, and a placeholder shows
+  `placeholder`; `--json` prints only JSON and the jq query returns `"stripe.com"`.
+  **Watch for:** the slot missing from the table; `--json` output mixed with a
+  table or hint line; an id wrapped or elided at a narrow width.
 
 ### 9. Credential create `--agent` attaches in one step
 

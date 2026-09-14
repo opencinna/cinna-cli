@@ -598,6 +598,40 @@ elided, at any terminal width.
 found`; the resolution note landing on stdout and corrupting a JSON pipe; a
 non-agent sub-route under `agents/` being rejected instead of passed through.
 
+### 24. A local skill's credential slot is checked, not assumed
+
+**Goal** — `cinna skills list` says whether a local skill's declared slot is
+actually filled; the platform reports `credential_issues` for catalog installs
+only, so a local skill used to read `● ok` with nothing carrying its slot.
+
+**Setup** — `AGENT` has a linked `api_token` credential with **no** service URI,
+and its workspace holds `skills/acceptance-slot/SKILL.md` declaring
+`credentials:` with `- slot: acceptance-token.example` / `type: api_token`, pushed
+with `cinna sync push --agent <slug>`.
+
+**Steps**
+
+```bash
+cinna skills list <AGENT>
+cinna account credentials update <CRED_ID> --service-uri acceptance-token.example
+cinna skills list <AGENT>
+cinna agent show <AGENT> | sed -n '/Connected credentials/,$p'
+cinna skills list <AGENT> --json | jq '.addons[] | select(.name=="acceptance-slot") | .credential_issues'
+```
+
+**Expected** — the first list shows a `Credentials` column with
+`! acceptance-token.example (not_linked)` and, beneath, the exact command
+`cinna account credentials update <CRED_ID> --service-uri acceptance-token.example`
+naming the linked token. After running it, the row reads `✓ acceptance-token.example`
+with no remedy block, and `agent show` prints `slot: acceptance-token.example` for
+that credential. `--json` is the unmodified payload (`credential_issues` stays `[]`
+for a local skill — the CLI's check never leaks into it).
+
+**Watch for** — `✓` before the slot is set; `not_linked` after it is set (the
+agent credential route returns `service_uri: null`, so the slot must be read from
+the account listing); a `Credentials` column on an agent whose skills declare no
+slot; the readiness lookup running under `--json`.
+
 ## Cross-cutting invariants
 
 - No secret value is ever printed, and a skill folder that holds one cannot be
