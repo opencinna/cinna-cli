@@ -5653,6 +5653,34 @@ def test_skills_list_reports_a_slot_carried_by_the_wrong_type(
 
 
 @patch("cinna.account.AccountClient")
+def test_skills_list_names_the_wrong_type_when_the_platform_says_not_linked(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """The platform reads a slot carried by a credential of another type as
+    not_linked. Its "draft one" remedy would put a second credential on a slot
+    a linked one already carries, so the CLI names the type instead."""
+    row = _slot_skill_row(
+        issues=[{"slot": "some-token.com", "type": "api_token", "reason": "not_linked"}]
+    )
+    result, _ = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch,
+        _addons_with(row),
+        _linked(
+            {
+                "id": "cred-odoo",
+                "name": "ERP",
+                "type": "odoo",
+                "service_uri": "some-token.com",
+                "status": "complete",
+            }
+        ),
+    )
+    assert "type_mismatch" in result.output
+    assert "'ERP' carries the slot but is a odoo credential" in result.output
+    assert "credentials create" not in result.output
+
+
+@patch("cinna.account.AccountClient")
 def test_skills_list_trusts_the_platforms_reason_for_a_catalog_install(
     mock_client_cls, runner, account_root, monkeypatch
 ):

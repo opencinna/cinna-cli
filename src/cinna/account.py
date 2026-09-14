@@ -4062,9 +4062,18 @@ def _slot_readiness(
     not be read. ``credential`` is the linked one carrying the slot, if any.
     """
     slot = decl.get("slot")
+    declared_type = decl.get("type")
     for issue in addon.get("credential_issues") or []:
         if isinstance(issue, dict) and issue.get("slot") == slot:
-            return str(issue.get("reason") or "credential_missing"), None
+            reason = str(issue.get("reason") or "credential_missing")
+            if reason == "not_linked" and declared_type and linked:
+                # The platform has no type_mismatch reason: a credential of
+                # another type on the slot reads not_linked, and the "draft
+                # one" remedy would put a second credential on a taken slot.
+                carriers = [c for c in linked if c.get("service_uri") == slot]
+                if carriers and all(c.get("type") != declared_type for c in carriers):
+                    return "type_mismatch", carriers[0]
+            return reason, None
     if addon.get("source") == "catalog":
         # The platform computed this row's slots and named no issue for this one.
         return "ready", None
@@ -4077,8 +4086,7 @@ def _slot_readiness(
         if any(c.get(_SLOT_UNVERIFIED) for c in linked):
             return "unknown", None
         return "not_linked", None
-    declared_type = decl.get("type")
-    typed = [c for c in carriers if not declared_type or c.get("type") == declared_type]
+    typed =[c for c in carriers if not declared_type or c.get("type") == declared_type]
     if not typed:
         return "type_mismatch", carriers[0]
     usable = [

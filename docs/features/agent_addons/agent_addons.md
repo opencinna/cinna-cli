@@ -84,11 +84,16 @@ without `cinna api`, and without anyone typing a UUID.
    - For a **catalog** install the platform already computed readiness
      (`credential_issues`, one reason per slot: `not_linked`, `not_configured`,
      `access_revoked`), and the CLI renders it as-is.
-   - For every **other** row the platform computes nothing — a local skill read
-     `ok` while nothing carried its slot. The CLI checks the agent's linked
+   - For every **other** row an older platform computes nothing — a local skill
+     read `ok` while nothing carried its slot. The CLI checks the agent's linked
      credentials itself: no credential with that service URI → `not_linked`; one of
      another type → `type_mismatch`; only a placeholder or an unfilled one →
      `not_configured`.
+   - A platform that judges local and bundle rows too sends `credential_issues`
+     for them, and its reason wins — except that it has no `type_mismatch`: a slot
+     it calls `not_linked` while a linked credential of another type carries it is
+     shown as `type_mismatch`, because drafting a second credential on a taken
+     slot would be the wrong fix.
    - The remedy is specific: a linked credential of the declared type with no slot
      is named with the `credentials update <id> --service-uri <slot>` command;
      otherwise the `credentials create … --service-uri <slot> --agent <agent>` draft.

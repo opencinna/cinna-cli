@@ -74,7 +74,9 @@
 - `src/cinna/account.py:_declared_slots()` — the slots a row's `skills[].credentials`
   declare (first declaration of a slot wins).
 - `src/cinna/account.py:_slot_readiness()` — `(state, credential)` per slot: a
-  `credential_issues` entry for the slot wins (its `reason`); a catalog row with no
+  `credential_issues` entry for the slot wins (its `reason`), except a `not_linked`
+  whose slot every linked carrier holds with another type, which reads
+  `type_mismatch` (the platform has no such reason); a catalog row with no
   entry is `ready` (the platform computed it); otherwise matched against the linked
   credentials by `service_uri` → `not_linked` / `type_mismatch` / `not_configured` /
   `ready`, and `unknown` when the listing is `None` or a `_SLOT_UNVERIFIED`
