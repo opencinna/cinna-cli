@@ -54,3 +54,16 @@ When a terse message breaks the agent, the fix is usually in the agent's **promp
 ## When NOT to use human phrasing
 
 When you're isolating one specific mechanic ("does this tool / credential / endpoint work at all?"), give a complete, precise prompt so a failure points at the mechanic, not at ambiguity. Use human-style messages for **realism / robustness** testing; use precise prompts for **unit-style** capability checks.
+
+## Record the conditions — so you can re-run them
+
+A test you ran once proves the agent worked once. Before other people use the agent, write the cases down in its workspace as `docs/test_scenarios/`: a `README.md` (fixtures, how to run, the rule below), one file per kind of question, and a `scope_and_pushback.md` for what it must refuse — and must not over-refuse. Each file holds:
+
+- **What must be true** — numbered invariants ("dates only, never the reason").
+- **Fixtures** — the records the cases rely on, by role and id, with the date you verified them. `docs/` ships with the agent: no personal details.
+- **Say | Expect** — the terse human message from this guide, and what the reply *and* the `events` trace must show ("routed to `who-is-away`, one skill call", "one-line redirect, no tool call").
+- **Traps** — the tempting wrong answers.
+
+Run each case at the level that isolates it: `cinna chat` for the real pipeline, `cinna exec` running the skill's script for the data alone. **If the data is right and the reply is wrong, fix the prompt or skill; if the data is wrong, fix the script or producer.** When a case was failing, keep a before/after row in its file.
+
+**Re-run the whole set after every change to a prompt, a skill, the model, the AI provider, or a producer's response shape.** A smaller conversation model or a reworded prompt can break a case that passed yesterday, and nothing else will tell you.

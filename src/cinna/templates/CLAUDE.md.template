@@ -18,6 +18,26 @@ You are working in the **local development copy** of a Cinna Core agent. The wor
 
 Treat the agent like a Python project whose entrypoints are scripts under `scripts/`, whose behavior is driven by prompts under `docs/`, and whose knowledge comes from `knowledge/` + the platform's vector search via the `knowledge_query` MCP tool.
 
+### Advise before you build
+
+The user is usually not an architect. When a row below fires — while they describe a new agent, a new capability or a change — **recommend** the pattern, with the reason in one sentence and the cost in another, then confirm with the recommended option first. Recommend nothing whose trigger has not fired, and record each decision (declined ones too) in `workspace/docs/AGENT_DEVELOPMENT.md`. Section numbers refer to [`./AGENT_DESIGN_PATTERNS.md`](./AGENT_DESIGN_PATTERNS.md), mirrored next to `BUILDING_AGENT.md` once the agent's environment carries it (`cinna agent rebuild-env <agent>` from the account root brings an older environment up to date).
+
+<!-- Copied from AGENT_DESIGN_PATTERNS.md §0 — keep the table rows identical. -->
+
+| When you notice… | Recommend… (pattern) |
+|---|---|
+| a credential whose reach exceeds what the agent needs | a producer agent-api in front of it, even if private (§3) |
+| the model would add, subtract, compare or derive dates/numbers | move the figure into the script/producer payload (§4) |
+| ≥ 2 distinct kinds of question, or wording that must change without redeploy | skills + routing table (§1) |
+| a second audience, schedule or credential set | a second agent, not a bigger prompt (§2) |
+| a send / create / sign / post | confirmation gate + `--dry-run` + audit log + idempotency key (§6) |
+| "remember what was sent", retries, polling, a queue | SQLite under `app-data/storage/` (§5) |
+| the agent runs unattended | `script_trigger` with the OK contract + `STATUS.md` (§7) |
+| the agent will serve other people | `docs/test_scenarios/` before the first hand-over (§9) |
+| a prompt/skill/model/provider change | re-run the scenario set (§9) |
+| conversation latency or cost matters | keep §4/§1, then try the smaller conversation model (§10) |
+| the user's answer contradicts the recommendation | say the trade-off once, then build what they chose |
+
 ---
 
 ## 2. Workspace layout
@@ -81,6 +101,7 @@ Rules of thumb:
 | Long-lived runtime output (DB, reports, derived data, run-state files) | `app-data/storage/` | Survives bundle updates and reinstalls. |
 | User uploads at runtime | `app-data/uploads/` (auto-populated) | Read from here, do not write here. |
 | Rebuildable derived caches | `app-data/cache/` | Safe to delete; scripts must be able to rebuild from source. |
+| Builder notes — design decisions, defects log, recorded test scenarios | `docs/AGENT_DEVELOPMENT.md`, `docs/test_scenarios/` | Bundle-owned and never referenced by the workflow prompt, so they cost no runtime context. They ship with the agent: no personal data in fixtures. |
 | Credentials / API tokens | nowhere in the workspace | Backend-managed in `credentials/`; access them from scripts via the platform's standard credential loader. |
 
 ---
@@ -95,13 +116,13 @@ The runtime expects a small set of named prompt files. Standard slots:
 
 Conventions:
 
-- Lead with the agent's role and purpose in one paragraph.
-- List capabilities as discrete sections. Each capability should map to a script or script subfolder.
-- Document trigger phrases for capabilities (e.g. "when the user asks to check X, run `scripts/checks/run.py`").
+- Lead with the agent's role and **scope** in one paragraph: what is in, what is out, and the one-line refusal that names two things the agent can do (an out-of-scope turn runs nothing).
+- **One kind of question → one skill** (`skills/<name>/SKILL.md`). With two or more, `WORKFLOW_PROMPT.md` is a **routing table** — skill → the questions it owns, in the user's own words — plus tie-breaks. Each skill's `description` carries its trigger phrases and its "Not for … (sibling)" boundary. Never paste a skill's steps into the prompt; keep `WORKFLOW_PROMPT.md` lean.
+- Rules the model must obey *while writing* — no preamble, never compute a figure, names or they/them — go at the end of every `SKILL.md` as a pre-answer reminder, not only in a tone section.
 - Reference docs/knowledge files explicitly: `See docs/<topic>.md for the business rules.` — the runtime will surface those.
 - Spell out the "never" rules: never echo credentials, never write to `uploads/`, never modify `credentials/`.
 
-If a capability needs more than 5–10 lines of workflow, **split it into its own doc file** under `docs/<capability>.md` and reference it from `WORKFLOW_PROMPT.md`. Keep `WORKFLOW_PROMPT.md` lean.
+**The prompt docs sync both ways.** `docs/WORKFLOW_PROMPT.md`, `ENTRYPOINT_PROMPT.md` and `REFINER_PROMPT.md` are also fields of the agent's config, and the platform reconciles the two (three-way; when both sides changed, the later write wins). Change a prompt through **one** path — edit the doc here and sync it, or `cinna agent prompts pull` / `push` from the account root — never both at once. `description`, `router_trigger_prompt` and `example_prompts` exist only in the config. Verify what the runtime actually uses with `cinna agent show <agent> --prompts`.
 
 ---
 
@@ -111,6 +132,8 @@ If a capability needs more than 5–10 lines of workflow, **split it into its ow
 - **Read inputs from** `workspace/files/`, `app-data/uploads/`, or `app-data/storage/`. **Write outputs to** `app-data/storage/` (durable) or `app-data/cache/` (disposable).
 - **Pagination must use a deterministic sort order** (e.g. `id ASC`). Unsorted offset/limit pagination silently skips and duplicates rows — a famously subtle bug. If the API has no sort param, fetch all IDs first then page by ID.
 - **Caches must be rebuildable from scratch.** `app-data/cache/` may be deleted at any time. No script may depend on a prior cache state; a fresh run on empty `cache/` must produce the same result as a re-run on a stale `cache/`. Cache-update scripts should **replace**, never incrementally patch.
+- **One call per user question.** Keep steps small, but give conversation mode one script per kind of question that prints the whole answer — pre-computed totals and verdicts, spelled-out weekdays, `data_fetched_at`, `truncated`. The model quotes; it never computes (`./AGENT_DESIGN_PATTERNS.md` §4).
+- **Durable state is SQLite** under `app-data/storage/<area>/<name>.db`: WAL mode, rows claimed with `BEGIN IMMEDIATE` and a status-guarded `UPDATE`, one event row per transition, additive migrations (§5 of the same file).
 - Maintain `scripts/README.md` listing every script, its purpose, and example invocation. Group by capability when you have subfolders.
 
 ### File paths inside the container
@@ -214,16 +237,18 @@ Conflicts: Mutagen writes `<file>.conflict.<side>.<timestamp>` instead of pickin
 
 ## 11. Building a new capability — concrete steps
 
-1. **Pick the trigger.** What does the user say to activate it? Record this in `docs/WORKFLOW_PROMPT.md`.
-2. **Decide if it's its own capability or inline.** Multi-step workflow + own scripts → its own capability with `docs/<capability>.md`. One-shot command → inline in `WORKFLOW_PROMPT.md`.
-3. **Create the script.** `workspace/scripts/<capability>/run.py` (or top-level if single-capability agent). Make it runnable as `cinna exec python scripts/<capability>/run.py`.
-4. **Wire I/O paths.** Inputs from `files/` / `uploads/` / `storage/`. Outputs to `storage/` (durable) or `cache/` (disposable).
-5. **Document the script** in `scripts/README.md`.
-6. **Write the capability doc** at `docs/<capability>.md`: when to use, workflow, how to present results, technical notes.
-7. **Reference it from `WORKFLOW_PROMPT.md`** with the trigger condition and a pointer to the doc.
-8. **Smoke-test:** `cinna exec python scripts/<capability>/run.py <args>` — confirm exit code 0 and the expected files in `storage/`.
-9. **Verify `knowledge_query`** (if the capability uses it): ask a question the new docs should cover; confirm a hit.
-10. **Check sync status:** `cinna sync status` — no conflicts, no pending changes.
+1. **Check the advisor table (§1).** Does the capability reach an external system, send or post, or need a figure the model would compute? Recommend the pattern before writing code.
+2. **Pick the trigger.** What does the user say to activate it, in their own words? That becomes a row of the routing table in `docs/WORKFLOW_PROMPT.md`.
+3. **Decide: its own skill or inline.** Its own trigger + a multi-step procedure or scripts + its own output → a skill at `skills/<name>/SKILL.md`. What the agent does on almost every message, or a one-shot command → inline in `WORKFLOW_PROMPT.md`.
+4. **Create the script.** Used only by this skill → `workspace/skills/<name>/scripts/run.py`; shared helpers → `workspace/scripts/`. It prints the whole answer — pre-computed figures, spelled-out dates — so conversation mode makes one call. Make it runnable as `cinna exec python skills/<name>/scripts/run.py`.
+5. **Wire I/O paths.** Inputs from `files/` / `uploads/` / `storage/`. Outputs to `storage/` (durable) or `cache/` (disposable).
+6. **Document the script** in `scripts/README.md`.
+7. **Write `SKILL.md`**: a `description` with the trigger phrases and the "Not for … (sibling)" boundary; a body with when to use, the command, how to read its output, how to present the answer and what to do on failure; and a closing pre-answer reminder.
+8. **Add its row to the routing table** in `WORKFLOW_PROMPT.md` — the skill name and the questions it owns. Never paste its steps there.
+9. **Smoke-test:** `cinna exec python skills/<name>/scripts/run.py <args>` — confirm exit code 0 and the expected output.
+10. **Verify `knowledge_query`** (if the capability uses it): ask a question the new docs should cover; confirm a hit.
+11. **Record and run a scenario** for it in `workspace/docs/test_scenarios/` (see `CHAT_TESTING.md`), then re-run the rest of the set.
+12. **Check sync status:** `cinna sync status` — no conflicts, no pending changes.
 
 ---
 
@@ -256,13 +281,13 @@ The platform decides whether to start a session by inspecting your script's exit
 
 ### How to invoke the script from the schedule
 
-**Preferred command form:**
+**Canonical command form:**
 
 ```
-uv run python /app/workspace/scripts/<name>.py
+uv run --quiet python /app/workspace/scripts/<name>.py
 ```
 
-— **not** `uv run scripts/<name>.py` or `uv run python scripts/<name>.py`.
+— **not** `uv run scripts/<name>.py`, `uv run python scripts/<name>.py`, or any form without `--quiet`. `--quiet` matters most on the first run after an environment rebuild: without it `uv` prints its resolve/sync progress on stdout, and that tick opens a session.
 
 Two reasons this is the safe default:
 
@@ -375,10 +400,33 @@ When you do want an LLM every tick (e.g., daily narrative reports, weekly summar
 Recurring scripts will run forever — assume any execution can happen at any time:
 
 - **Idempotent by construction.** Re-running the script back-to-back must produce the same outcome and not create duplicate records / emails / tickets. Guard side-effects with a "have I already done this today?" check against `app-data/storage/`.
+- **Escalate once.** When a check finds a condition that persists (a document overdue, a source unreachable), record under `app-data/storage/` that it was reported and print `OK` on later ticks until it changes — otherwise every tick opens a new session about the same thing.
 - **No incremental cache mutation.** Same rule as §5 — caches under `app-data/cache/` must be fully rebuildable from scratch.
 - **Bounded work.** A scheduled script that grows linearly with the dataset will eventually time out. Page deterministically (§5) and write progress to `app-data/storage/` so the next tick can resume if needed.
 - **Test before scheduling.** Run the script manually first: `cinna exec python scripts/checks/<name>.py` — confirm `OK` on the healthy path and useful context on the alert path. Only then configure the schedule in the UI.
 - **Schedules are NOT in the bundle.** When you publish a new revision, schedules don't ship. Document the recommended schedules in the agent's `README.md` so installers can recreate them; the *scripts* are the bundle-shippable part.
+
+### Status reporting (`STATUS.md`)
+
+An agent that runs unattended publishes its health in `app-data/storage/STATUS.md`. The platform shows it on the agent card, in `/agent-status`, over the API and in `cinna agent status show`, without starting a session.
+
+```markdown
+---
+timestamp: 2026-05-13T07:00:04Z
+status: warning
+summary: 2 documents waiting for signature past their deadline
+---
+
+Last check 07:00 UTC — 14 in flight, 2 overdue, 0 failed.
+```
+
+- `status` is one of `ok`, `info`, `warning`, `error` (anything else reads as `unknown`); `summary` is one line; `timestamp` is UTC.
+- **Update it at the end of every scheduled run, on the success and the failure path** — a check that only writes on success leaves a stale `ok` behind once it starts failing. Overwrite, never append; skip the write when status and summary did not change.
+- Write it through one helper, `scripts/update_status.py` (atomic temp-file-and-rename write; a `trigger_quiet()` entry point that never raises and never prints), so the status write can never break the `OK` output. Create it if the workspace has none.
+- Expose a `status` command in `docs/CLI_COMMANDS.yaml` that recomputes the state, as `uv run --quiet python /app/workspace/scripts/health_check.py` — `/run:status` is the platform's default refresh command, run before every forced status read.
+- **Never** put a credential, token or personal data in it: everyone with access to the agent can read it.
+
+Check it from the account root with `cinna agent status show <agent>` (`refresh` forces a live read).
 
 ### Build-a-scheduled-job — concrete steps
 
@@ -388,14 +436,29 @@ Recurring scripts will run forever — assume any execution can happen at any ti
 4. Make the script print `OK` and exit 0 on the healthy path; print actionable context and exit non-zero on alerts (see template above).
 5. Smoke-test both paths: `cinna exec python scripts/checks/<name>.py` healthy → exit 0 + `OK`; force an alert → non-zero + context.
 6. Document the script in `scripts/README.md` and the recommended schedule (cadence + suggested name) in the agent's `README.md`.
-7. On the platform: Agent Config → Schedules → **New → Script Trigger**, paste the command using the canonical form `uv run python /app/workspace/scripts/checks/<name>.py` (absolute path, `python` between `uv run` and the script — see "How to invoke the script from the schedule" above) and the natural-language cadence ("every workday at 7 AM"). Generate → Save.
+7. On the platform: Agent Config → Schedules → **New → Script Trigger**, paste the command using the canonical form `uv run --quiet python /app/workspace/scripts/checks/<name>.py` (`--quiet`, absolute path, `python` between `uv run` and the script — see "How to invoke the script from the schedule" above) and the natural-language cadence ("every workday at 7 AM"). Generate → Save.
 8. Check Schedules → *Logs* (clock icon) after the first tick — confirm `success` for `OK`, `session_triggered` for alerts, and that no `error` rows appear.
 
 > If the scheduled job's purpose is to *email a summary or report to users*, do not generate or send the email from the script directly with hand-rolled `smtplib` calls and free-form content. Use the template-based pattern in §13 — template generator → sender → audit log, with SMTP creds from the platform credential store.
 
 ---
 
-## 13. External notifications — email
+## 13. External side effects — email, documents, signatures, posts
+
+### The rules for any side effect
+
+Anything that sends, creates, signs, posts or deletes outside the platform follows six rules (`./AGENT_DESIGN_PATTERNS.md` §6):
+
+1. **Confirmation gate.** In conversation, show a summary of exactly what will happen and wait for an explicit yes. The script's docstring says that it writes.
+2. **`--dry-run`** validates, resolves and prints the normalized payload without touching anything. Multi-field input goes through a job file under `app-data/storage/jobs/`, scaffolded by `--init-job` — never inline JSON on the command line.
+3. **Deterministic key** from what the action is about (`daily-summary-2026-05-13`, the document name), never the clock — checked against the audit table before anything goes upstream.
+4. **Audit every attempt** — done, already done, failed — with target, upstream id, error, caller and time, in SQLite under `app-data/storage/`.
+5. **Explicit override only.** A repeat returns the stored result (`already_done: true`); only `--force` acts again.
+6. **Escalate once.** A persistent condition is reported on the first tick and flagged, not re-reported every tick.
+
+Scripts emit facts — the receipts a user checks before approving; the wording lives in the skill or a template, and a finalizer recomputes any facts inside an LLM draft. Email below is the worked example of all six.
+
+### Email
 
 When an agent needs to communicate **outside** the platform (daily/weekly summaries, alerts, reports to stakeholders), email is the standard channel. The pattern below is deliberately split into three concerns — credentials, content, transport — and each piece has rules the agent must follow if it's going to run unattended for months.
 
@@ -536,6 +599,9 @@ All four steps can be one script that calls helpers, or chained as separate `scr
 - [ ] Prompts reviewed end-to-end on a fresh conversation — verified by actually talking to the agent (`cinna chat "<representative request>"`) and confirming the reply, not just by reading the prompt.
 - [ ] For each scheduled `script_trigger`: healthy path prints exactly `OK` (verified via `cinna exec`).
 - [ ] For each email notification: SMTP creds resolved from platform; templates render; `sent.db` row written; idempotency check skips re-sends.
+- [ ] Every script that sends, creates, signs or posts has `--dry-run`, a deterministic key and an audit row per attempt.
+- [ ] Design decisions (accepted and declined) and past defects are recorded in `docs/AGENT_DEVELOPMENT.md`.
+- [ ] If other people will use the agent: `docs/test_scenarios/` exists and was re-run after the last prompt, skill, model or provider change.
 - [ ] `cinna sync status` clean.
 
 ---
@@ -551,9 +617,10 @@ All four steps can be one script that calls helpers, or chained as separate `scr
 - **Caching in `scripts/`.** Same problem — bundles ship that data. Use `app-data/cache/`.
 - **Unsorted pagination.** See §5. Always `order="id ASC"` or equivalent.
 - **In-place cache patching.** Cache must be regeneratable from scratch. Replace, don't patch.
-- **Long monolithic `WORKFLOW_PROMPT.md`.** Split capabilities into `docs/<capability>.md` and reference them.
+- **Long monolithic `WORKFLOW_PROMPT.md`.** Move each kind of question into `skills/<name>/SKILL.md` and keep a scope section plus a routing table.
+- **The model computing figures.** A reply that adds, subtracts, sums rows or works out a weekday is wrong sooner or later. Print the answer-shaped figure from the script and have the prompt quote it.
 - **Wrong "OK" string in a `script_trigger` script.** The platform compares `stdout.strip()` to the literal `OK`. `Ok`, `ok`, `OK ✅`, `Status: OK`, or even an empty stdout all count as NOT OK and will open a session every tick — silently burning tokens until someone notices. Print exactly `OK` on the healthy path.
-- **`uv run scripts/foo.py` in a schedule command.** `uv run` with a `.py` argument can print dependency-resolution / install lines on stdout, polluting your `OK` and triggering a session every tick. Always use `uv run python /app/workspace/scripts/foo.py` for scheduled commands — absolute path, `python` between `uv run` and the script.
+- **`uv run scripts/foo.py` in a schedule command.** `uv run` with a `.py` argument can print dependency-resolution / install lines on stdout, polluting your `OK` and triggering a session every tick. Always use `uv run --quiet python /app/workspace/scripts/foo.py` for scheduled commands — `--quiet`, absolute path, `python` between `uv run` and the script.
 - **Using `static_prompt` where `script_trigger` would do.** `static_prompt` spends tokens on every tick whether or not there's anything to do. Default to `script_trigger` and only switch when you genuinely need an LLM each time.
 - **LLM-authored email bodies.** Letting the model write a notification email end-to-end (subject + HTML + plain text) makes every send look different — tone drifts, sections reorder, HTML breaks, occasional refusals slip through. Use a fixed template and pass the LLM only as a slot filler returning structured JSON (§13).
 - **SMTP creds in scripts or env vars.** They must come from the platform service-credentials store. Anything in `workspace/` (even commented out) is a leak waiting to ship in the next bundle revision.

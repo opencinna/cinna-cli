@@ -38,6 +38,9 @@ def test_generate_context_files(workspace_root, sample_config):
     assert guide.exists()
     assert "like a real user" in guide.read_text()
     assert "CHAT_TESTING.md" in claude_md
+    # The advisor table points at the mirrored design-patterns guide by name.
+    assert "AGENT_DESIGN_PATTERNS.md" in claude_md
+    assert "Record the conditions" in guide.read_text()
 
 
 def test_git_versioning_guide_written_and_referenced(workspace_root, sample_config):
@@ -126,6 +129,8 @@ def test_generate_gitignore(workspace_root):
     assert "CLAUDE.md" in content
     assert "WEBAPP_BUILDING.md" in content
     assert "COMPLEX_AGENT_DESIGN.md" in content
+    assert "REST_API_BUILDING.md" in content
+    assert "AGENT_DESIGN_PATTERNS.md" in content
     assert "workspace/credentials/" in content
     assert "workspace/app-data/" in content
 

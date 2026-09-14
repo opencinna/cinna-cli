@@ -342,6 +342,8 @@ _LOCAL_EXCLUDES = (
     "BUILDING_AGENT.md",
     "WEBAPP_BUILDING.md",
     "COMPLEX_AGENT_DESIGN.md",
+    "REST_API_BUILDING.md",
+    "AGENT_DESIGN_PATTERNS.md",
     ".mcp.json",
     "opencode.json",
     "cinna.log",

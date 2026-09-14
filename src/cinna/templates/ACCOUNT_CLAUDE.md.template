@@ -46,7 +46,7 @@ Each synced agent lands one level deeper than its slug — `agents/<slug>/<subdi
 - **`context/api_reference/`** — generated per-domain REST API reference (`README.md` index). Anything the `cinna` CLI doesn't cover can be done against the platform API directly.
 - **`context/examples/`** — working sample scripts for calling the platform API (start from `platform_helper.py`).
 - **`context/guides/`** — worked, end-to-end playbooks (e.g. `build-an-agentic-network.md`, `handling-improvement-requests.md`).
-- **`context/local-kit/`** — the **Local Agent Kit**: how an agent is built locally with no account (folder layout, `cinna-agent.json` manifest, capability ladder, `tools/kit.py`) and how it comes to the cloud. Read it when the user mentions a `Local/<slug>` folder, a `cinna-agent.json`, or "the agent I built on my machine" — its go-cloud playbook is `context/local-kit/guides/11-go-cloud.md`.
+- **`context/local-kit/`** — the **Local Agent Kit**: how an agent is built locally with no account (folder layout, `cinna-agent.json` manifest, capability ladder, `tools/kit.py`) and how it comes to the cloud. Read it when the user mentions a `Local/<slug>` folder, a `cinna-agent.json`, or "the agent I built on my machine" — its go-cloud playbook is `context/local-kit/guides/11-go-cloud.md`. Before you design any agent — or a new capability for one — read `context/local-kit/guides/13-design-patterns.md` (see *Advising the user* below).
 
 Refresh after platform updates with `cinna account refresh-context`.
 
@@ -241,7 +241,29 @@ The full playbook — including when to implement autonomously and when to stop 
 
 ### Finalizing an agent — author its prompts
 
-The last step of building any agent is giving it its prompts and a **description that matches what you actually built** — do this *after* the functionality works, not before. Author the full set locally — the agent's `description`, `workflow_prompt`, `entrypoint_prompt`, `refiner_prompt`, `router_trigger_prompt`, and `example_prompts` — and assign it in one bulk write: `cinna agent prompts pull <slug>` writes the current set to `prompts/<slug>/` (`workflow.md`, `entrypoint.md`, `refiner.md`, `router_trigger.md`, `description.md`, `example_prompts.json`); edit those files, review with `cinna agent prompts diff <slug>`, and write them back with `cinna agent prompts push <slug>` — one bulk write of only the fields you changed. The agent config (DB) is authoritative: `push` also pushes the doc-backed prompts (`workflow`/`entrypoint`/`refiner`) into the running environment's `docs/*.md` (a stopped one gets them on its next start), and those files then sync down into the workspace. Do not also hand-edit the synced `workspace/docs/*.md` — two paths to the same prompt is a last-writer-wins race. If the platform's copy changed since your pull, `push` refuses that field; `diff` shows both. Verify with `cinna agent show <slug> --prompts`. Follow the worked guide at **`context/guides/authoring-agent-prompts.md`** for what each field is for, the `example_prompts`-vs-route-`prompt_examples` distinction, and the finalize checklist.
+The last step of building any agent is giving it its prompts and a **description that matches what you actually built** — do this *after* the functionality works, not before. Author the full set locally — the agent's `description`, `workflow_prompt`, `entrypoint_prompt`, `refiner_prompt`, `router_trigger_prompt`, and `example_prompts` — and assign it in one bulk write: `cinna agent prompts pull <slug>` writes the current set to `prompts/<slug>/` (`workflow.md`, `entrypoint.md`, `refiner.md`, `router_trigger.md`, `description.md`, `example_prompts.json`); edit those files, review with `cinna agent prompts diff <slug>`, and write them back with `cinna agent prompts push <slug>` — one bulk write of only the fields you changed. The agent config (DB) is authoritative: `push` also pushes the doc-backed prompts (`workflow`/`entrypoint`/`refiner`) into the running environment's `docs/*.md` (a stopped one gets them on its next start), and those files then sync down into the workspace. Do not also hand-edit the synced `workspace/docs/*.md` — two paths to the same prompt is a last-writer-wins race. If the platform's copy changed since your pull, `push` refuses that field; `diff` shows both. Verify with `cinna agent show <slug> --prompts`. Follow the worked guide at **`context/guides/authoring-agent-prompts.md`** for what each field is for, the `example_prompts`-vs-route-`prompt_examples` distinction, and the finalize checklist. If the agent has `docs/test_scenarios/`, re-run them with `cinna chat` after the push — a prompt change is a behaviour change.
+
+### Advising the user
+
+The user is usually not an architect. When a row below fires — while they describe a new agent, a new capability or a change — **recommend** the pattern with its reason and its cost, then confirm with the recommended option first. Recommend nothing whose trigger has not fired, and write each decision (declined ones too) into that agent's `docs/AGENT_DEVELOPMENT.md`. Section numbers refer to `context/local-kit/guides/13-design-patterns.md`.
+
+<!-- Copied from local-kit guides/13-design-patterns.md §0 — keep the table rows identical. -->
+
+| When you notice… | Recommend… (pattern) |
+|---|---|
+| a credential whose reach exceeds what the agent needs | a producer agent-api in front of it, even if private (§3) |
+| the model would add, subtract, compare or derive dates/numbers | move the figure into the script/producer payload (§4) |
+| ≥ 2 distinct kinds of question, or wording that must change without redeploy | skills + routing table (§1) |
+| a second audience, schedule or credential set | a second agent, not a bigger prompt (§2) |
+| a send / create / sign / post | confirmation gate + `--dry-run` + audit log + idempotency key (§6) |
+| "remember what was sent", retries, polling, a queue | SQLite under `app-data/storage/` (§5) |
+| the agent runs unattended | `script_trigger` with the OK contract + `STATUS.md` (§7) |
+| the agent will serve other people | `docs/test_scenarios/` before the first hand-over (§9) |
+| a prompt/skill/model/provider change | re-run the scenario set (§9) |
+| conversation latency or cost matters | keep §4/§1, then try the smaller conversation model (§10) |
+| the user's answer contradicts the recommendation | say the trade-off once, then build what they chose |
+
+**Model per mode (§10).** Building needs a strong model; conversation usually runs well on a small, fast tier once scripts pre-compute every figure (§4) and skills load on demand (§1). The gate is the scenario set (§9): switch the conversation model, re-run the scenarios with `cinna chat`, and keep the switch only if they pass. No `cinna` verb sets the model yet, and the raw call has a trap. Find the environment (`cinna api GET agents/<id>` → `active_environment_id`), read its current settings (`cinna api GET environments/<env_id>`), then send **both** modes' settings copied from that response — `agent_sdk_conversation`, `agent_sdk_building`, `model_override_conversation`, `model_override_building`, `use_default_ai_credentials`, `conversation_ai_credential_id`, `building_ai_credential_id` — with only the conversation model changed: `cinna api POST environments/<env_id>/reconfigure --data @reconfigure.json`. A field left out is reset, and the call rebuilds the environment, which takes minutes. The user can make the same change on the agent's page under **Environments**.
 
 ## Etiquette
 
