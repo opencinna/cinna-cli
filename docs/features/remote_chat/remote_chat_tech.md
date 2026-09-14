@@ -78,8 +78,10 @@ refuses `--attach` together with `--show`, and either with a message, `--resume`
     advance `consumed`; **stop at the first** message flagged
     `message_metadata.streaming_in_progress` (emit a one-shot `status: working`).
   - `get_streaming_status()` → `is_streaming`. Settle when `turn_started and not
-    streaming and not in_progress` → `completed`. A changed, non-null
-    `stream_info` is passed through as a `status: streaming` event.
+    streaming and not in_progress` → `completed`. A non-null `stream_info` is
+    passed through as a `status: streaming` event when it changed — compared
+    without `_TICKING_STREAM_INFO` (`duration_seconds`, which the platform
+    advances on every poll, so comparing it printed one status line per poll).
   - `turn_started` flips on the first non-user message or `is_streaming` true;
     `expect_turn` seeds it (no expected turn ⇒ already started).
   - `START_GRACE_SECONDS` (120) bounds time-to-start (emit `warning`, return

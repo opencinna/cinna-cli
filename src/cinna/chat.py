@@ -57,6 +57,10 @@ DEFAULT_DOWNLOAD_DIR = "cinna-chat-files"
 # inside the --timeout budget instead of aborting the command.
 _POLL_RETRY_DELAYS = (2.0, 4.0, 8.0, 15.0, 30.0)
 
+# ``stream_info`` fields that change on every poll without saying anything new
+# about the turn — the platform reports the turn's running time.
+_TICKING_STREAM_INFO = ("duration_seconds",)
+
 
 class _Emitter:
     """Render chat events: NDJSON to stdout by default, Rich when ``pretty``.
@@ -571,8 +575,15 @@ def _poll_turn(
         # Whatever the platform says about the running turn (phase, current
         # tool, …) is passed through when it changes — it is the only signal
         # that tells "waiting for the environment" from "the model is working".
+        # A field that ticks on every poll is left out of the comparison, or
+        # each poll would print a status line that says nothing new.
         stream_info = stream.get("stream_info")
-        if stream_info and stream_info != last_stream_info:
+        info_key = (
+            {k: v for k, v in stream_info.items() if k not in _TICKING_STREAM_INFO}
+            if isinstance(stream_info, dict)
+            else stream_info
+        )
+        if stream_info and info_key != last_stream_info:
             emit.emit(
                 {
                     "event": "status",
@@ -581,7 +592,7 @@ def _poll_turn(
                     "stream_info": stream_info,
                 }
             )
-        last_stream_info = stream_info
+        last_stream_info = info_key
 
         # Settled: the turn ran and nothing is in flight any more.
         if turn_started and not streaming and not in_progress:

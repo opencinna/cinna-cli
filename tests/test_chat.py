@@ -609,6 +609,44 @@ def test_chat_that_loses_contact_names_the_session_and_the_attach_command(
     assert "cinna chat --attach sess-1" in result.output
 
 
+class TickingStreamInfoClient(FakeStreamingClient):
+    """A streaming turn whose ``stream_info`` differs per poll only in its
+    running time, as the platform reports it."""
+
+    def get_streaming_status(self, session_id):
+        if self.poll_count >= 3:
+            return {"is_streaming": False, "stream_info": None}
+        return {
+            "is_streaming": True,
+            "stream_info": {
+                "started_at": "2026-06-22T00:00:00Z",
+                "duration_seconds": self.poll_count * 2.1,
+                "is_completed": False,
+            },
+        }
+
+
+def test_chat_prints_a_status_only_when_the_turn_state_changes(
+    runner, account_root, monkeypatch
+):
+    """`duration_seconds` ticks on every poll; comparing it printed one status
+    line per poll — about 300 for a ten-minute turn."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setattr("cinna.chat.time.sleep", lambda s: None)
+    fake = TickingStreamInfoClient()
+    monkeypatch.setattr("cinna.chat.AccountClient", lambda cfg: fake)
+
+    result = runner.invoke(cli, ["chat", "--agent", "CRM Agent", "Hello!"])
+    assert result.exit_code == 0, result.output
+
+    statuses = [
+        e for e in _ndjson(result.output)
+        if e["event"] == "status" and e.get("state") == "streaming"
+    ]
+    assert len(statuses) == 1
+    assert statuses[0]["stream_info"]["duration_seconds"] == 2.1
+
+
 def test_chat_attach_waits_for_the_turn_without_sending(runner, account_root, monkeypatch):
     monkeypatch.chdir(account_root)
     fake = ExistingSessionClient()
