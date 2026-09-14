@@ -16,10 +16,14 @@ drops cleanly into scripts and CI-style checks.
   **not** ship code — it only runs a command against whatever the container
   currently holds. So the usual loop is: edit a file → let live-sync mirror it →
   `cinna exec` to run it. If a change hasn't synced yet, exec runs the old copy.
-- **Remote working directory.** Commands start at the container's app root
-  (`/app`); <!-- nocheck: container path --> the synced workspace sits under
-  `workspace/` (`/app/workspace`). <!-- nocheck: container path --> Reference
-  files relative to that, e.g. `cinna exec python workspace/scripts/main.py`.
+- **Remote working directory.** Commands start in the synced workspace
+  (`/app/workspace`), <!-- nocheck: container path --> the directory schedules
+  run in, so a path reads the way it does locally under `workspace/`, e.g.
+  `cinna exec python scripts/main.py` or
+  `cinna exec python skills/<name>/scripts/run.py`. `--cwd /app`
+  <!-- nocheck: container path --> starts at the container's app root instead.
+  The command must be a program, not a shell builtin (`cd`, `export`) — it
+  replaces the shell that changed directory.
 - **One shot, no stdin.** Each `cinna exec` is a single non-interactive command:
   it streams stdout/stderr back and ends with an exit code. There is no
   interactive stdin — REPLs, debuggers, and prompts that wait for input are out
@@ -46,6 +50,8 @@ drops cleanly into scripts and CI-style checks.
    `cinna agent sync <agent>` first.
 
 ### Bound a long command / abort it
+- `cinna exec --cwd DIR <command…>` starts the command in `DIR` instead of the
+  workspace (`--cwd /app` for the app root). <!-- nocheck: container path -->
 - `cinna exec --timeout N <command…>` caps the remote wall-clock run time
   (seconds). On expiry the platform kills the remote process.
 - Press **Ctrl+C** to abort: the stream closes, the platform cleans up the remote

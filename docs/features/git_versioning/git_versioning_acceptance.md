@@ -85,9 +85,9 @@ linking, layout, the registry, or push/pull — that's where the subtle bugs liv
   ```
   printf 'print("marker-v1")\n' > <ws>/workspace/scripts/smoke.py
   cinna sync push --agent <slug>
-  cinna exec --agent <slug> python workspace/scripts/smoke.py
+  cinna exec --agent <slug> python scripts/smoke.py
   ```
-- **Expected:** exec prints `marker-v1`. (Exec cwd is `/app`; the workspace is at
+- **Expected:** exec prints `marker-v1`. (Exec cwd is the workspace,
   `/app/workspace`.)
 - **Watch for:** the file not syncing (still parked behind conflicts); exec
   quoting pitfalls — pass the command as separate tokens, not one quoted string.
@@ -115,7 +115,7 @@ linking, layout, the registry, or push/pull — that's where the subtle bugs liv
 - **Steps:** commit a `v2`, then
   ```
   cinna git checkout HEAD~1 --reload
-  cinna exec --agent <slug> python workspace/scripts/smoke.py
+  cinna exec --agent <slug> python scripts/smoke.py
   ```
 - **Expected:** local `smoke.py` reverts to `v1` content **uncommitted**; the exec
   prints `marker-v1` (the env now runs the old version). HEAD is unchanged.

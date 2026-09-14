@@ -24,8 +24,8 @@ failure modes.
 - `git` and `mutagen` on `PATH` (for the edit → sync → exec loop).
 
 > Run `cinna exec` from inside the agent's workspace dir, or from the account
-> root with `--agent <slug>`. The remote cwd is the container app root; the
-> synced workspace is under `workspace/`.
+> root with `--agent <slug>`. The remote cwd is the synced workspace, so paths
+> read as they do locally under `workspace/`; `--cwd` starts elsewhere.
 
 ## Scenario catalog
 
@@ -100,7 +100,7 @@ failure modes.
   ```
   printf 'print("marker-v1")\n' > workspace/scripts/smoke.py
   cinna sync push                       # or rely on the live cinna dev loop
-  cinna exec python workspace/scripts/smoke.py
+  cinna exec python scripts/smoke.py
   ```
 - **Expected:** exec prints `marker-v1`.
 - **Watch for:** exec running a stale copy because the file hasn't synced yet
@@ -162,6 +162,23 @@ failure modes.
 - **Watch for:** the client aborting mid-run with a read/timeout error before the
   command finishes.
 
+### 11. The command starts in the workspace
+
+- **Goal:** workspace-relative paths work as the guides write them, and `--cwd`
+  moves the start.
+- **Steps:**
+  ```
+  cinna exec pwd
+  cinna exec --cwd /app pwd
+  cinna exec python skills/<name>/scripts/run.py    # an agent whose skill ships a script
+  ```
+- **Expected:** `/app/workspace`, then `/app`; the skill script runs.
+  <!-- nocheck: container path -->
+- **Watch for:** `can't open file '/app/skills/…'` — exec starting at the app root,
+  which is where the platform starts a command. A shell builtin as the command
+  (`cinna exec cd x`) fails with `exec: cd: not found`; that is expected — use
+  `sh -c`. <!-- nocheck: container path -->
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **Exit-code fidelity** — exec's exit code always reflects the remote outcome
@@ -177,7 +194,7 @@ failure modes.
 ## Cleanup
 
 - Remove any files the scenarios created in the container:
-  `cinna exec rm -f workspace/scripts/smoke.py` (and the same locally, then let
+  `cinna exec rm -f scripts/smoke.py` (and the same locally, then let
   sync mirror the deletion).
 - Delete local scratch files (`/tmp/exec.out`, `/tmp/exec.err`).
 - No registry or config cleanup is needed — exec leaves no local state behind.

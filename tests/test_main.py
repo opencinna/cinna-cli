@@ -253,7 +253,27 @@ def test_exec_command(mock_load, mock_find, mock_exec, runner, workspace_root, s
     result = runner.invoke(cli, ["exec", "python", "scripts/main.py"])
     assert result.exit_code == 0
     mock_exec.assert_called_once_with(
-        sample_config, "python scripts/main.py", timeout=1800
+        sample_config, "cd /app/workspace && exec python scripts/main.py", timeout=1800
+    )
+
+
+@patch("cinna.main._run_remote_exec")
+@patch("cinna.main.find_workspace_root")
+@patch("cinna.main.load_config")
+def test_exec_command_cwd_overrides_the_workspace(
+    mock_load, mock_find, mock_exec, runner, workspace_root, sample_config
+):
+    """The platform starts a command at /app, while every documented example
+    (`python scripts/main.py`, a skill's smoke test) is workspace-relative —
+    so exec starts in the workspace, and --cwd reaches anywhere else."""
+    mock_find.return_value = workspace_root
+    mock_load.return_value = sample_config
+    mock_exec.return_value = 0
+
+    result = runner.invoke(cli, ["exec", "--cwd", "/app/core dir", "ls", "-la"])
+    assert result.exit_code == 0
+    mock_exec.assert_called_once_with(
+        sample_config, "cd '/app/core dir' && exec ls -la", timeout=1800
     )
 
 
@@ -278,6 +298,7 @@ def test_exec_command_requotes_args(
     assert result.exit_code == 0
     mock_exec.assert_called_once_with(
         sample_config,
+        "cd /app/workspace && exec "
         """python -c 'import sys; print(sys.argv)' 'a b' '[{"x":"y z"}]'""",
         timeout=1800,
     )

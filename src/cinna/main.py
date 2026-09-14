@@ -2064,6 +2064,7 @@ def api_cmd(
 
 # ─── exec ──────────────────────────────────────────────────────────────────
 
+_REMOTE_WORKSPACE = "/app/workspace"
 
 @cli.command(name="exec", context_settings={"ignore_unknown_options": True})
 @click.option(
@@ -2080,17 +2081,30 @@ def api_cmd(
     default=None,
     help="Run against a synced agent from the account workspace (name, slug, or id).",
 )
+@click.option(
+    "--cwd",
+    default=_REMOTE_WORKSPACE,
+    show_default=True,
+    help="Remote working directory the command starts in.",
+)
 @click.argument("command", nargs=-1, required=True)
-def exec_cmd(timeout: int, agent_ref: str | None, command: tuple[str, ...]):
+def exec_cmd(timeout: int, agent_ref: str | None, cwd: str, command: tuple[str, ...]):
     """Run a command in the remote agent environment.
 
     Output streams back in real time via the platform. Exit code matches the
     remote process's exit code. Ctrl+C aborts the stream.
 
+    The command starts in the synced workspace (/app/workspace) — the same
+    directory schedules run in — so relative paths such as scripts/main.py or
+    skills/<name>/scripts/run.py name the files you edit locally. Pass
+    --cwd /app for the container's app root.
+
     Arguments are passed through transparently: each token you type is
     re-quoted (``shlex.quote``) before being sent, so spaces and shell
     metacharacters inside an argument survive the remote shell intact. Use
-    ordinary single-level quoting, exactly as for a local command.
+    ordinary single-level quoting, exactly as for a local command. The command
+    must be a program, not a shell builtin; for pipes, redirects or ``&&`` hand
+    a snippet to a shell: cinna exec sh -c 'a | b'.
 
     With ``--agent``, runs from an account workspace against the named synced
     agent (using that child workspace's own token). The agent must already be
@@ -2124,8 +2138,19 @@ def exec_cmd(timeout: int, agent_ref: str | None, command: tuple[str, ...]):
         root = find_workspace_root()
         config = load_config(root)
 
-    exit_code = _run_remote_exec(config, shlex.join(command), timeout=timeout)
+    exit_code = _run_remote_exec(config, _remote_command(cwd, command), timeout=timeout)
     sys.exit(exit_code)
+
+
+def _remote_command(cwd: str, command: tuple[str, ...]) -> str:
+    """The shell string that runs ``command`` from ``cwd`` in the container.
+
+    The platform starts every command at the app root (``/app``), while the
+    workspace is where the scripts live. ``exec`` keeps the command itself as
+    the process the platform started: an interrupt terminates that process
+    only, and would otherwise stop the shell and orphan the command.
+    """
+    return f"cd {shlex.quote(cwd)} && exec {shlex.join(command)}"
 
 
 def _run_remote_exec(config, command_str: str, timeout: int = 1800) -> int:

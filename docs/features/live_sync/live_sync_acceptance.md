@@ -50,10 +50,10 @@ session lifecycle, or resolution — that's where the subtle bugs live.
   ```
   printf 'print("live-v1")\n' > workspace/scripts/smoke.py
   cinna sync push                     # block until settled
-  cinna exec python workspace/scripts/smoke.py
+  cinna exec python scripts/smoke.py
   ```
 - **Expected:** `cinna sync push` reports "Sync settled (connected)."; exec prints
-  `live-v1`. (Exec cwd is `/app`; the workspace is at `/app/workspace`.)
+  `live-v1`. (Exec cwd is the workspace, `/app/workspace`.)
 - **Watch for:** the file not present in the container (flush returned before settle);
   push hanging instead of blocking-then-exiting.
 
@@ -132,7 +132,7 @@ session lifecycle, or resolution — that's where the subtle bugs live.
   ```
   cinna sync resolve --prefer local
   cinna sync status
-  cinna exec cat workspace/scripts/both.py
+  cinna exec cat scripts/both.py
   ```
 - **Expected:** "Resolved 1 conflict(s) in favor of local"; conflict count back to 0;
   the container now holds `local-side`.

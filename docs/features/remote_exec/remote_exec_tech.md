@@ -80,7 +80,11 @@ collide.
   `{exec_id, tool_result_delta, done, interrupted, error}`. The canonical event
   table lives in the "Remote Exec" section of `docs/README.md`.
 - **Remote shell:** the platform executes `command` through `/bin/sh -c` in the
-  agent container (cwd = the container app root). The CLI relies on `shlex.join`
+  agent container (cwd = the container app root). The CLI therefore sends
+  `cd <--cwd> && exec <argv>` (`main.py:_remote_command`, `--cwd` defaulting to
+  the workspace): `exec` keeps the command as the process the platform started,
+  because an interrupt terminates that process only and would otherwise orphan
+  the command under a killed shell. The CLI relies on `shlex.join` / `shlex.quote`
   producing POSIX-sh-safe quoting so a single pass of `sh -c` reproduces the argv.
 - **HTTP transport:** `EXEC_STREAM_TIMEOUT = httpx.Timeout(None, connect=10.0)` —
   a 10 s connect bound but **no read timeout**, so a long-running but quiet

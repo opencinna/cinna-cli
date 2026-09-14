@@ -1345,7 +1345,7 @@ def test_exec_agent_resolves_child_token(
     config_arg, command_arg = mock_exec.call_args[0]
     assert config_arg.agent_id == "agent-123"
     assert config_arg.cli_token == "child-token-xyz"
-    assert command_arg == "python scripts/main.py"
+    assert command_arg == "cd /app/workspace && exec python scripts/main.py"
 
 
 @patch("cinna.main._run_remote_exec")

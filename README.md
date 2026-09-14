@@ -541,7 +541,7 @@ Inspect and drive the sync session. `status` / `conflicts` are read-only views (
 
 Stream a command through the platform to the remote agent environment. Output streams back live; Ctrl+C aborts. Exit code matches the remote process.
 
-The command runs with the **workspace root (`/app/workspace`) as its working directory**, so relative paths resolve against the synced workspace — e.g. `cinna exec python scripts/main.py` runs `/app/workspace/scripts/main.py` (the same cwd the scheduler uses). No need to prefix paths with `/app/workspace/`.
+The command runs with the **workspace root (`/app/workspace`) as its working directory**, so relative paths resolve against the synced workspace — e.g. `cinna exec python scripts/main.py` runs `/app/workspace/scripts/main.py` (the same cwd the scheduler uses). No need to prefix paths with `/app/workspace/`. `--cwd /app` starts at the container's app root instead. The command must be a program, not a shell builtin — hand pipes, redirects and `&&` to a shell: `cinna exec sh -c 'a | b'`.
 
 Arguments pass through transparently — each token is re-quoted before being sent, so spaces and shell metacharacters inside an argument survive intact. Use ordinary single-level quoting, exactly as for a local command. To run a shell snippet (pipes, redirects, `&&`), pass it to a shell explicitly: `cinna exec bash -c '…'`.
 
