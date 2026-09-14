@@ -22,10 +22,34 @@ import os
 import sys
 
 import click
-from rich.console import Console
+from rich.console import Console, ConsoleDimensions
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
-console = Console()
+# Rich sizes a Console that writes to a pipe at 80 columns — and a pipe is how a
+# coding agent runs the CLI, so ids, slots and model names wrapped mid-word.
+_PIPE_WIDTH = 160
+
+
+class _Console(Console):
+    """A Console that gives a pipe room for a table.
+
+    Only the fallback changes: a terminal keeps its real width, and ``COLUMNS``
+    or an explicit ``width`` still decide.
+    """
+
+    @property
+    def size(self) -> ConsoleDimensions:
+        dims = super().size
+        if self._width is None and "COLUMNS" not in self._environ and not self.is_terminal:
+            return ConsoleDimensions(max(dims.width, _PIPE_WIDTH), dims.height)
+        return dims
+
+    @size.setter
+    def size(self, new_size) -> None:
+        Console.size.fset(self, new_size)
+
+
+console = _Console()
 
 json_mode = False
 no_input = False
@@ -45,7 +69,7 @@ def set_json_mode(enabled: bool) -> None:
     _current_step = None
     # A quiet Console swallows every Rich print (tables, hints, panels) so the
     # stdout stream stays pure JSON; call sites keep using ``console.console``.
-    console = Console(quiet=True) if enabled else Console()
+    console = _Console(quiet=True) if enabled else _Console()
     if enabled:
         set_no_input(True)
 
