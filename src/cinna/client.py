@@ -899,6 +899,50 @@ class AccountClient:
         """POST /api/v1/sessions/{id}/messages/interrupt — stop the current turn."""
         return self._proxy_json("POST", f"sessions/{session_id}/messages/interrupt")
 
+    # --- Durable delegations (routed through the api-proxy) ---
+
+    def get_delegation_capabilities(self) -> dict:
+        """GET /api/v1/tasks/delegation-capabilities — ``{version, …}``.
+
+        Older servers answer 404/405; the caller turns that into a clean
+        "not supported" message.
+        """
+        return self._proxy_json("GET", "tasks/delegation-capabilities")
+
+    def create_delegated_task(self, body: dict) -> dict:
+        """POST /api/v1/tasks/ — create a task carrying ``delegation_metadata``."""
+        return self._proxy_json("POST", "tasks/", json_body=body)
+
+    def get_task_detail(self, task_id: str) -> dict:
+        """GET /api/v1/tasks/{id}/detail — task incl. ``delegation_result``."""
+        return self._proxy_json("GET", f"tasks/{task_id}/detail")
+
+    def put_delegation_result(self, task_id: str, body: dict) -> dict:
+        """PUT /api/v1/tasks/{id}/delegation-result — record a structured report."""
+        return self._proxy_json(
+            "PUT", f"tasks/{task_id}/delegation-result", json_body=body
+        )
+
+    def post_delegation_reply(self, task_id: str, result_id: str, message: str) -> dict:
+        """POST /api/v1/tasks/{id}/delegation-reply — answer one open question."""
+        return self._proxy_json(
+            "POST",
+            f"tasks/{task_id}/delegation-reply",
+            json_body={"result_id": result_id, "message": message},
+        )
+
+    @staticmethod
+    def error_detail(response: httpx.Response) -> str:
+        """The backend's ``detail`` for an error response, else the raw text.
+
+        Same extraction ``_handle_response`` uses, for callers that talk to a
+        route outside this client (the cloud executor's agent-token routes).
+        """
+        try:
+            return response.json().get("detail", response.text)
+        except Exception:
+            return response.text
+
     def download_file(self, file_id: str) -> httpx.Response:
         """GET /api/v1/files/{id}/download — raw bytes via the api-proxy.
 

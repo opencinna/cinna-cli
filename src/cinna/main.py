@@ -22,6 +22,7 @@ from cinna.config import (
     load_config,
     remove_agent_registry,
 )
+from cinna.delegation import delegation
 from cinna.errors import EXIT_ERROR, CinnaExit, NetworkError
 from cinna.mcp_proxy import run_mcp_proxy
 from cinna.mutagen_runtime import ensure_mutagen_ready
@@ -129,6 +130,15 @@ def cli(verbose: bool):
     from cinna.logging import setup_logging
 
     setup_logging(verbose=verbose)
+
+
+# ─── delegation ────────────────────────────────────────────────────────────
+
+# `--json` is attached here rather than in delegation.py: that module cannot
+# import `json_option` from this one without an import cycle.
+for _delegation_command in delegation.commands.values():
+    json_option(_delegation_command)
+cli.add_command(delegation)
 
 
 # ─── setup ─────────────────────────────────────────────────────────────────

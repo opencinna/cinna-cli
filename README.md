@@ -512,6 +512,27 @@ cinna chat --show 3fa85f64-5717-4562-b3fc-2c963f66afa6     # read a transcript
 
 The session id is printed in the first `session` event — capture it to drive a multi-turn conversation with `--resume`, or to re-attach with `--attach`.
 
+### `cinna delegation create | status | report | reply`
+
+Hand work to a remote agent as a **durable delegation** — a platform task with a stable identity that survives retries and carries structured results. Run from the account workspace. Every command first checks the server's delegation capability and refuses with "This server does not support durable delegations." when it is missing or not version 1.
+
+- `create --id KEY --target AGENT_UUID --title T --brief B [--execute]` — the identity is `--target` + `--id`: a retry with the same pair returns the original task (changed title/brief are ignored) and never launches execution twice (the backend deduplicates). Prints the backend **task id** the other commands take, and whether it executes. `--depth 2 --root ROOT` makes a sub-delegation (`--root` is required at depth 2, not allowed at depth 1); `--group` tags related work.
+- `status TASK_ID` — one read: state, latest result, and any open question with its result id. A requester agent should end its turn and let Cinna Desktop deliver the result rather than poll.
+- `report [TASK_ID] --status in_progress|blocked|done|failed --summary S` — `blocked` needs `--question`; `--audience user` when a human must decide (default `requester`). `--artifact` (repeatable) is a JSON object with non-empty `kind` (backend accepts `file` or `link`), `name` and an `http(s)` `ref` — upload local files separately. `--body` adds detail.
+- **Inside a cloud task**, omit `TASK_ID`: the report goes to the current task using `AGENT_AUTH_TOKEN`, `BACKEND_URL`, `ENV_ID` and the session in `CINNA_SESSION_CONTEXT_PATH` (default `./session_context.json`); the backend checks the session belongs to this environment's agent and owner.
+- `reply TASK_ID --result-id ID --message M` — answer a blocked question.
+- `--json` (after the subcommand) prints `{"result": "ok", "delegation": {…}}`.
+
+```bash
+cinna delegation create --id research-1 --target AGENT_UUID --title Research --brief 'Find the facts' --execute
+cinna delegation status TASK_ID
+cinna delegation report TASK_ID --status blocked --summary 'Choose a source' --question 'Which source?' --audience user
+cinna delegation reply TASK_ID --result-id RESULT_ID --message 'Use the primary source'
+cinna delegation report --status done --summary 'Finished'     # inside the cloud task
+```
+
+Inside cloud tasks, cinna-core's MCP task server also offers a `handover_report` tool for the same report.
+
 ### `cinna dev`
 
 Start a foreground dev session — creates / resumes the Mutagen sync session for this workspace and attaches the terminal to a two-tab TUI (status + raw Mutagen details). Ctrl-C terminates the session; sync does not outlive the TUI. To observe sync from another terminal without affecting it, use `cinna sync status`.
