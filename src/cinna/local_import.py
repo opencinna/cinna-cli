@@ -181,6 +181,16 @@ def load_manifest(source: Path) -> dict:
             raise click.ClickException(
                 f"{MANIFEST_FILENAME}: credential '{cred.get('name')}' needs a 'type'."
             )
+        # Contract 1.4.0: an optional explicit slot. Checked here because the
+        # agent already exists by the time the credential draft is created.
+        service_uri = cred.get("service_uri")
+        if service_uri is not None and (
+            not isinstance(service_uri, str) or not service_uri.strip()
+        ):
+            raise click.ClickException(
+                f"{MANIFEST_FILENAME}: credential '{cred['name']}' has a "
+                f"'service_uri' that is not a non-empty string."
+            )
 
     for sched in _manifest_list(data, "schedules"):
         if not isinstance(sched.get("name"), str) or not sched["name"].strip():

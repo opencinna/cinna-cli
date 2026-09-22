@@ -24,7 +24,10 @@ rather than compute it a different way. The safe direction is a property of the
 consequence, not a house style.
 
 Ported from cinna-core's ``docs/local_agent_kit/tools/kit.py``, which is the
-reference implementation, at contract version 1.0.0.
+reference implementation, at contract version 1.0.0; the offline fallbacks below
+are checked against contract 1.4.0 (cloud and local credential delivery), which
+changed nothing this module evaluates — ``credentials/`` was already excluded
+whole.
 """
 
 from __future__ import annotations
@@ -54,7 +57,7 @@ CONTRACT_VERSION_FILENAME = "CONTRACT_VERSION"
 
 #: The contract version this CLI implements. Only the MAJOR component is a
 #: compatibility question — see ``check_contract_compatibility``.
-SUPPORTED_CONTRACT_VERSION = "1.0.0"
+SUPPORTED_CONTRACT_VERSION = "1.4.0"
 
 
 # ── Offline fallbacks ───────────────────────────────────────────────────────

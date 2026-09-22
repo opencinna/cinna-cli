@@ -351,6 +351,36 @@ def test_load_manifest_refuses_bad_cron(tmp_path):
         load_manifest(src)
 
 
+@pytest.mark.parametrize("service_uri", ["", "   ", 42])
+def test_load_manifest_refuses_bad_credential_service_uri(tmp_path, service_uri):
+    creds = json.loads(json.dumps(MANIFEST["credentials"]))
+    creds[0]["service_uri"] = service_uri
+    src = make_local_agent(tmp_path, credentials=creds)
+    with pytest.raises(click.ClickException, match="service_uri"):
+        load_manifest(src)
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_import_passes_the_credential_slot_to_the_draft(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    """Contract 1.4.0 ``credentials[].service_uri`` is the slot the credential
+    reader matches on, so the draft must carry it."""
+    creds = json.loads(json.dumps(MANIFEST["credentials"]))
+    creds[0]["service_uri"] = "imap://billing"
+    make_kit(tmp_path)
+    src = make_local_agent(tmp_path, credentials=creds)
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert client.create_credential.call_args.kwargs["service_uri"] == "imap://billing"
+
+
 # --- the command -----------------------------------------------------------
 
 
@@ -1157,7 +1187,7 @@ def test_a_same_major_contract_passes_silently(
 
     result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
     assert result.exit_code == 0, result.output
-    assert "contract 1.4.2 runs on contract 1.0.0" in result.output
+    assert "contract 1.4.2 runs on contract 1.4.0" in result.output
     (entry,) = json.loads((src / "publications.json").read_text())["publications"]
     assert entry["contract_version"] == "1.4.2"
 

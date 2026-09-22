@@ -70,7 +70,10 @@ pragmatic subset `kit.py validate` checks:
 - `slug` matches `^[a-z0-9][a-z0-9-]{1,62}$` **and** equals the folder name.
 - `name` present, ≤ 255 chars; `description` a string when present.
 - `prompts` an object; `example_prompts` a list of strings.
-- Each credential has a non-empty `name` and `type`.
+- Each credential has a non-empty `name` and `type`, and a `service_uri`
+  (contract 1.4.0, optional) is a non-empty string when present. Checked here
+  rather than left to the platform because the agent already exists by the time
+  `_sync_credentials()` sends it — a 422 there is a half-applied import.
 - Each schedule has a name, a 5-field `cron_string`, a known `schedule_type`, and
   a `command` when it is a script schedule.
 
@@ -91,7 +94,30 @@ hosts read it — Cinna Desktop, cinna-core's `kit.py`, and this CLI — so the
 folder rules are data rather than prose each host re-derives.
 `src/cinna/kit_contract.py` is cinna-cli's reader and the port of the algorithms
 that must stay byte-identical across hosts. `SUPPORTED_CONTRACT_VERSION` names
-the contract version this build implements.
+the contract version this build implements — **1.4.0**. It is the tool half of
+the compatibility pair when no kit sits beside the agent, and it is the version
+named in the `DEGRADED —` `Exclusions:` line.
+
+### Contract 1.4.0 — what changed for this reader
+
+1.4.0 (cloud and local credential delivery) is additive for cinna-cli; the
+cross-repo checks below pass unchanged against cinna-core's 1.4.0 files.
+
+- `cloud_import_excludes` is unchanged in content: `credentials/` was already
+  excluded whole, and the notes now say why (the platform regenerates
+  `credentials/README.md` and feeds it to the cloud prompt). `DEFAULT_EXCLUDE`
+  and `DEFAULT_SECRET_FILE_RULES` equal the 1.4.0 lists.
+- `desktop_owned` shrank to a bare path list (the `contract_keys` block is
+  gone). This module does not read `desktop_owned`, so nothing depends on it.
+- The manifest schema gained an optional `credentials[].service_uri`;
+  `local_import.py:load_manifest()` validates it and
+  `local_import.py:_sync_credentials()` passes it to
+  `client.py:AccountClient.create_credential()`.
+- Credential values for a locally running agent come from cinna-core's
+  `/api/v1/external/credentials` routes (list, and a desktop-only
+  `materialize`), gated per credential by `allow_local_use`. Those are
+  desktop-JWT routes; `POST|PUT /api/v1/cli/account/credentials` do not accept
+  `allow_local_use` yet, so the CLI neither sends nor shows it.
 
 ### Finding it
 
@@ -293,7 +319,9 @@ failure warns and yields no file rather than aborting the import.
   absent + no `--update` → create.
 - **Credentials** — `list_credentials()` keyed by name; an existing name is only
   *attached* (`share_credential_with_agent`), never recreated, so re-runs cannot
-  produce a second empty draft that shadows the filled one.
+  produce a second empty draft that shadows the filled one. Its `service_uri`
+  is not compared or rewritten either — the manifest's slot applies to a new
+  draft only.
 - **Schedules** — `list_schedules()` keyed by name; existing + `--update` →
   `update_schedule`, existing without `--update` → left alone with a notice.
 - **Manifest settle** — `write_manifest()` runs after the confirmation and
@@ -386,4 +414,6 @@ against `publications.schema.json`.
 - `run_agent_sync` is called exactly once when no workspace exists yet;
 - `--no-push` and push-with-conflicts both leave the ledger unwritten;
 - `layout.json` supplying the exclude list while `credentials/` stays excluded;
+- a bad credential `service_uri` refused by `load_manifest()`, and a good one
+  reaching `create_credential()`;
 - `--workspace` / `--name` threading and verbatim `PlatformError` surfacing.

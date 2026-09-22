@@ -121,7 +121,8 @@ any change to the orchestrator.
 
 - **Steps:** in a scratch copy of the agent folder, one at a time: bump
   `schema_version` to `2`; rename the folder so it disagrees with `slug`; make
-  `cron_string` `"every morning"`; drop a credential's `type`.
+  `cron_string` `"every morning"`; drop a credential's `type`; set a
+  credential's `service_uri` to `""`.
 - **Expected:** each is refused *before* any platform call, with a message that
   names the offending field.
 - **Watch for:** a half-applied import (agent created, then the manifest
@@ -249,6 +250,25 @@ any change to the orchestrator.
   warns about a re-stamp and imports anyway.
 - **Watch for:** a warning on the same-major pair. That is the gate's shape, not
   a bug: anything an old reader must notice needs a major bump.
+
+### 10g. A credential slot reaches the draft (contract 1.4.0)
+
+- **Goal:** a manifest credential that names its slot gets a draft the agent's
+  credential reader can match, in the cloud and on the desktop.
+- **Setup:** a fresh agent whose manifest credential carries
+  `"service_uri": "imap://billing"` and whose name does **not** exist yet in the
+  account.
+- **Steps:**
+  ```bash
+  cinna agent import MyAgents/Local/<agent> --yes
+  cinna account credentials list
+  ```
+- **Expected:** the draft is listed with `imap://billing` in the **Slot** column; after it is filled
+  in the browser, `cinna skills list <agent>` (if a skill declares the slot)
+  shows it ready. Re-running with `--update` does not change the URI of the
+  existing credential.
+- **Watch for:** a draft created without the slot, so the reader falls back to
+  name matching; a second draft created because the slot differs.
 
 ### 11. Verification loop the guide promises
 

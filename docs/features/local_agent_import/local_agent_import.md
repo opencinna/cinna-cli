@@ -21,7 +21,9 @@ The kit's machine-readable half is a **versioned contract** (`layout.json`,
 `GET /api/agent-start/contract.tar.gz` with a cheap version poll at
 `GET /api/agent-start/contract/version`. cinna-cli reads the copy installed at
 `.cinna-kit/`; a shipped build should obtain it from those routes rather than
-vendoring one.
+vendoring one. This build implements contract **1.4.0** (cloud and local
+credential delivery); only the major decides compatibility, so any `1.x` folder
+imports.
 
 Nothing platform-side is new: the import replays the manifest through the
 existing account-scoped verbs (`agent create`, the bulk prompt write, `agent
@@ -57,6 +59,17 @@ sync`, `sync push`, `account credentials create`, `agent schedule create`,
   `.env.sample` and `.env.template` still travel. Credentials are created as
   **empty drafts** and the command prints the URLs the user opens to fill each
   one in the browser. No secret value is read, sent, or printed at any point.
+- **A credential spec can name its slot.** Since contract 1.4.0 a manifest
+  credential may carry `service_uri` — the slot the agent's credential reader
+  matches an attached credential on. The import passes it to the draft
+  unchanged; one that is not a non-empty string is refused with the other
+  manifest guards, before the agent is created.
+- **Using cloud credentials on the desktop is not an import concern.** A
+  locally running agent in Cinna Desktop gets credential values from the
+  platform's desktop delivery route, gated per credential by *allow local use*
+  for credentials shared with you (your own always qualify). That exchange is
+  between the platform and the desktop; `cinna agent import` never reads
+  credential values, and the CLI has no switch for *allow local use* yet.
 - **The ledger is a sibling file, never a manifest key.** Where an agent folder
   has been published is recorded in `publications.json` beside
   `cinna-agent.json` — one entry per Cinna instance. It has to be a separate
@@ -99,7 +112,8 @@ Each prints as `[n/9]`:
 6. **Push** — `cinna sync push` equivalent (skipped by `--no-push`).
 7. **Credentials** — one empty draft per spec, attached to the agent; an
    existing credential of the same name is attached rather than recreated.
-   Setup URLs are collected for the summary.
+   A spec's `service_uri` is set on a new draft; an existing credential keeps
+   its own. Setup URLs are collected for the summary.
 8. **Schedules** — one per spec, name-idempotent; `--update` rewrites an
    existing schedule in place.
 9. **Record** — add or update this instance's entry in `publications.json`
@@ -160,11 +174,12 @@ created are reused, not duplicated.
 | `schema_version` newer than supported | Refused with an upgrade hint — never half-read |
 | Folder built against a newer **major** contract version | Refused with an upgrade hint — a minor or patch difference is not a compatibility question and passes silently |
 | Folder records no `contract_version` | Warned and imported — every folder created before contract 1.0.0 is in that state |
+| A credential's `service_uri` is empty or not a string | Refused before any platform call, naming the credential |
 | Already imported to this instance, no `--update` | Refused, naming the agent id and where the link was recorded |
 | The recorded agent id is not among your agents | Refused — you are logged into a different platform, or the agent was deleted |
 | `--update` with several name matches | Refused, listing them; add the `publications.json` entry to disambiguate |
 | Push failed or left conflicts | Warned, **nothing recorded**, with the resolve + `--update` hint |
-| `.cinna-kit/layout.json` missing or unreadable | Imported with the built-in contract copy, the `Exclusions:` line marked `DEGRADED`, and **no `content_hash` recorded** — a hash over a file set another host would not select is worse than none |
+| `.cinna-kit/layout.json` missing or unreadable | Imported with the built-in copy of contract 1.4.0, the `Exclusions:` line marked `DEGRADED`, and **no `content_hash` recorded** — a hash over a file set another host would not select is worse than none |
 | A travelling file or directory cannot be read | Refused — a complete-looking export with a subtree missing from it is the one outcome worth stopping for |
 | `publications.json` unreadable | Refused, and the file is left exactly as it was |
 | Credential/schedule 403 | The platform error surfaces verbatim; earlier steps stay done and `--update` resumes |
