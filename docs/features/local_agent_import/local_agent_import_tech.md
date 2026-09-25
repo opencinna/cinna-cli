@@ -39,7 +39,7 @@ endpoint exists for this feature.
 
 | Step | Call |
 |------|------|
-| 2 | `list_account_agents()` (resolve) / `create_agent(name, description, user_workspace_id=…)` |
+| 2 | `list_account_agents()` (resolve) / `create_agent(name, description, user_workspace_id=…, engine=…)` — `engine` is in the body only when set |
 | 3 | `update_agent_config(agent_id, fields)` → `PUT agents/{id}` **through the api-proxy escape hatch**, then `set_status_refresh_command(agent_id, cmd)` |
 | 4 | `account.py:run_agent_sync(agent_id, None)` (mints the child token, provisions the workspace) — skipped when `resolve_child_workspace()` already finds one |
 | 6 | `sync_session.ensure_session()` + `sync_session.flush()` — the same pair `cinna sync push` uses |
@@ -77,6 +77,52 @@ pragmatic subset `kit.py validate` checks:
 - Each schedule has a name, a 5-field `cron_string`, a known `schedule_type`, and
   a `command` when it is a script schedule.
 
+`runtime` is **not** validated here — `read_runtime(manifest)` reads it
+tolerantly after the manifest loads, because its fields are additive minors
+that must never cost the import:
+
+- `runtime` not an object, or `runtime.engine` not a string → a
+  `console.warn` naming the type, and no engine is sent.
+- `runtime.engine` stripped; empty means absent. Otherwise sent raw — it is not
+  an enum, and the backend owns the mapping (`claude` → Claude Code, everything
+  it does not support → OpenCode, decision 4 of the 1.5.0 unification plan).
+- The fields the cloud import does not carry are returned as dotted paths, in
+  a fixed order: `runtime.model`, `runtime.complexity`, `runtime.credential`,
+  `runtime.permissions` (`_UNCARRIED_RUNTIME_KEYS`), then any unknown
+  `runtime.*` key sorted, then `handovers` — the whole list, when it is
+  non-empty, because this import sends no handover at all; naming only
+  `handovers[].target_kind` would imply the rest of a handover travels — then
+  `capabilities`, when any of its keys has a value (`x-import: ignored`). A
+  key whose value is `null` counts as absent.
+
+The engine reaches `_resolve_or_create_agent()` and is passed to
+`create_agent()` **only on the create branch**. An agent resolved by id or
+reattached by name keeps its engine: the id case says so in the step-1 `Engine:`
+line (`known_agent_id` is known before the plan prints). `--update` without a
+known id only learns at step 2 whether a name match exists, so its step-1 line
+is the undecided one, and step 2 prints either the kept line (name-matched
+resume) or the sent line (no match, agent created). The `Engine:` values,
+verbatim:
+
+```
+  Engine:      claude — sent as a preference (the cloud runs engines it does not support on OpenCode)
+  Engine:      claude — not applied: --update never changes an existing agent's engine
+  Engine:      claude — sent only if this import creates the agent; --update keeps the engine of an existing agent it finds by name
+  Engine:      not set — the cloud agent gets the platform's default
+  Not carried to the cloud: runtime.model, runtime.complexity, handovers
+```
+
+The last line is printed only when the list is non-empty. The warnings:
+
+```
+! cinna-agent.json: 'runtime' is not an object (str) — ignored; the cloud agent gets the platform's default engine.
+! cinna-agent.json: 'runtime.engine' is not a string (int) — ignored; the cloud agent gets the platform's default engine.
+```
+
+Sending `engine` to an older cinna-core is safe: `AccountAgentCreateBody` is a
+plain `SQLModel` with no `extra` setting, so pydantic's default (`ignore`)
+drops the unknown field and the agent is created with the default engine.
+
 Unknown keys are preserved: the dict is mutated and re-dumped, so a manifest
 written by a newer kit survives a round-trip through an older CLI.
 
@@ -94,9 +140,18 @@ hosts read it — Cinna Desktop, cinna-core's `kit.py`, and this CLI — so the
 folder rules are data rather than prose each host re-derives.
 `src/cinna/kit_contract.py` is cinna-cli's reader and the port of the algorithms
 that must stay byte-identical across hosts. `SUPPORTED_CONTRACT_VERSION` names
-the contract version this build implements — **1.4.0**. It is the tool half of
+the contract version this build implements — **1.5.0**. It is the tool half of
 the compatibility pair when no kit sits beside the agent, and it is the version
 named in the `DEGRADED —` `Exclusions:` line.
+
+### Contract 1.5.0 — what changed for this reader
+
+1.5.0 brings the desktop's `runtime.engine`, `runtime.complexity` and
+`handovers[].target_kind` into cinna-core's one manifest schema. Nothing this
+module evaluates changed — `cloud_import_excludes`, `secret_files` and the
+ledger schema are as in 1.4.0. The manifest side is `local_import.py`:
+`runtime.engine` now reaches the platform at creation, and the fields the cloud
+does not carry are printed (see *Manifest handling*).
 
 ### Contract 1.4.0 — what changed for this reader
 
@@ -344,7 +399,8 @@ failure warns and yields no file rather than aborting the import.
 
 `--dry-run` returns before the first `AccountClient` is constructed and before
 any local write: it prints the resolved plan (file list, credential drafts,
-schedules, create-vs-update) and stops. The test asserts the patched
+schedules, the `Engine:` and `Not carried to the cloud:` lines,
+create-vs-update) and stops. The test asserts the patched
 `AccountClient` class was never called at all.
 
 ## Tests
@@ -416,4 +472,15 @@ against `publications.schema.json`.
 - `layout.json` supplying the exclude list while `credentials/` stays excluded;
 - a bad credential `service_uri` refused by `load_manifest()`, and a good one
   reaching `create_credential()`;
-- `--workspace` / `--name` threading and verbatim `PlatformError` surfacing.
+- `--workspace` / `--name` threading and verbatim `PlatformError` surfacing;
+- contract 1.5.0 runtime: `read_runtime()` over absent, null, blank, unknown and
+  full `runtime` blocks and empty/non-empty `handovers`; the stripped engine
+  reaching `create_agent()`; the default-engine line; a non-object `runtime`
+  and a non-string engine warning without refusing; the exact
+  `Not carried to the cloud:` line on a real run and on `--dry-run`, with no
+  runtime field in the metadata write; `--update` by id and by name match
+  leaving the engine alone and saying so once, and saying nothing when the
+  manifest names no engine.
+
+`tests/test_client.py` asserts `create_agent()` puts `engine` in the body only
+when it is set.

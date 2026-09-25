@@ -25,9 +25,11 @@ consequence, not a house style.
 
 Ported from cinna-core's ``docs/local_agent_kit/tools/kit.py``, which is the
 reference implementation, at contract version 1.0.0; the offline fallbacks below
-are checked against contract 1.4.0 (cloud and local credential delivery), which
-changed nothing this module evaluates — ``credentials/`` was already excluded
-whole.
+are checked against contract 1.5.0. Neither 1.4.0 (cloud and local credential
+delivery — ``credentials/`` was already excluded whole) nor 1.5.0 (the
+``runtime.engine``/``runtime.complexity``/``handovers[].target_kind`` manifest
+fields brought into core's schema, read by :mod:`cinna.local_import`) changed
+anything this module evaluates.
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ CONTRACT_VERSION_FILENAME = "CONTRACT_VERSION"
 
 #: The contract version this CLI implements. Only the MAJOR component is a
 #: compatibility question — see ``check_contract_compatibility``.
-SUPPORTED_CONTRACT_VERSION = "1.4.0"
+SUPPORTED_CONTRACT_VERSION = "1.5.0"
 
 
 # ── Offline fallbacks ───────────────────────────────────────────────────────

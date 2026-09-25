@@ -21,9 +21,9 @@ The kit's machine-readable half is a **versioned contract** (`layout.json`,
 `GET /api/agent-start/contract.tar.gz` with a cheap version poll at
 `GET /api/agent-start/contract/version`. cinna-cli reads the copy installed at
 `.cinna-kit/`; a shipped build should obtain it from those routes rather than
-vendoring one. This build implements contract **1.4.0** (cloud and local
-credential delivery); only the major decides compatibility, so any `1.x` folder
-imports.
+vendoring one. This build implements contract **1.5.0** (`runtime.engine`,
+`runtime.complexity` and `handovers[].target_kind` in core's one schema); only
+the major decides compatibility, so any `1.x` folder imports.
 
 Nothing platform-side is new: the import replays the manifest through the
 existing account-scoped verbs (`agent create`, the bulk prompt write, `agent
@@ -64,6 +64,19 @@ sync`, `sync push`, `account credentials create`, `agent schedule create`,
   matches an attached credential on. The import passes it to the draft
   unchanged; one that is not a non-empty string is refused with the other
   manifest guards, before the agent is created.
+- **The engine is a preference, carried once.** A manifest's `runtime.engine`
+  (`opencode`, `claude`, `codex`, or a name this build has never heard of) is
+  sent to the platform when the agent is **created**, which maps it to the
+  environment's SDK and runs an engine it does not support on OpenCode — the
+  folder is never refused over it. `--update` never changes an existing agent's
+  engine. A `runtime` that is not an object, or an engine that is not a string,
+  costs a warning and nothing is sent.
+- **What the cloud does not carry is named, not dropped silently.** The other
+  `runtime` fields (`model`, `complexity`, `credential`, `permissions`, and any
+  key this build does not know) have no cloud counterpart, and the import
+  sends no `handovers` at all (not only the desktop's `target_kind`) and maps
+  `capabilities` onto nothing; the plan lists the ones present in one
+  `Not carried to the cloud:` line.
 - **Using cloud credentials on the desktop is not an import concern.** A
   locally running agent in Cinna Desktop gets credential values from the
   platform's desktop delivery route, gated per credential by *allow local use*
@@ -96,10 +109,11 @@ Each prints as `[n/9]`:
    contract: refuse a folder built against a newer **major** contract version,
    warn on an older one or on a folder that records none, resolve the exclude
    list and the secret rules, plan the copy and compute the tree's
-   `content_hash`.
+   `content_hash`. Read `runtime` tolerantly and print the `Engine:` line and,
+   when any are present, the `Not carried to the cloud:` line.
 2. **Agent** — resolve by the `publications.json` entry for this instance
    (requires `--update`) or create a new agent in the active user workspace
-   (`--workspace` overrides).
+   (`--workspace` overrides), passing `runtime.engine` on creation only.
 3. **Prompts + metadata** — one bulk write carrying `description`,
    `router_trigger_prompt`, `example_prompts`, and the three document prompts
    read from the files named in `prompts`; then the status refresh command.
@@ -145,7 +159,11 @@ file that would be copied, every credential draft, every schedule — and makes
 `publications.json` entry whose `platform_url` matches the instance you are
 logged into (not by workspace, and not by position in the list), rewrites
 prompts and metadata, re-copies the tree, pushes, attaches existing credentials,
-and updates the schedules in place.
+and updates the schedules in place. The agent's engine is left as it is; when
+the manifest names one, the `Engine:` line says it was not applied. An
+`--update` with no known agent id cannot tell from the plan whether it will
+find the agent by name or create it, so the plan says the engine is sent only
+on creation, and the lookup then says which happened.
 
 ### Resume a partial import
 
@@ -175,11 +193,14 @@ created are reused, not duplicated.
 | Folder built against a newer **major** contract version | Refused with an upgrade hint — a minor or patch difference is not a compatibility question and passes silently |
 | Folder records no `contract_version` | Warned and imported — every folder created before contract 1.0.0 is in that state |
 | A credential's `service_uri` is empty or not a string | Refused before any platform call, naming the credential |
+| `runtime` is not an object, or `runtime.engine` is not a string | Warned and imported; no engine is sent, so the agent gets the platform default |
+| `runtime.engine` names an engine the cloud does not support | Imported; the platform runs the agent on OpenCode |
+| Older platform without the `engine` create field | Imported; the platform ignores the unknown field and the agent gets its default engine |
 | Already imported to this instance, no `--update` | Refused, naming the agent id and where the link was recorded |
 | The recorded agent id is not among your agents | Refused — you are logged into a different platform, or the agent was deleted |
 | `--update` with several name matches | Refused, listing them; add the `publications.json` entry to disambiguate |
 | Push failed or left conflicts | Warned, **nothing recorded**, with the resolve + `--update` hint |
-| `.cinna-kit/layout.json` missing or unreadable | Imported with the built-in copy of contract 1.4.0, the `Exclusions:` line marked `DEGRADED`, and **no `content_hash` recorded** — a hash over a file set another host would not select is worse than none |
+| `.cinna-kit/layout.json` missing or unreadable | Imported with the built-in copy of contract 1.5.0, the `Exclusions:` line marked `DEGRADED`, and **no `content_hash` recorded** — a hash over a file set another host would not select is worse than none |
 | A travelling file or directory cannot be read | Refused — a complete-looking export with a subtree missing from it is the one outcome worth stopping for |
 | `publications.json` unreadable | Refused, and the file is left exactly as it was |
 | Credential/schedule 403 | The platform error surfaces verbatim; earlier steps stay done and `--update` resumes |

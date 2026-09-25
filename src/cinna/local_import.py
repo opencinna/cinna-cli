@@ -227,6 +227,67 @@ def _manifest_list(data: dict, key: str) -> list[dict]:
     return value
 
 
+#: ``runtime.*`` keys the contract names that the cloud import does not carry
+#: (contract 1.5.0, ``x-import: ignored``), in the order they are reported.
+#: ``runtime.engine`` is the one runtime field that travels — at creation only.
+_UNCARRIED_RUNTIME_KEYS = ("model", "complexity", "credential", "permissions")
+
+
+def read_runtime(manifest: dict) -> tuple[str | None, list[str]]:
+    """``(engine to send, manifest fields the cloud does not carry)``.
+
+    Read tolerantly, never refused: ``runtime`` is optional and its fields are
+    additive minors, so a malformed value costs a warning and nothing is sent —
+    the cloud agent then gets the platform's default engine.
+
+    The engine is a *preference*, sent stripped and otherwise raw; the backend
+    owns the mapping (``claude`` → Claude Code, anything it does not support →
+    OpenCode). The not-carried list names every field present with a value that
+    this import drops on the floor, so the loss is printed rather than silent:
+    the known ``runtime`` keys, any ``runtime`` key this build does not know,
+    ``handovers`` — whole, because this import never sends a handover at all
+    (naming only ``target_kind`` would imply the rest of one travels) — and
+    ``capabilities``, which the import maps onto nothing.
+    """
+    not_carried: list[str] = []
+    engine: str | None = None
+
+    runtime = manifest.get("runtime")
+    if runtime is not None and not isinstance(runtime, dict):
+        console.warn(
+            f"{MANIFEST_FILENAME}: 'runtime' is not an object "
+            f"({type(runtime).__name__}) — ignored; the cloud agent gets the "
+            f"platform's default engine."
+        )
+    elif isinstance(runtime, dict):
+        raw = runtime.get("engine")
+        if isinstance(raw, str):
+            engine = raw.strip() or None
+        elif raw is not None:
+            console.warn(
+                f"{MANIFEST_FILENAME}: 'runtime.engine' is not a string "
+                f"({type(raw).__name__}) — ignored; the cloud agent gets the "
+                f"platform's default engine."
+            )
+        present = [k for k, v in runtime.items() if k != "engine" and v is not None]
+        not_carried += [f"runtime.{k}" for k in _UNCARRIED_RUNTIME_KEYS if k in present]
+        not_carried += [
+            f"runtime.{k}" for k in sorted(present) if k not in _UNCARRIED_RUNTIME_KEYS
+        ]
+
+    handovers = manifest.get("handovers")
+    if isinstance(handovers, list) and handovers:
+        not_carried.append("handovers")
+
+    capabilities = manifest.get("capabilities")
+    if isinstance(capabilities, dict) and any(
+        v is not None for v in capabilities.values()
+    ):
+        not_carried.append("capabilities")
+
+    return engine, not_carried
+
+
 def _schedule_type(sched: dict) -> str:
     raw = (sched.get("schedule_type") or "static_prompt").strip()
     resolved = _SCHEDULE_TYPE_ALIASES.get(raw)
@@ -686,6 +747,7 @@ def run_agent_import(
     description = manifest.get("description")
     credentials = _manifest_list(manifest, "credentials")
     schedules = _manifest_list(manifest, "schedules")
+    engine, not_carried = read_runtime(manifest)
     contract = load_export_contract(source)
     known_agent_id, known_from = resolve_known_agent_id(
         source, manifest, account_cfg.platform_url
@@ -717,6 +779,12 @@ def run_agent_import(
         )
     _line(f"  Credentials: {len(credentials)} draft(s)")
     _line(f"  Schedules:   {len(schedules)}")
+    # Without a known id, --update decides create-or-reattach only when it
+    # looks the agent up by name, so the plan cannot say which yet.
+    existing = True if known_agent_id else (None if update else False)
+    _line(f"  Engine:      {_engine_line(engine, existing)}")
+    if not_carried:
+        _line(f"  Not carried to the cloud: {', '.join(not_carried)}")
 
     if dry_run:
         console.console.print()
@@ -789,6 +857,7 @@ def run_agent_import(
             known_agent_id=known_agent_id,
             update=update,
             user_workspace_id=user_workspace_id,
+            engine=engine,
         )
         agent_id = agent["id"]
 
@@ -900,11 +969,17 @@ def _resolve_or_create_agent(
     known_agent_id: str | None,
     update: bool,
     user_workspace_id: str | None,
+    engine: str | None = None,
 ) -> dict:
     """Return the cloud agent record, creating it when this is a first import.
 
     Resolution is by id whenever the manifest carries one — a duplicate display
     name on the platform must never make the import write into the wrong agent.
+
+    ``engine`` reaches the platform only on creation. An existing agent keeps
+    its engine: the id-resolved case already said so in the plan. For --update
+    without an id the plan could not know, so the outcome is said here —
+    kept on a name-matched resume, sent when no agent matched.
     """
     if known_agent_id:
         items = client.list_account_agents().get("data", [])
@@ -935,6 +1010,8 @@ def _resolve_or_create_agent(
                 f"  Reusing existing agent {matches[0].get('name')} "
                 f"({matches[0].get('id')})."
             )
+            if engine:
+                _line(f"  Engine:      {_engine_line(engine, existing=True)}")
             return matches[0]
         if len(matches) > 1:
             rows = ", ".join(f"{a['name']} ({a['id']})" for a in matches)
@@ -944,10 +1021,33 @@ def _resolve_or_create_agent(
             )
 
     agent = client.create_agent(
-        agent_name, description, user_workspace_id=user_workspace_id
+        agent_name, description, user_workspace_id=user_workspace_id, engine=engine
     )
     _line(f"  Created agent {agent.get('name')} ({agent.get('id')}).")
+    if update and engine:
+        _line(f"  Engine:      {_engine_line(engine, existing=False)}")
     return agent
+
+
+def _engine_line(engine: str | None, existing: bool | None) -> str:
+    """The ``Engine:`` line's value — what the cloud will do with the preference.
+
+    ``existing`` is ``None`` when that is not known yet: --update without a
+    known id reattaches to an agent matched by name, or creates one.
+    """
+    if engine is None:
+        return "not set — the cloud agent gets the platform's default"
+    if existing is None:
+        return (
+            f"{engine} — sent only if this import creates the agent; "
+            f"--update keeps the engine of an existing agent it finds by name"
+        )
+    if existing:
+        return (
+            f"{engine} — not applied: --update never changes an existing "
+            f"agent's engine"
+        )
+    return f"{engine} — sent as a preference (the cloud runs engines it does not support on OpenCode)"
 
 
 def _write_prompts_and_metadata(

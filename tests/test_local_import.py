@@ -401,7 +401,7 @@ def test_import_happy_path(
 
     # 1. agent created in the account's active workspace
     client.create_agent.assert_called_once_with(
-        "Invoice Watcher", MANIFEST["description"], user_workspace_id=None
+        "Invoice Watcher", MANIFEST["description"], user_workspace_id=None, engine=None
     )
 
     # 2. one bulk prompt/metadata write carrying every field
@@ -775,7 +775,10 @@ def test_workspace_option_targets_a_user_workspace(
     )
     assert result.exit_code == 0, result.output
     client.create_agent.assert_called_once_with(
-        "Invoice Watcher", MANIFEST["description"], user_workspace_id="ws-1"
+        "Invoice Watcher",
+        MANIFEST["description"],
+        user_workspace_id="ws-1",
+        engine=None,
     )
     assert client.create_credential.call_args.kwargs["user_workspace_id"] == "ws-1"
 
@@ -1179,7 +1182,7 @@ def test_a_same_major_contract_passes_silently(
     notice needs a major bump.
     """
     make_kit(tmp_path)
-    src = make_local_agent(tmp_path, contract_version="1.4.2")
+    src = make_local_agent(tmp_path, contract_version="1.5.2")
     make_child_workspace(account_root)
     wire_client(mock_client_cls)
     wire_sync(mock_sync)
@@ -1187,9 +1190,9 @@ def test_a_same_major_contract_passes_silently(
 
     result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
     assert result.exit_code == 0, result.output
-    assert "contract 1.4.2 runs on contract 1.4.0" in result.output
+    assert "contract 1.5.2 runs on contract 1.5.0" in result.output
     (entry,) = json.loads((src / "publications.json").read_text())["publications"]
-    assert entry["contract_version"] == "1.4.2"
+    assert entry["contract_version"] == "1.5.2"
 
 
 @patch("cinna.local_import.sync_session")
@@ -1266,3 +1269,292 @@ def test_the_written_ledger_validates_against_the_real_schema(
     result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
     assert result.exit_code == 0, result.output
     jsonschema.validate(json.loads((src / "publications.json").read_text()), schema)
+
+
+# --- runtime.engine and the fields the cloud does not carry (contract 1.5.0) --
+
+
+ENGINE_NEW = "Engine:      claude — sent as a preference (the cloud runs engines it does not support on OpenCode)"
+ENGINE_KEPT = (
+    "Engine:      claude — not applied: --update never changes an existing "
+    "agent's engine"
+)
+ENGINE_UNDECIDED = (
+    "Engine:      claude — sent only if this import creates the agent; "
+    "--update keeps the engine of an existing agent it finds by name"
+)
+
+
+@pytest.mark.parametrize(
+    "overrides, engine, not_carried",
+    [
+        ({}, None, []),
+        ({"runtime": None}, None, []),
+        ({"runtime": {"engine": "  claude  "}}, "claude", []),
+        ({"runtime": {"engine": "   "}}, None, []),
+        # Not an enum: an engine this build has never heard of still travels.
+        ({"runtime": {"engine": "future-engine"}}, "future-engine", []),
+        (
+            {
+                "runtime": {
+                    "zeta": 1,
+                    "permissions": {"bash": "ask"},
+                    "engine": "codex",
+                    "credential": "anthropic",
+                    "complexity": "medium",
+                    "model": "claude-sonnet",
+                    "alpha": "x",
+                },
+                "handovers": [
+                    {"target_slug": "coordinator", "target_kind": "coordinator"}
+                ],
+            },
+            "codex",
+            [
+                "runtime.model",
+                "runtime.complexity",
+                "runtime.credential",
+                "runtime.permissions",
+                "runtime.alpha",
+                "runtime.zeta",
+                "handovers",
+            ],
+        ),
+        # A null value is an absent field — nothing to report as dropped.
+        ({"runtime": {"model": None, "engine": None}}, None, []),
+        # Handovers never travel at all, so the whole list is named — not
+        # just the desktop's target_kind.
+        ({"handovers": [{"target_slug": "billing-helper"}]}, None, ["handovers"]),
+        ({"handovers": []}, None, []),
+        # Capabilities are ignored by the import — named, like handovers.
+        ({"capabilities": {"webapp": True}}, None, ["capabilities"]),
+        ({"capabilities": {"webapp": None}}, None, []),
+        ({"capabilities": {}}, None, []),
+    ],
+)
+def test_read_runtime(overrides, engine, not_carried):
+    from cinna.local_import import read_runtime
+
+    manifest = {**json.loads(json.dumps(MANIFEST)), **overrides}
+    assert read_runtime(manifest) == (engine, not_carried)
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_import_sends_the_engine_on_creation(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    make_kit(tmp_path)
+    src = make_local_agent(tmp_path, runtime={"engine": " claude "})
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
+    assert result.exit_code == 0, result.output
+    client.create_agent.assert_called_once_with(
+        "Invoice Watcher", MANIFEST["description"], user_workspace_id=None, engine="claude"
+    )
+    assert ENGINE_NEW in result.output
+    assert "Not carried to the cloud" not in result.output
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_import_without_runtime_says_the_default_engine(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    make_kit(tmp_path)
+    src = make_local_agent(tmp_path)
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert client.create_agent.call_args.kwargs["engine"] is None
+    assert (
+        "Engine:      not set — the cloud agent gets the platform's default"
+        in result.output
+    )
+
+
+@pytest.mark.parametrize(
+    "runtime, warning",
+    [
+        ("claude", "'runtime' is not an object (str)"),
+        (["claude"], "'runtime' is not an object (list)"),
+        ({"engine": 3}, "'runtime.engine' is not a string (int)"),
+        ({"engine": {"name": "claude"}}, "'runtime.engine' is not a string (dict)"),
+    ],
+)
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_a_malformed_runtime_warns_and_never_refuses(
+    mock_client_cls,
+    mock_sync,
+    runtime,
+    warning,
+    runner,
+    account_root,
+    tmp_path,
+    monkeypatch,
+):
+    """Minor fields are additive: a bad `runtime` costs a warning, not the import."""
+    make_kit(tmp_path)
+    src = make_local_agent(tmp_path, runtime=runtime)
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert warning in result.output
+    assert client.create_agent.call_args.kwargs["engine"] is None
+
+
+FULL_RUNTIME = {
+    "engine": "claude",
+    "model": "claude-sonnet",
+    "complexity": "complex",
+    "credential": "anthropic",
+    "permissions": {"bash": "ask"},
+    "sandbox": "strict",
+}
+FULL_HANDOVERS = [
+    {"target_slug": "coordinator", "target_kind": "coordinator"},
+    {"target_slug": "billing-helper"},
+]
+NOT_CARRIED = (
+    "Not carried to the cloud: runtime.model, runtime.complexity, "
+    "runtime.credential, runtime.permissions, runtime.sandbox, "
+    "handovers"
+)
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_import_names_the_fields_it_does_not_carry(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    make_kit(tmp_path)
+    src = make_local_agent(tmp_path, runtime=FULL_RUNTIME, handovers=FULL_HANDOVERS)
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert NOT_CARRIED in result.output
+    assert result.output.count("Not carried to the cloud") == 1
+    assert client.create_agent.call_args.kwargs["engine"] == "claude"
+    # Nothing but the engine leaves through the API: no model override, no
+    # credential reference, no permissions in the metadata write.
+    (_, body) = client.update_agent_config.call_args.args
+    assert not {"model", "complexity", "credential", "permissions"} & set(body)
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_dry_run_shows_the_engine_and_the_uncarried_fields(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    src = make_local_agent(tmp_path, runtime=FULL_RUNTIME, handovers=FULL_HANDOVERS)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    mock_client_cls.assert_not_called()
+    assert ENGINE_NEW in result.output
+    assert NOT_CARRIED in result.output
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_update_by_id_does_not_change_the_engine(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    src = make_local_agent(
+        tmp_path,
+        runtime={"engine": "claude"},
+        cloud={
+            "platform_url": "https://platform.example.com",
+            "agent_id": AGENT_ID,
+            "imported_at": "2026-09-01T10:00:00+00:00",
+        },
+    )
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--update", "--yes"])
+    assert result.exit_code == 0, result.output
+    client.create_agent.assert_not_called()
+    assert result.output.count(ENGINE_KEPT) == 1
+    assert ENGINE_NEW not in result.output
+    (_, body) = client.update_agent_config.call_args.args
+    assert "engine" not in body
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_update_resuming_by_name_does_not_change_the_engine(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    """An import that died before the ledger entry: the agent is found by name."""
+    src = make_local_agent(tmp_path, runtime={"engine": "claude"})
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--update", "--yes"])
+    assert result.exit_code == 0, result.output
+    client.create_agent.assert_not_called()
+    # The plan cannot know yet; the lookup then says what happened. Never
+    # "sent" followed by "not applied" for the same run.
+    assert ENGINE_UNDECIDED in result.output
+    assert ENGINE_KEPT in result.output
+    assert ENGINE_NEW not in result.output
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_update_with_no_name_match_creates_and_sends_the_engine(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    """--update with no id and no agent of that name is a first import."""
+    src = make_local_agent(tmp_path, runtime={"engine": "claude"})
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    client.list_account_agents.return_value = {"data": []}
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--update", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert client.create_agent.call_args.kwargs["engine"] == "claude"
+    assert ENGINE_UNDECIDED in result.output
+    assert ENGINE_NEW in result.output
+    assert ENGINE_KEPT not in result.output
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_update_without_an_engine_says_nothing_about_keeping_it(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    src = make_local_agent(tmp_path)
+    make_child_workspace(account_root)
+    wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--update", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "not applied" not in result.output

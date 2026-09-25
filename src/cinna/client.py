@@ -318,6 +318,7 @@ class AccountClient:
         name: str,
         description: str | None = None,
         user_workspace_id: str | None = None,
+        engine: str | None = None,
     ) -> dict:
         """POST /api/v1/cli/account/agents — create an agent (thin client).
 
@@ -325,12 +326,20 @@ class AccountClient:
         (AI credentials, env template, environment creation) and returns the
         full agent record. ``user_workspace_id`` targets the account's active
         user workspace (``None`` = Default).
+
+        ``engine`` is a Local Agent Kit ``runtime.engine`` preference
+        (``opencode``, ``claude``, ``codex``, …), sent raw: the backend maps it
+        to the environment's SDK and runs an engine it does not support on
+        OpenCode. It is sent only when set — an older backend ignores the
+        unknown field, so sending it is backward compatible.
         """
         body: dict = {"name": name}
         if description is not None:
             body["description"] = description
         if user_workspace_id is not None:
             body["user_workspace_id"] = user_workspace_id
+        if engine is not None:
+            body["engine"] = engine
         response = self._client.post("/api/v1/cli/account/agents", json=body)
         return self._handle_response(response).json()
 

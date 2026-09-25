@@ -469,3 +469,18 @@ def test_a_bare_coded_body_is_still_a_coded_refusal(account_client):
         account_client.install_skill_on_agent("agent-123", "pkg-uuid")
     assert exc_info.value.code == "already_installed"
     assert "already added" in exc_info.value.detail
+
+
+@respx.mock
+@pytest.mark.parametrize("engine, sent", [(None, False), ("claude", True)])
+def test_create_agent_sends_the_engine_only_when_set(account_client, engine, sent):
+    """An older core ignores an unknown body field; a newer one maps it."""
+    route = respx.post("https://platform.example.com/api/v1/cli/account/agents").respond(
+        200, json={"id": "agent-1", "name": "Invoice Watcher"}
+    )
+
+    account_client.create_agent("Invoice Watcher", engine=engine)
+    body = json.loads(route.calls.last.request.content)
+    assert ("engine" in body) is sent
+    if sent:
+        assert body["engine"] == "claude"

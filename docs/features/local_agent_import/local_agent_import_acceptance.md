@@ -243,9 +243,9 @@ any change to the orchestrator.
 ### 10f. The `contract_version` gate
 
 - **Steps:** set the manifest's `contract_version` to `2.0.0` and import; then
-  to `1.4.2` and import; then remove the key entirely and import.
+  to `1.5.2` and import; then remove the key entirely and import.
 - **Expected:** `2.0.0` is refused before any platform call, naming `2.x`;
-  `1.4.2` passes **silently** (same major — a minor contract change is additive
+  `1.5.2` passes **silently** (same major — a minor contract change is additive
   by definition and reaches a non-adopting reader as silence); the missing key
   warns about a re-stamp and imports anyway.
 - **Watch for:** a warning on the same-major pair. That is the gate's shape, not
@@ -269,6 +269,28 @@ any change to the orchestrator.
   existing credential.
 - **Watch for:** a draft created without the slot, so the reader falls back to
   name matching; a second draft created because the slot differs.
+
+### 10h. The engine travels at creation, and nothing else from `runtime` (contract 1.5.0)
+
+- **Setup:** a fresh agent whose manifest carries
+  `"runtime": {"engine": "claude", "model": "claude-sonnet", "complexity": "medium"}`
+  and a handover with `"target_kind": "coordinator"`. Requires a cinna-core that
+  accepts `engine` on `POST /api/v1/cli/account/agents`.
+- **Steps:**
+  ```bash
+  cinna agent import MyAgents/Local/<agent> --dry-run
+  cinna agent import MyAgents/Local/<agent> --yes
+  cinna agent import MyAgents/Local/<agent> --update --yes
+  ```
+- **Expected:** both the dry run and the import print
+  `Engine:      claude — sent as a preference (the cloud runs engines it does not support on OpenCode)`
+  and `Not carried to the cloud: runtime.model, runtime.complexity, handovers`;
+  the new agent's environment runs on Claude Code. Set `"engine": "codex"` on a
+  fresh agent: it imports and runs on OpenCode. The `--update` run prints
+  `Engine:      claude — not applied: --update never changes an existing agent's engine`
+  and the environment is unchanged.
+- **Watch for:** the import refusing an unknown engine; the model override
+  changing; an older cinna-core rejecting the create (it should ignore `engine`).
 
 ### 11. Verification loop the guide promises
 
