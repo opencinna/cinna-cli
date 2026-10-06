@@ -258,6 +258,16 @@ def test_valid_artifact_passes_through(runner, platform):
     assert platform.calls_to("PUT", "tasks/task/delegation-result")[0]["json_body"]["artifacts"] == [artifact]
 
 
+def test_file_artifact_without_ref_passes_through(runner, platform):
+    """The protocol's name-only file artifact: a file the executor could not
+    upload is named, not refused — a link still needs its http(s) ref."""
+    platform.routes[("PUT", "tasks/task/delegation-result")] = (200, {"id": "result"})
+    artifact = {"kind": "file", "name": "out/report.pdf"}
+    result = runner.invoke(cli, ["delegation", "report", "task", "--status", "done", "--summary", "S", "--artifact", json.dumps(artifact)])
+    assert result.exit_code == 0, result.output
+    assert platform.calls_to("PUT", "tasks/task/delegation-result")[0]["json_body"]["artifacts"] == [artifact]
+
+
 # ─── cloud report (no TASK_ID) ──────────────────────────────────────────────
 
 

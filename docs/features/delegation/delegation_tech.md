@@ -122,8 +122,9 @@ Executor side — direct call, agent-token auth:
   belongs to this environment's agent and owner, and resolves the task from the
   session. Any 2xx is success.
 
-Related, not in this repo: cinna-core's cloud MCP task server exposes a
-`handover_report` tool for the same executor-side report.
+Related, not in this repo: cinna-core's `cinna` MCP server exposes a
+`tasks_report` tool for the same executor-side report (`handover_report` on
+environments built before protocol version 1).
 
 ## Edge cases & guardrails (preserve these)
 

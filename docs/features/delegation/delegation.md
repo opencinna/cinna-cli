@@ -152,9 +152,11 @@ result attached to the current task ──► delivered to the requester (Deskto
 - **Remote chat** — a delegated task runs as a platform session like the ones
   `cinna chat` drives. See [Remote Chat](../remote_chat/remote_chat.md).
 - **cinna-core task MCP server (not in this repo)** — inside cloud tasks the
-  backend's MCP task server exposes a `handover_report` tool that records the
-  same kind of result. It is implemented and documented in cinna-core; this CLI
-  only offers the equivalent command-line path.
+  backend's `cinna` MCP server exposes a `tasks_report` tool (the Cinna Task
+  Protocol, kit contract 1.6.0) that records the same kind of result; an
+  environment built before protocol version 1 still has it as `handover_report`
+  on the older `agent_task` server. It is implemented and documented in
+  cinna-core; this CLI only offers the equivalent command-line path.
 
 Implementation: see [delegation_tech.md](delegation_tech.md).
 Real-usage e2e scenarios: see [delegation_acceptance.md](delegation_acceptance.md).

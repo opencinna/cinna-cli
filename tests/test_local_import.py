@@ -1190,7 +1190,7 @@ def test_a_same_major_contract_passes_silently(
 
     result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
     assert result.exit_code == 0, result.output
-    assert "contract 1.5.2 runs on contract 1.5.0" in result.output
+    assert "contract 1.5.2 runs on contract 1.6.0" in result.output
     (entry,) = json.loads((src / "publications.json").read_text())["publications"]
     assert entry["contract_version"] == "1.5.2"
 

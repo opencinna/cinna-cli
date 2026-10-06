@@ -78,8 +78,13 @@ def _emit_json(result) -> bool:
 
 
 def _parse_artifacts(values: tuple[str, ...]) -> list[dict]:
-    """Each ``--artifact`` must be a JSON object with kind, name and an
-    HTTP(S) ``ref`` — the only kind of reference another agent can open."""
+    """Each ``--artifact`` must be a JSON object with ``kind`` and ``name``.
+
+    A ``link`` needs an HTTP(S) ``ref`` — the only kind of reference another
+    agent can open. A ``file`` may leave ``ref`` out (the Cinna Task Protocol's
+    name-only file artifact, kit contract 1.6.0); when it carries one it must be
+    HTTP(S) too, never a local path.
+    """
     artifacts = []
     for value in values:
         try:
@@ -90,9 +95,10 @@ def _parse_artifacts(values: tuple[str, ...]) -> list[dict]:
             raise click.BadParameter(
                 f"Not a JSON object: {value}", param_hint="--artifact"
             )
+        required = ("kind", "name") if artifact.get("kind") == "file" and "ref" not in artifact else ("kind", "name", "ref")
         missing = [
             key
-            for key in ("kind", "name", "ref")
+            for key in required
             if not isinstance(artifact.get(key), str) or not artifact[key].strip()
         ]
         if missing:
@@ -100,7 +106,7 @@ def _parse_artifacts(values: tuple[str, ...]) -> list[dict]:
                 f"Artifact needs non-empty string {', '.join(missing)}: {value}",
                 param_hint="--artifact",
             )
-        if urlparse(artifact["ref"]).scheme.lower() not in ("http", "https"):
+        if "ref" in artifact and urlparse(artifact["ref"]).scheme.lower() not in ("http", "https"):
             raise click.BadParameter(
                 "Artifact ref must be an http(s) URL (upload local files first): "
                 f"{artifact['ref']}",
@@ -311,7 +317,7 @@ def status(task_id):
 @click.option(
     "--artifact",
     multiple=True,
-    help='JSON object {"kind", "name", "ref"} with an http(s) ref; repeatable.',
+    help='JSON object {"kind", "name", "ref"} with an http(s) ref; a "file" may omit ref; repeatable.',
 )
 @click.option("--body", default="", help="The full result text.")
 def report(task_id, result_status, summary, question, audience, artifact, body):

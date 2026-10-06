@@ -59,7 +59,7 @@ CONTRACT_VERSION_FILENAME = "CONTRACT_VERSION"
 
 #: The contract version this CLI implements. Only the MAJOR component is a
 #: compatibility question — see ``check_contract_compatibility``.
-SUPPORTED_CONTRACT_VERSION = "1.5.0"
+SUPPORTED_CONTRACT_VERSION = "1.6.0"
 
 
 # ── Offline fallbacks ───────────────────────────────────────────────────────
