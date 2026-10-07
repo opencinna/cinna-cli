@@ -5685,16 +5685,31 @@ def test_skills_list_trusts_the_platforms_reason_for_a_catalog_install(
     mock_client_cls, runner, account_root, monkeypatch
 ):
     """For a catalog row the platform already computed readiness — the CLI
-    renders its reason and never second-guesses it with its own lookup."""
+    renders its reason. ``access_revoked`` is the one reason it looks behind
+    (a newer platform reports a dead issued key that way); with no dead key on
+    the slot the platform's reason stands."""
     row = _slot_skill_row(
         source="catalog", issues=[{"slot": "some-token.com", "reason": "access_revoked"}]
     )
     result, mock_client = _invoke_skills_list(
         mock_client_cls, runner, account_root, monkeypatch, _addons_with(row), _linked()
     )
-    mock_client.list_agent_credentials.assert_not_called()
     assert "access_revoked" in result.output
     assert "no longer shared" in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_list_never_looks_up_credentials_for_a_flagged_catalog_slot(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    row = _slot_skill_row(
+        source="catalog", issues=[{"slot": "some-token.com", "reason": "not_configured"}]
+    )
+    result, mock_client = _invoke_skills_list(
+        mock_client_cls, runner, account_root, monkeypatch, _addons_with(row), _linked()
+    )
+    mock_client.list_agent_credentials.assert_not_called()
+    assert "not_configured" in result.output
 
 
 @patch("cinna.account.AccountClient")
@@ -6523,3 +6538,268 @@ def test_account_client_reconfigure_environment_never_rebuilds_through_the_hatch
     body = json.loads(route.calls[0].request.content)
     assert (body["method"], body["path"]) == ("POST", "environments/env-1/reconfigure")
     assert body["json_body"] == {"model_override_conversation": "haiku", "rebuild": False}
+
+
+# --- issued API keys: credential status and slot readiness ---
+
+
+@pytest.mark.parametrize(
+    "key_status,label",
+    [
+        ("active", "Active"),
+        ("api_disabled", "API turned off by producer"),
+        ("external_access_paused", "External access paused"),
+        ("revoked_by_issuer", "Revoked by issuer"),
+        ("producer_removed", "Producer removed"),
+        ("issuer_removed", "Issuer account removed"),
+        ("expired", "Expired"),
+    ],
+)
+@patch("cinna.account.AccountClient")
+def test_credentials_list_shows_the_key_status(
+    mock_client_cls, runner, account_root, monkeypatch, key_status, label
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "300")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_credentials.return_value = {
+        "count": 1,
+        "data": [
+            {
+                "id": "cred-key",
+                "name": "Orders key",
+                "type": "agent_api",
+                "status": "complete",
+                "service_uri": "orders-api",
+                "agent_api_key_status": key_status,
+            }
+        ],
+    }
+    result = runner.invoke(cli, ["account", "credentials", "list"])
+    assert result.exit_code == 0, result.output
+    assert label in result.output
+
+
+@patch("cinna.account.AccountClient")
+def test_credentials_list_unknown_key_status_is_shown_raw(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "300")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_credentials.return_value = {
+        "count": 1,
+        "data": [
+            {
+                "id": "cred-key",
+                "name": "Orders key",
+                "type": "agent_api",
+                "status": "complete",
+                "service_uri": "orders-api",
+                "agent_api_key_status": "teleported",
+            }
+        ],
+    }
+    result = runner.invoke(cli, ["account", "credentials", "list"])
+    assert result.exit_code == 0, result.output
+    assert "teleported" in result.output
+
+
+def _key_cred(key_status, **extra):
+    cred = {
+        "id": "cred-key",
+        "name": "Orders key",
+        "type": "agent_api",
+        "service_uri": "orders-api",
+        "status": "complete",
+        "is_placeholder": False,
+    }
+    if key_status is not None:
+        cred["agent_api_key_status"] = key_status
+    cred.update(extra)
+    return cred
+
+
+_KEY_ADDON = {"source": "local", "name": "orders-skill"}
+_KEY_DECL = {"slot": "orders-api", "type": "agent_api"}
+
+
+@pytest.mark.parametrize(
+    "key_status,state",
+    [
+        (None, "ready"),
+        ("active", "ready"),
+        ("revoked_by_issuer", "key_revoked"),
+        ("producer_removed", "key_revoked"),
+        ("issuer_removed", "key_revoked"),
+        ("expired", "key_expired"),
+        ("api_disabled", "key_paused"),
+        ("external_access_paused", "key_paused"),
+        ("something_new", "key_unavailable"),
+    ],
+)
+def test_slot_readiness_reads_the_key_status(key_status, state):
+    from cinna.account import _slot_readiness
+
+    got, cred = _slot_readiness(_KEY_ADDON, _KEY_DECL, [_key_cred(key_status)])
+    assert got == state
+    assert cred["id"] == "cred-key"
+
+
+def test_slot_readiness_unfilled_key_is_not_configured_before_key_state():
+    from cinna.account import _slot_readiness
+
+    placeholder = _key_cred("revoked_by_issuer", is_placeholder=True)
+    got, _ = _slot_readiness(_KEY_ADDON, _KEY_DECL, [placeholder])
+    assert got == "not_configured"
+
+
+def test_slot_readiness_one_usable_key_wins_over_a_dead_one():
+    from cinna.account import _slot_readiness
+
+    dead = _key_cred("revoked_by_issuer", id="cred-dead")
+    live = _key_cred("active", id="cred-live")
+    got, cred = _slot_readiness(_KEY_ADDON, _KEY_DECL, [dead, live])
+    assert got == "ready"
+    assert cred["id"] == "cred-live"
+
+
+@pytest.mark.parametrize(
+    "state,needle",
+    [
+        ("key_revoked", "was revoked"),
+        ("key_expired", "has expired"),
+    ],
+)
+def test_slot_remedy_for_a_dead_key_names_the_reissue_command(state, needle):
+    from cinna.account import _slot_remedy
+
+    text = " ".join(
+        _slot_remedy(state, _KEY_DECL, _key_cred("expired"), [], "crm-agent")
+    )
+    assert needle in text
+    assert "Orders key" in text
+    # The default `<producer>-api` slot names its producer (review fix 6).
+    assert "cinna agent-api access issue orders --to me --service-uri orders-api" in text
+
+
+def test_slot_remedy_for_a_paused_key_says_it_recovers():
+    from cinna.account import _slot_remedy
+
+    text = " ".join(
+        _slot_remedy("key_paused", _KEY_DECL, _key_cred("api_disabled"), [], "crm-agent")
+    )
+    assert "recovers by itself" in text
+
+
+def test_slot_remedy_for_an_unknown_key_state_says_upgrade_the_cli():
+    from cinna.account import _slot_remedy
+
+    text = " ".join(
+        _slot_remedy("key_unavailable", _KEY_DECL, _key_cred("x"), [], "crm-agent")
+    )
+    assert "Upgrade the CLI" in text
+
+
+def test_slot_remedy_with_a_non_default_slot_keeps_the_producer_placeholder():
+    from cinna.account import _slot_remedy
+
+    decl = {"slot": "orders", "type": "agent_api"}
+    text = " ".join(_slot_remedy("key_revoked", decl, _key_cred("revoked_by_issuer"), [], "a"))
+    assert "cinna agent-api access issue <producer> --to me --service-uri orders" in text
+
+
+def test_agent_api_issue_hint_without_a_slot_leaves_out_service_uri():
+    from cinna.account import agent_api_issue_hint
+
+    assert agent_api_issue_hint(None) == "cinna agent-api access issue <producer> --to me"
+    assert agent_api_issue_hint("billing-api") == (
+        "cinna agent-api access issue billing --to me --service-uri billing-api"
+    )
+
+
+_CATALOG_KEY_ADDON = {
+    "source": "catalog",
+    "name": "orders-skill",
+    "skills": [{"credentials": [dict(_KEY_DECL)]}],
+}
+
+
+def test_slot_readiness_catalog_row_with_a_revoked_key_is_not_ready():
+    """The platform's catalog readiness ignores key status; the CLI does not."""
+    from cinna.account import _slot_readiness
+
+    dead = _key_cred("revoked_by_issuer")
+    state, cred = _slot_readiness(_CATALOG_KEY_ADDON, _KEY_DECL, [dead])
+    assert state == "key_revoked"
+    assert cred["id"] == "cred-key"
+
+
+def test_slot_readiness_catalog_row_with_one_live_key_is_ready():
+    from cinna.account import _slot_readiness
+
+    dead = _key_cred("revoked_by_issuer", id="cred-dead")
+    live = _key_cred("active", id="cred-live")
+    assert _slot_readiness(_CATALOG_KEY_ADDON, _KEY_DECL, [dead, live])[0] == "ready"
+    assert _slot_readiness(_CATALOG_KEY_ADDON, _KEY_DECL, None)[0] == "ready"
+
+
+def _flagged_addon(source="catalog"):
+    return {
+        "source": source,
+        "name": "orders-skill",
+        "skills": [{"credentials": [dict(_KEY_DECL)]}],
+        "credential_issues": [{"slot": "orders-api", "reason": "access_revoked"}],
+    }
+
+
+@pytest.mark.parametrize("source", ["catalog", "local"])
+@pytest.mark.parametrize(
+    "key_status,state",
+    [("revoked_by_issuer", "key_revoked"), ("external_access_paused", "key_paused")],
+)
+def test_platform_access_revoked_on_a_dead_key_reads_as_the_key_state(
+    source, key_status, state
+):
+    """A newer platform reports a dead or paused issued key as access_revoked;
+    the carrier's key status names the real fix."""
+    from cinna.account import _slot_readiness
+
+    got, cred = _slot_readiness(_flagged_addon(source), _KEY_DECL, [_key_cred(key_status)])
+    assert got == state
+    assert cred["id"] == "cred-key"
+
+
+@pytest.mark.parametrize(
+    "linked",
+    [
+        [_key_cred("active")],
+        [_key_cred(None, type="api_token")],
+        [],
+        None,
+    ],
+    ids=["active-key", "no-agent-api-carrier", "nothing-linked", "unreadable"],
+)
+def test_platform_access_revoked_stays_access_revoked_otherwise(linked):
+    from cinna.account import _slot_readiness
+
+    got, cred = _slot_readiness(_flagged_addon(), _KEY_DECL, linked)
+    assert got == "access_revoked"
+    assert cred is None
+
+
+def test_access_revoked_catalog_row_needs_the_linked_credentials():
+    from cinna.account import _needs_linked_credentials
+
+    assert _needs_linked_credentials({"addons": [_flagged_addon()]})
+
+
+def test_catalog_row_without_an_issue_needs_the_linked_credentials():
+    from cinna.account import _needs_linked_credentials
+
+    assert _needs_linked_credentials({"addons": [_CATALOG_KEY_ADDON]})
+    flagged = dict(
+        _CATALOG_KEY_ADDON,
+        credential_issues=[{"slot": "orders-api", "reason": "not_linked"}],
+    )
+    assert not _needs_linked_credentials({"addons": [flagged]})

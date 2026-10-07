@@ -449,6 +449,24 @@ Take a package out of the catalog. Agents that already installed it keep what th
 
 Put a delisted package back. `delist` has no inverse route of its own — without this verb the only way back would be `cinna api`, which would make delisting the one door in this group that opens only outwards.
 
+### `cinna agent-api access list | issue | revoke | scopes`
+
+Give people (or your own local agent) API access to a producer, from the account workspace. A key is issued to a **person** and lands in their credentials; **its value never appears in the CLI** — not on self-issue, not in `--json`. Reveal and rotate live on the web credential page, and so does the external-access switch (when it is off, `issue` is refused with the producer's Integrations URL). Writes need the `agent-developer` role.
+
+- `list <producer> [--all] [--json]` — people, their scopes and keys (prefix, status, expiry, last used, linked agents, id). Ended keys (revoked, expired, removed) are hidden unless `--all`; `--json` is always the full listing.
+- `issue <producer> --to <email|me> [--scopes a,b] [--expires-in-days N] [--service-uri SLOT] [--label TEXT] [--read-only] [--json]` — `--to` is required. `me` puts the key in your own credentials and prints the web URL where you reveal it; a local agent in Cinna Desktop calls it with `cinna_credentials.agent_api_session("<slot>")`, a cloud agent is wired with `cinna connect agent-api` instead.
+- `revoke <producer> <key> [--yes] [--json]` — `<key>` is the key id or the exact token prefix (an elided one is refused). Asks first; `--json` needs `--yes`; an already revoked key is reported, exit 0. The person's scopes stay.
+- `scopes <producer> --to <email|me> (--set a,b | --clear) [--json]` — change a grant without touching keys.
+
+```bash
+cinna agent-api access issue orders-agent --to me --service-uri orders-api
+cinna agent-api access issue orders-agent --to ana@example.com --scopes read --expires-in-days 30
+cinna agent-api access list orders-agent --all
+cinna agent-api access revoke orders-agent a1b2c3d4
+```
+
+`cinna account credentials list` shows an issued key's state in its Status column, and a skill slot filled by a revoked or expired key reads as not usable. `cinna agent import` does not draft `agent_api` credentials; it prints the `access issue` / `connect agent-api` command instead.
+
 ### `cinna connect agent-api --producer <agent> --consumer <agent> [--label TEXT] [--read-only]`
 
 Wire one agent to another's REST API from the account workspace. Resolves both agents (name, slug, or ID), mints a producer API token, and attaches it to the consumer as a credential — which rides the consumer's normal credential sync into its remote environment, so no key ever touches your machine. Prints the credential ID, token prefix, base URL, and spec URL. `--read-only` restricts the consumer to read-only access; `--label` names the credential. Backend errors surface verbatim: 400 if the producer's REST API is disabled, 403/404 for ownership violations.
@@ -471,7 +489,7 @@ Generic escape hatch into the platform API, authenticated with the account token
 
 - `--json '<obj>'` or `--data @file.json` supply a JSON request body (mutually exclusive); repeatable `--query k=v` supplies query parameters (repeating a key builds a list).
 - The inner response is passed through verbatim: the body prints to stdout (pretty-printed for JSON) and the exit code is `0` for 2xx and `1` for an inner 4xx/5xx — so it composes in shell pipelines.
-- When the escape hatch itself refuses the call, the detail prints to stderr and the exit code is `2`: policy denials (credentials, user management, admin, CLI, MFA/auth, and streaming routes are excluded — shown as `blocked by platform policy: …`), rate limiting (429, with the Retry-After delay), and request/response size caps (413/502).
+- When the escape hatch itself refuses the call, the detail prints to stderr and the exit code is `2`: policy denials (credentials, user management, admin, CLI, MFA/auth, and streaming routes are excluded, as are routes that would hand out a secret: any method on `agents/*/agent-api/keys…` (issued keys), on `environments/*/workspace/download` and `view-file`, and on `dashboards/*/blocks/*/env-file`; and POST on A2A access-tokens, MCP/ACP connector tokens, agent and task-trigger webhook create/regenerate-token. Paths are matched after percent-decoding. — shown as `blocked by platform policy: …`), rate limiting (429, with the Retry-After delay), and request/response size caps (413/502).
 
 `<path>` accepts the same **agent references** the rest of the CLI does: a segment straight after `agents/` that is not already a UUID is resolved against the account's agent listing, and the substitution is announced on stderr so a `--json` stdout stream stays pure. Resolution is sugar and never breaks the hatch — a reference that does not resolve (or an agent listing that cannot be reached) leaves the path exactly as typed, because `agents/` is a route prefix as well as a collection.
 

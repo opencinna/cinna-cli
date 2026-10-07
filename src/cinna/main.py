@@ -1472,7 +1472,8 @@ def agent_api():
     ``enable`` the API on a producer, author ``agent_api/*.py`` + ``policy.yaml``
     in its synced workspace, ``refresh`` to re-harvest the OpenAPI spec, and
     ``spec`` to read it back. Once verified, wire a consumer with
-    ``cinna connect agent-api``. Run from the account workspace.
+    ``cinna connect agent-api``. Give people (or a local agent) API access with
+    ``access``. Run from the account workspace.
     """
 
 
@@ -1565,6 +1566,128 @@ def agent_api_call(
     from cinna.account import run_agent_api_call
 
     run_agent_api_call(agent_ref, method, path, query_pairs, json_text)
+
+
+@agent_api.group(name="access")
+def agent_api_access():
+    """Give people API access to a producer: keys and scopes. Never prints a key value.
+
+    A key is issued to a *person* and lands in their credentials. Its value
+    never appears in the CLI — reveal and rotate live on the web credential
+    page. To wire a platform agent as a consumer use ``cinna connect agent-api``.
+    """
+
+
+def _access_json_mode(as_json: bool) -> None:
+    """A command-level ``--json`` also makes a refusal machine-readable.
+
+    Without this, ``--json`` only shaped the success payload: a refusal still
+    printed ``Error: <sentence>`` on stderr and the server's code
+    (``recipient_not_found``, ``external_access_disabled``, …) was lost. JSON
+    mode prints ``{"result": "error", "code": …, "detail": …}`` instead.
+    """
+    if as_json:
+        console.set_json_mode(True)
+
+
+@agent_api_access.command(name="list")
+@click.argument("producer_ref", metavar="PRODUCER")
+@click.option("--all", "show_all", is_flag=True, help="Also show ended keys (revoked, expired, removed).")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
+def agent_api_access_list(producer_ref: str, show_all: bool, as_json: bool):
+    """Who has API access to PRODUCER: their scopes and keys.
+
+    Ended keys are hidden unless ``--all``; ``--json`` is always the full
+    listing.
+    """
+    _access_json_mode(as_json)
+    from cinna.account import run_agent_api_access_list
+
+    run_agent_api_access_list(producer_ref, show_all=show_all, as_json=as_json)
+
+
+@agent_api_access.command(name="issue")
+@click.argument("producer_ref", metavar="PRODUCER")
+@click.option("--to", "to", required=True, metavar="EMAIL|me", help="Who gets the key: an email, or 'me'.")
+@click.option("--scopes", default=None, metavar="A,B", help="Set the person's scopes (comma-separated; \"\" = none).")
+@click.option("--expires-in-days", type=click.IntRange(1, 3650), default=None, help="Key lifetime in days (default: no expiry).")
+@click.option("--service-uri", default=None, metavar="SLOT", help="The credential's slot (default: <producer>-api).")
+@click.option("--label", default=None, help="A label for the key.")
+@click.option("--read-only", is_flag=True, help="Issue a read-only key.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def agent_api_access_issue(
+    producer_ref: str,
+    to: str,
+    scopes: str | None,
+    expires_in_days: int | None,
+    service_uri: str | None,
+    label: str | None,
+    read_only: bool,
+    as_json: bool,
+):
+    """Issue an API key for PRODUCER to a person (--to EMAIL or --to me).
+
+    The key lands in the recipient's credentials; its value is never shown
+    here. A key for yourself is revealed on the web credential page, and a
+    local agent calls it by its slot.
+
+    Examples:
+      cinna agent-api access issue orders-api --to me --service-uri orders-api
+      cinna agent-api access issue orders-api --to ana@example.com --scopes read
+    """
+    _access_json_mode(as_json)
+    from cinna.account import run_agent_api_access_issue
+
+    run_agent_api_access_issue(
+        producer_ref,
+        to,
+        scopes=scopes,
+        expires_in_days=expires_in_days,
+        service_uri=service_uri,
+        label=label,
+        read_only=read_only,
+        as_json=as_json,
+    )
+
+
+@agent_api_access.command(name="revoke")
+@click.argument("producer_ref", metavar="PRODUCER")
+@click.argument("key_ref", metavar="KEY")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def agent_api_access_revoke(producer_ref: str, key_ref: str, yes: bool, as_json: bool):
+    """Revoke KEY (key id or exact key prefix) on PRODUCER.
+
+    It stops working at once and cannot be restored; the person's scopes stay.
+    Asks first; ``--json`` requires ``--yes`` rather than assuming it.
+    """
+    _access_json_mode(as_json)
+    from cinna.account import run_agent_api_access_revoke
+
+    run_agent_api_access_revoke(producer_ref, key_ref, yes=yes, as_json=as_json)
+
+
+@agent_api_access.command(name="scopes")
+@click.argument("producer_ref", metavar="PRODUCER")
+@click.option("--to", "to", required=True, metavar="EMAIL|me", help="Whose scopes: an email, or 'me'.")
+@click.option("--set", "set_scopes", default=None, metavar="A,B", help="Set the scopes to exactly this list (\"\" = none).")
+@click.option("--clear", is_flag=True, help="Remove the person's grant.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON result.")
+def agent_api_access_scopes(
+    producer_ref: str, to: str, set_scopes: str | None, clear: bool, as_json: bool
+):
+    """Set (--set) or remove (--clear) a person's scopes on PRODUCER.
+
+    Changing scopes keeps their keys working — no revoke and reissue.
+    """
+    _access_json_mode(as_json)
+    if clear == (set_scopes is not None):
+        raise click.UsageError("Pass exactly one of --set or --clear.")
+    from cinna.account import run_agent_api_access_scopes
+
+    run_agent_api_access_scopes(
+        producer_ref, to, set_scopes=set_scopes, clear=clear, as_json=as_json
+    )
 
 
 # ─── skills group ──────────────────────────────────────────────────────────

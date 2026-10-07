@@ -55,6 +55,23 @@ def _coded_refusal(response: httpx.Response) -> CodedRefusal | None:
     )
 
 
+def drop_token(data):
+    """Remove every ``token`` field from an agent-api access payload.
+
+    The core never sends a key value on the account CLI routes; this is the
+    belt to that braces, applied to the top level and to every nested key
+    record, so no rendering or ``--json`` dump can carry one.
+    """
+    if isinstance(data, dict):
+        data.pop("token", None)
+        for value in data.values():
+            drop_token(value)
+    elif isinstance(data, list):
+        for item in data:
+            drop_token(item)
+    return data
+
+
 class PlatformClient:
     """HTTP client wrapping httpx with CLI token authentication."""
 
@@ -270,8 +287,16 @@ class AccountClient:
             follow_redirects=True,
         )
 
-    def _handle_response(self, response: httpx.Response) -> httpx.Response:
-        """Check response status, surfacing backend error details verbatim."""
+    def _handle_response(
+        self, response: httpx.Response, coded: bool = False
+    ) -> httpx.Response:
+        """Check response status, surfacing backend error details verbatim.
+
+        ``coded=True`` for a route that answers refusals as
+        ``{"detail": {"code", "message"}}``: such a refusal is raised as a
+        :class:`CodedRefusal` carrying the server's code and sentence; any other
+        error body falls through to the ordinary rendering.
+        """
         logger.debug(
             "%s %s -> %s (%d bytes)",
             response.request.method,
@@ -280,6 +305,10 @@ class AccountClient:
             len(response.content),
         )
         if response.status_code >= 400:
+            if coded and response.status_code != 401:
+                refusal = _coded_refusal(response)
+                if refusal is not None:
+                    raise refusal
             try:
                 detail = response.json().get("detail", response.text)
             except Exception:
@@ -534,6 +563,110 @@ class AccountClient:
             body["json_body"] = json_body
         response = self._client.post("/api/v1/cli/account/agent-api/call", json=body)
         return self._handle_response(response).json()
+
+    # --- Agent REST API access: issued keys and scopes ---
+    #
+    # No key value ever crosses these routes (the core strips it); the client
+    # still drops any ``token`` field defensively, and nothing here logs a
+    # response body.
+
+    _ACCESS_PREDATES = (
+        "This platform predates API access from the CLI "
+        "(needs cinna-core with issued keys)."
+    )
+
+    def _access_response(self, response: httpx.Response) -> dict:
+        """Shared handling for the four ``agent-api/access`` routes.
+
+        A bare ``{"detail": "Not Found"}`` 404 is FastAPI's unknown-route answer:
+        the platform is older than these routes, which deserves a sentence the
+        user can act on rather than "Not Found".
+        """
+        if response.status_code == 404:
+            try:
+                detail = response.json().get("detail")
+            except Exception:
+                detail = None
+            if detail == "Not Found":
+                raise PlatformError(404, self._ACCESS_PREDATES)
+        data = self._handle_response(response, coded=True).json()
+        return drop_token(data)
+
+    def list_agent_api_access(self, agent_id: str) -> dict:
+        """GET /api/v1/cli/account/agent-api/access — people, scopes and keys.
+
+        ``AccountAgentApiAccess``: ``data`` (one entry per person: ``user``,
+        ``grant_id``, ``scopes``, ``keys``), ``count``,
+        ``external_access_enabled``, ``identity_enabled``, ``scope_catalog``,
+        ``manage_url``. Terminal keys are included.
+        """
+        response = self._client.get(
+            "/api/v1/cli/account/agent-api/access",
+            params={"agent_id": agent_id},
+        )
+        return self._access_response(response)
+
+    def issue_agent_api_key(
+        self,
+        agent_id: str,
+        *,
+        issued_to_email: str | None = None,
+        scopes: list[str] | None = None,
+        expires_in_days: int | None = None,
+        service_uri: str | None = None,
+        label: str | None = None,
+        read_only: bool = False,
+    ) -> dict:
+        """POST /api/v1/cli/account/agent-api/keys — issue a key to a person.
+
+        ``issued_to_email`` ``None`` = the caller; ``scopes`` ``None`` leaves the
+        grant as is, ``[]`` sets an explicit empty grant. The response carries
+        the key's public fields plus ``service_uri``, ``issued_to_self``,
+        ``credential_url`` (self-issue only) and ``unknown_scopes`` — never the
+        key value (a stray ``token`` is dropped here regardless).
+        """
+        body: dict = {"agent_id": agent_id, "read_only": bool(read_only)}
+        for key, value in (
+            ("issued_to_email", issued_to_email),
+            ("scopes", scopes),
+            ("expires_in_days", expires_in_days),
+            ("service_uri", service_uri),
+            ("label", label),
+        ):
+            if value is not None:
+                body[key] = value
+        response = self._client.post("/api/v1/cli/account/agent-api/keys", json=body)
+        return self._access_response(response)
+
+    def revoke_agent_api_key(self, agent_id: str, key_id: str) -> dict:
+        """POST /api/v1/cli/account/agent-api/keys/revoke — revoke one key.
+
+        Idempotent: an already revoked key answers 200 with
+        ``status: "revoked_by_issuer"``. The person's grant is untouched.
+        """
+        response = self._client.post(
+            "/api/v1/cli/account/agent-api/keys/revoke",
+            json={"agent_id": agent_id, "key_id": key_id},
+        )
+        return self._access_response(response)
+
+    def set_agent_api_scopes(
+        self, agent_id: str, user_email: str | None, scopes: list[str] | None
+    ) -> dict:
+        """PUT /api/v1/cli/account/agent-api/access/scopes — set or clear a grant.
+
+        ``user_email`` ``None`` = the caller. A ``scopes`` list sets the grant
+        to exactly that list; ``None`` removes it. Answers
+        ``{entry, unknown_scopes}`` (``entry`` null when the person has neither
+        grant nor keys afterwards).
+        """
+        body: dict = {"agent_id": agent_id, "scopes": scopes}
+        if user_email is not None:
+            body["user_email"] = user_email
+        response = self._client.put(
+            "/api/v1/cli/account/agent-api/access/scopes", json=body
+        )
+        return self._access_response(response)
 
     def restart_agent_env(self, agent_id: str) -> dict:
         """POST /api/v1/cli/account/agents/{id}/restart-env — restart the env.

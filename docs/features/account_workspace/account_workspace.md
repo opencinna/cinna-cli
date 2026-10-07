@@ -156,7 +156,12 @@ each with its own token, registry entry, and Mutagen session.
   step; `--workspace` overrides the target workspace.
 - `cinna account credentials list` shows credentials with their type, **slot**,
   setup status (complete / needs setup, plus a placeholder marker) and full id —
-  metadata only. The slot is the credential's service URI: the non-secret id a
+  metadata only. For an issued Agent API key the Status cell shows the key's
+  state instead (Active; API turned off by producer / External access paused;
+  Revoked by issuer / Producer removed / Issuer account removed / Expired), and
+  `agent show` appends it when not active. A draft with `--type agent_api` is
+  refused by the platform: such a credential has no key behind it; use
+  `cinna agent-api access issue` (see [agent_api](../agent_api/agent_api.md)). The slot is the credential's service URI: the non-secret id a
   skill's `credentials:` block names and a script looks the credential up by, so
   it is the column that answers "which credential fills this skill's slot". The
   hint under the table names `cinna account credentials update <id> --service-uri

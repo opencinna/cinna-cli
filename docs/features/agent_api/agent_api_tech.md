@@ -13,10 +13,16 @@ talks to the platform through `AccountClient` with the account token.
   shared status renderer.
 - `src/cinna/client.py` — `AccountClient` methods that hit the account routes
   (`set_agent_api_enabled`, `refresh_agent_api`, `get_agent_api_spec`,
-  `call_agent_api`, `connect_agent_api`, `connect_mcp`, `api_proxy`).
+  `call_agent_api`, `connect_agent_api`, `connect_mcp`, `api_proxy`, and the
+  four access methods `list_agent_api_access`, `issue_agent_api_key`,
+  `revoke_agent_api_key`, `set_agent_api_scopes`) plus the `drop_token()` helper.
 - Tests: `tests/test_account.py` (enable/refresh/spec/call, connect agent-api,
   `cinna api` exit-code matrix, `api_proxy` client behavior),
-  `tests/test_client.py` (`AccountClient` route shapes).
+  `tests/test_client.py` (`AccountClient` route shapes, the access methods,
+  coded refusals, `drop_token`), `tests/test_agent_api_access.py` (the four
+  `access` verbs end to end against a mocked client), `tests/test_account.py`
+  (key status cells, slot readiness key states), `tests/test_local_import.py`
+  (`agent_api` spec skipped).
 
 ## Command surface
 
@@ -31,6 +37,16 @@ Each verb → its handler in `src/cinna/main.py` → the `run_*` in
   `src/cinna/account.py:run_agent_api_spec()`
 - `cinna agent-api call` → `src/cinna/main.py:agent_api_call()` →
   `src/cinna/account.py:run_agent_api_call()`
+- `cinna agent-api access list` → `src/cinna/main.py:agent_api_access_list()` →
+  `src/cinna/account.py:run_agent_api_access_list()`
+- `cinna agent-api access issue` → `src/cinna/main.py:agent_api_access_issue()` →
+  `src/cinna/account.py:run_agent_api_access_issue()` (`--to` required;
+  `--expires-in-days` is `click.IntRange(1, 3650)`)
+- `cinna agent-api access revoke` → `src/cinna/main.py:agent_api_access_revoke()` →
+  `src/cinna/account.py:run_agent_api_access_revoke()`
+- `cinna agent-api access scopes` → `src/cinna/main.py:agent_api_access_scopes()` →
+  `src/cinna/account.py:run_agent_api_access_scopes()` (exactly one of `--set` /
+  `--clear`, checked in the Click handler)
 - `cinna connect agent-api` → `src/cinna/main.py:connect_agent_api()` →
   `src/cinna/account.py:run_connect_agent_api()`
 - `cinna connect mcp` → `src/cinna/main.py:connect_mcp()` →
@@ -75,6 +91,49 @@ Each verb → its handler in `src/cinna/main.py` → the `run_*` in
   `client.api_proxy(method, path, query, json_body)`, then branches on the
   marker header (see below) to set the exit code.
 
+## Access verbs: key functions
+
+- `src/cinna/account.py:_access_recipient()` — `--to` as the request field:
+  `me` becomes a null email, blank is a usage error.
+- `src/cinna/account.py:_parse_scope_list()` — `a,b` to a list, `""` to an
+  explicit empty list, unset to `None` (leave the grant as is).
+- `src/cinna/main.py:_access_json_mode()` — each `access` command's own
+  `--json` also turns on console JSON mode, so a refusal prints the
+  `{"result": "error", "code", "detail", "http_status"}` line with the server's
+  code instead of a bare `Error: <sentence>`
+  (`tests/test_agent_api_access.py:test_json_refusal_carries_the_server_code`).
+- `src/cinna/account.py:run_agent_api_access_list()` — one row per person/key;
+  a grant-only person is one row with Key `—`; terminal keys filtered by
+  `_TERMINAL_KEY_STATUSES` unless `--all` with an "N ended keys hidden" footer;
+  `_print_access_footer()` prints external access on/off (warning plus
+  `manage_url` when off) and the scope catalog.
+- `src/cinna/account.py:run_agent_api_access_issue()` — catches a
+  `CodedRefusal` with code `external_access_disabled` and re-raises it with
+  `_manage_url()` appended only when the message has no `http` URL; self-issue
+  prints the slot, `credential_url` and the `cinna_credentials.agent_api_session`
+  hint, other-issue prints the revoke hint via `_agent_ref_for_hint()`;
+  `_warn_unknown_scopes()` warns, never refuses.
+- `src/cinna/account.py:_resolve_access_key()` — key id first, then exact
+  `token_prefix`, resolved against a fresh access listing; elided refs
+  (`_ELIDED_MARKERS`) are a usage error; none/several matches list candidates.
+- `src/cinna/account.py:run_agent_api_access_revoke()` — `_require_yes_for_json()`
+  first; already `revoked_by_issuer` returns without a call; other ended
+  statuses ask "revoke it anyway?"; confirmation declined aborts with no call.
+- `src/cinna/account.py:run_agent_api_access_scopes()` — `--clear` sends `None`;
+  prints the resulting scopes or "Grant removed".
+- `src/cinna/account.py:_KEY_STATUS_LABELS` / `_key_status_cell()` — the one
+  status-word table (green Active; yellow API turned off by producer / External
+  access paused; red Revoked by issuer / Producer removed / Issuer account
+  removed / Expired; unknown values printed raw and dim).
+- `src/cinna/account.py:_key_unavailable_state()`,
+  `agent_api_producer_from_slot()`, `agent_api_issue_hint()` — shared by slot
+  readiness and the importer; the hint derives the producer from a
+  `<producer>-api` slot (else `<producer>`) and omits `--service-uri` when there
+  is no slot.
+- `src/cinna/client.py:drop_token()` — recursively removes every `token` key
+  from a payload; applied by `AccountClient._access_response()` and again by
+  each runner.
+
 ## The escape hatch's exit-code logic (`run_api`)
 
 `src/cinna/account.py:run_api()` distinguishes three outcomes by the presence of
@@ -107,6 +166,22 @@ contract but has no exit-2 case (it returns the buffered
 - `call_agent_api(agent_id, method, path, query, json_body)` → `POST
   /api/v1/cli/account/agent-api/call`; owner-preview invocation, returns
   `{status_code, headers, body, is_json}`.
+- `list_agent_api_access(agent_id)` → `GET
+  /api/v1/cli/account/agent-api/access` (`agent_id` query param).
+- `issue_agent_api_key(agent_id, *, issued_to_email, scopes, expires_in_days,
+  service_uri, label, read_only)` → `POST /api/v1/cli/account/agent-api/keys`;
+  `None` fields are omitted from the body.
+- `revoke_agent_api_key(agent_id, key_id)` → `POST
+  /api/v1/cli/account/agent-api/keys/revoke`.
+- `set_agent_api_scopes(agent_id, user_email, scopes)` → `PUT
+  /api/v1/cli/account/agent-api/access/scopes`; `scopes` is always sent, as an
+  explicit `null` for `--clear` (core answers 422 if the field is omitted; null
+  removes the grant), `user_email` omitted for the caller.
+- All four go through `AccountClient._access_response()`: a bare
+  `{"detail": "Not Found"}` 404 becomes a `PlatformError` saying the platform
+  predates API access from the CLI; otherwise `_handle_response(coded=True)`
+  raises a `CodedRefusal` for a `{detail: {code, message}}` body (not for 401);
+  then `drop_token()`.
 - `connect_agent_api(producer_agent_id, consumer_agent_id, credential_label,
   read_only_override)` → `POST /api/v1/cli/account/connect/agent-api`.
 - `connect_mcp(connector_id, consumer_agent_id, …)` → `POST
@@ -126,12 +201,39 @@ All under `/api/v1/cli/account/*`, account-token auth:
 - `GET  …/agent-api/spec` — the harvested OpenAPI spec JSON.
 - `POST …/agent-api/call` — owner-preview endpoint invocation (query forwarded,
   no consumer token, no policy edge).
+- `GET  …/agent-api/access?agent_id=` — people, scopes, keys (terminal keys
+  included), `external_access_enabled`, `identity_enabled`, `scope_catalog`,
+  `manage_url`.
+- `POST …/agent-api/keys` — issue a key; answers the key's public fields plus
+  `base_url`, `spec_url`, `service_uri`, `issued_to_self`, `credential_url`
+  (self-issue only) and `unknown_scopes`. Never a key value.
+- `POST …/agent-api/keys/revoke` — body `{agent_id, key_id}`; idempotent
+  (`status: revoked_by_issuer`); the grant is untouched.
+- `PUT  …/agent-api/access/scopes` — body `{agent_id, user_email, scopes}`;
+  `scopes` is required but nullable, so `--clear` sends `"scopes": null`
+  explicitly (omitting the field is a 422 on the core side); answers `{entry, unknown_scopes}`.
+- `GET  …/credentials` — each row carries `agent_api_key_status` for issued
+  keys (null for connections); `POST …/credentials` with type `agent_api` is
+  refused with a 400 that names the issue command.
+- `api-proxy` refusals added with issued keys: 403 `excluded_path` (CLI exit 2)
+  for any method on `agents/*/agent-api/keys…`, `environments/*/workspace/download`
+  and `view-file`, `dashboards/*/blocks/*/env-file`, and POST on A2A
+  access-tokens, MCP/ACP connector tokens and agent / task-trigger webhook
+  create/regenerate-token; paths are matched percent-decoded. The CLI needs no
+  code for this: the hatch's own refusal already exits 2.
 - `POST …/connect/agent-api` — mint the producer token + attach to the consumer
   as a credential.
 - `POST …/connect/mcp` — the agent2agent MCP wiring (sibling).
 - `POST …/api-proxy` — the buffered JSON escape hatch behind `cinna api`. See
   the "Platform API Endpoints" table in `docs/README.md` for the canonical
   account-route list.
+
+Error codes on the four access routes (`{"detail": {"code", "message"}}`,
+surfaced as `CodedRefusal`): `agent_not_found` (404, not owned: no leak),
+`recipient_not_found` (404), `ambiguous_recipient` (409, case-only duplicate
+emails), `external_access_disabled` (400), `api_disabled` (400), `key_not_found`
+(404), and `invalid_request` / `not_found` / `conflict` for any other platform
+refusal. 422 is body validation. A non-developer gets a plain 403 on writes.
 
 Producer-side author contract (not CLI files — they live in the producer's
 synced workspace, harvested by the platform): `workspace/agent_api/*.py`
@@ -160,5 +262,18 @@ synced workspace, harvested by the platform): `workspace/agent_api/*.py`
   raises only on 401.)
   (`tests/test_account.py` — the `test_api_*` matrix,
   `…test_account_client_api_proxy_*`)
+- **No key value, ever.** `drop_token()` runs in the client and again in each
+  runner before printing or `--json`; the revoke path also scrubs the listing it
+  resolves the key from. (`tests/test_client.py` token-drop tests,
+  `tests/test_agent_api_access.py` self-issue test with a mock that returns a
+  `token`.)
+- **`external_access_disabled` carries a URL.** The URL is appended only when
+  absent so a platform that already names it is not doubled.
+  (`src/cinna/account.py:run_agent_api_access_issue()`)
+- **Unknown key status is unavailable, not usable.** `_key_unavailable_state()`
+  returns `key_unavailable` for a status this CLI does not know; the cell prints
+  it raw and dim. (`tests/test_account.py` slot readiness tests)
+- **Confirm before revoke, nothing sent on decline.** `--json` without `--yes`
+  is a usage error. (`tests/test_agent_api_access.py`)
 - **`--json` / `--data` mutual exclusion** in `run_api`; `--data @file` strips a
   leading `@`. (`src/cinna/account.py:run_api()`)

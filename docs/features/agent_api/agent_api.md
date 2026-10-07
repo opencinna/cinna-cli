@@ -5,7 +5,7 @@
 Let an agent **expose its own HTTP/OpenAPI surface** (a "producer" REST API)
 that another agent (a "consumer") can call, and give a coding agent the local
 loop to build, verify, and wire those connections from the account workspace:
-`cinna agent-api` (enable / refresh / spec / call) drives the
+`cinna agent-api` (enable / refresh / spec / call / access) drives the
 **build→verify** loop on a producer; `cinna connect agent-api` does the
 **one-click wiring** of a consumer to it; and `cinna api` is a separate
 **escape hatch** for calling the platform's *own* control-plane API directly.
@@ -67,7 +67,8 @@ to test a producer endpoint — use `cinna agent-api call`.
   consumer authenticates its real calls with it.
 - **Escape hatch** — the account `api-proxy` route `cinna api` rides: a buffered
   JSON pass-through to the platform's own API, with excluded categories
-  (credentials, user management, admin, CLI, MFA/auth, streaming) denied.
+  (credentials, user management, admin, CLI, MFA/auth, streaming, and the
+  secret-minting routes listed under "Escape-hatch deny-list") denied.
 
 ## User flows
 
@@ -96,6 +97,35 @@ to test a producer endpoint — use `cinna agent-api call`.
   reminds you the credential rides B's normal credential sync into its env (it
   appears read-only under `workspace/credentials/` in a synced workspace) —
   no manual key handling.
+
+### Give API access (a person, or a local agent)
+- `cinna agent-api access list <producer>` shows who has access: one row per
+  person with their scopes and keys (prefix, status, expiry, last use, how many
+  agents use it, key id). `--all` also shows ended keys; `--json` is always the
+  full listing. The footer says whether external access is on and which scopes
+  the producer declares.
+- `cinna agent-api access issue <producer> --to <email|me>` issues a key to a
+  person. `--scopes a,b` sets their scopes (`""` = an explicit empty grant),
+  `--expires-in-days N` (1-3650), `--service-uri SLOT` names the credential's
+  slot (default `<producer>-api`), `--label`, `--read-only`.
+  - `--to me`: the key lands in your own credentials; the output names the slot
+    and the web credential page where you reveal the value. A local agent
+    (Cinna Desktop) then calls it by slot; a cloud agent is wired with
+    `cinna connect agent-api` instead.
+  - `--to <email>`: the key lands in that person's credentials; you never see
+    the value. The output prints the revoke command.
+  - Scopes outside the producer's declared catalog are stored anyway, with a
+    warning.
+- `cinna agent-api access revoke <producer> <key>` ends one key (asks first,
+  `--yes` skips). The person's scopes stay, so a new key can be issued without
+  re-granting.
+- `cinna agent-api access scopes <producer> --to <email|me> --set a,b | --clear`
+  changes a person's scopes without touching their keys, so a working key keeps
+  working. `--clear` removes the grant.
+- The result shows up elsewhere: `cinna account credentials list` shows the
+  key's status in the Status column, and a skill slot filled by a dead key
+  reads as not usable (see
+  [account_workspace](../account_workspace/account_workspace.md)).
 
 ### Call the platform's own API (unrelated to producer APIs)
 - `cinna api GET agents`, `cinna api POST agents/<id>/duplicate`,
@@ -132,7 +162,8 @@ to test a producer endpoint — use `cinna agent-api call`.
   its own refusal from a mirrored inner error by a marker response header.
 - **Escape-hatch deny-list.** `cinna api` cannot reach credentials, user
   management, admin, CLI, MFA/auth, or streaming routes — the platform denies
-  them; don't waste calls.
+  them; don't waste calls. It also refuses routes that would hand out a secret:
+  any method on `agents/*/agent-api/keys…` (issued keys), on `environments/*/workspace/download` and `view-file`, and on `dashboards/*/blocks/*/env-file`; and POST on A2A access-tokens, MCP/ACP connector tokens, agent and task-trigger webhook create/regenerate-token. Paths are matched after percent-decoding. These refuse with 403 `excluded_path` (exit 2). Prefix-only listings stay reachable.
 - **An elided id is refused locally.** A path segment carrying `…` or `...` is
   an id copied out of a table cell too narrow to print it whole. It reaches the
   API as a well-formed path and comes back `404 Agent not found` — a sentence
@@ -150,6 +181,37 @@ to test a producer endpoint — use `cinna agent-api call`.
 - **No secret round-trip.** `connect agent-api` mints the producer token
   server-side and attaches it as a consumer credential; the secret value never
   passes through the CLI as something the user pastes or stores locally.
+- **A key value never crosses the CLI.** The platform sends none on the access
+  routes, the client drops any stray `token` field, and every runner drops it
+  again before printing or `--json`. Self-issue returns a web URL where the
+  person reveals the value; nobody should paste one into the CLI.
+- **Rotate and reveal are web-only.** Rotation replaces a value someone outside
+  the platform holds, which the CLI could not hand over, and a coding agent
+  could otherwise start a countdown that breaks every holder of the old value.
+  There is no verb for either.
+- **The external-access switch is web-only.** It is the deliberate human act
+  that exposes the API outside the platform. When it is off, `issue` is refused
+  with `external_access_disabled` and the producer's Integrations URL is
+  appended to the message (only when the platform's message lacks one); `list`
+  warns and prints the same URL.
+- **Terminal keys are hidden unless `--all`.** Revoked, producer/issuer removed
+  and expired keys drop out of the `access list` table with a footer count;
+  `--json` always carries everything.
+- **`--to` is required on `issue` and `scopes`.** The recipient is always a
+  deliberate choice: an email (resolved server-side, exact case-insensitive
+  match among active users) or `me`. An unknown email is refused, and one that
+  matches several accounts is refused as ambiguous rather than guessed.
+- **A key reference is a key id or the exact token prefix.** A reference
+  carrying an elision marker is refused locally (same rule as other ids); no
+  match or several matches fail with a candidate listing. Revoking an
+  already-revoked key is a no-op that exits 0 ("already revoked"); `--json`
+  requires `--yes`.
+- **Only the producer's owner (or an admin) manages access, and writes need
+  the developer role.** A producer that is missing or not yours reads as not
+  found. `list` is open to any account token.
+- **The generic escape hatch cannot issue keys.** `cinna api POST
+  agents/<id>/agent-api/keys` is refused (exit 2); the `access` verbs are the
+  only CLI way.
 - **Read-only is a connect-time choice.** `--read-only` is applied when the
   connection is created; it scopes the *consumer's* access, not the producer's
   surface.
@@ -168,6 +230,15 @@ build/verify (producer):
         │                                                     (served from the
         ▼                                                      producer's env)
   agent-api call ─► owner-preview proxy ─► producer endpoint (no consumer token)
+
+people access (issued keys and scopes):
+  cinna agent-api access list/issue/revoke/scopes
+        │  account token
+        ▼
+  /api/v1/cli/account/agent-api/{access,keys,keys/revoke,access/scopes}
+        │ key lands in the recipient's credentials (value never returned)
+        ▼
+  recipient reveals it on the web; a local agent calls it by slot
 
 wiring (consumer):
   cinna connect agent-api --producer A --consumer B
@@ -195,6 +266,14 @@ platform escape hatch (unrelated target):
 - **Remote sync / exec** — authoring a producer API means editing files in the
   producer's synced `workspace/agent_api/` and pushing them to the running env
   (`cinna dev` / `cinna exec`); the spec is harvested from that env.
+- **Account workspace credentials and skill slots** — an issued key is a
+  credential whose listing row carries its key status; skill slot readiness
+  treats a revoked, expired or paused key as not usable. See
+  [account_workspace](../account_workspace/account_workspace.md).
+- **Local agent import** — `cinna agent import` never drafts an `agent_api`
+  credential (it could never be used); it attaches an existing same-name one or
+  prints the `access issue` / `connect agent-api` command. See
+  [local_agent_import](../local_agent_import/local_agent_import.md).
 - **`cinna agent show`** — surfaces a producer's live `agent_api_status`
   alongside its prompts and credentials, reusing the same status renderer.
 

@@ -43,6 +43,8 @@ from cinna import kit_contract
 from cinna import sync_session
 from cinna.account import (
     _resolve_account_workspace,
+    agent_api_issue_hint,
+    agent_api_producer_from_slot,
     find_account_root,
     load_account_config,
     resolve_child_workspace,
@@ -1127,6 +1129,12 @@ def _sync_credentials(
     Name-idempotent: an existing credential with the same name is attached, not
     recreated. No secret value is ever sent or read — the returned setup URLs
     are what the user opens to fill them in the browser.
+
+    ``agent_api`` specs are never drafted: an empty ``agent_api`` credential has
+    no key behind it and can never be used (the platform refuses the draft).
+    One that already exists under the same name (a key issued earlier) is
+    attached like any other; otherwise the importer prints the command that
+    provides a real key.
     """
     if not specs:
         return []
@@ -1137,15 +1145,26 @@ def _sync_credentials(
             "data", []
         )
     }
+    consumer = normalize_agent_dir_name(agent_name) or agent_name
 
     setup_urls: list[tuple[str, str]] = []
     for spec in specs:
         cred_name = spec["name"]
         found = existing.get(cred_name)
-        if found:
+        is_api = spec.get("type") == "agent_api"
+        if found and (not is_api or found.get("type") == "agent_api"):
             client.share_credential_with_agent(found["id"], agent_id)
             _line(
                 f"  '{cred_name}' already exists — attached to {agent_name}."
+            )
+            continue
+        if is_api:
+            _line(
+                f"  '{cred_name}' needs an Agent API key: "
+                f"{agent_api_issue_hint(spec.get('service_uri'))} (local) or "
+                f"cinna connect agent-api --producer "
+                f"{agent_api_producer_from_slot(spec.get('service_uri'))} "
+                f"--consumer {consumer} (cloud)."
             )
             continue
         result = client.create_credential(

@@ -46,7 +46,7 @@ from cinna.bootstrap import (
     _maybe_autolink,
 )
 from cinna.cli_version import cli_version_hint, cli_version_label, cli_version_status
-from cinna.client import AccountClient, PlatformClient
+from cinna.client import AccountClient, PlatformClient, drop_token
 from cinna.config import (
     CONFIG_DIR,
     CinnaConfig,
@@ -1944,6 +1944,350 @@ def run_agent_api_call(
         sys.exit(1)
 
 
+# ── Agent REST API access: issued keys and scopes ───────────────────────────
+#
+# `cinna agent-api access ...` gives *people* API access to a producer. No key
+# value ever crosses these commands: the platform never sends one, the client
+# drops a stray `token` field, and every runner drops it again before printing
+# or emitting JSON. Rotate and reveal live on the web credential page.
+
+def _access_recipient(to: str) -> str | None:
+    """``--to`` as the request field: ``None`` for ``me``, else the email."""
+    value = (to or "").strip()
+    if not value:
+        raise click.UsageError("--to needs an email address or 'me'.")
+    # "me" is the caller, sent as a null email.
+    return None if value.lower() == "me" else value
+
+
+def _parse_scope_list(raw: str | None) -> list[str] | None:
+    """``a,b`` → ``["a", "b"]``; ``""`` → ``[]`` (explicit empty); unset → ``None``."""
+    if raw is None:
+        return None
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _manage_url(account_cfg: AccountConfig, agent_id: str) -> str:
+    """The producer's Integrations page, where external access is switched."""
+    base = (account_cfg.frontend_url or account_cfg.platform_url or "").rstrip("/")
+    return f"{base}/agent/{agent_id}#integrations"
+
+
+def _access_person(user: dict | None) -> str:
+    user = user or {}
+    return str(user.get("email") or user.get("full_name") or user.get("id") or "?")
+
+
+def _scopes_text(scopes) -> str:
+    return ", ".join(str(s) for s in scopes or []) or "—"
+
+
+def _warn_unknown_scopes(unknown) -> None:
+    if unknown:
+        console.warn(
+            "Not in the producer's declared scopes (stored anyway): "
+            + ", ".join(_esc(s) for s in unknown)
+        )
+
+
+def _print_access_footer(payload: dict, agent: dict, account_cfg: AccountConfig) -> None:
+    external = bool(payload.get("external_access_enabled"))
+    console.console.print(f"External access: {'on' if external else 'off'}")
+    if not external:
+        console.warn(
+            "External access is off, so no issued key works until it is turned on "
+            "in the web:\n  "
+            + _esc(payload.get("manage_url") or _manage_url(account_cfg, agent["id"]))
+        )
+    catalog = [
+        c for c in payload.get("scope_catalog") or [] if isinstance(c, dict) and c.get("name")
+    ]
+    if catalog:
+        console.console.print("Available scopes:")
+        for item in catalog:
+            desc = item.get("description")
+            line = f"  {_esc(item['name'])}"
+            if desc:
+                line += f" [dim]— {_esc(desc)}[/dim]"
+            console.console.print(line)
+    else:
+        console.console.print("[dim]Available scopes: none declared[/dim]")
+
+
+def run_agent_api_access_list(
+    agent_ref: str, show_all: bool = False, as_json: bool = False
+) -> None:
+    """Who has API access to a producer — `cinna agent-api access list`."""
+    from rich.table import Table
+
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Fetching API access..."):
+            # Intentional second scrub: the client already drops `token`.
+            payload = drop_token(client.list_agent_api_access(agent["id"]))
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, default=str))
+        return
+
+    rows: list[tuple] = []
+    hidden = 0
+    for entry in payload.get("data") or []:
+        if not isinstance(entry, dict):
+            continue
+        person = _esc(_access_person(entry.get("user")))
+        scopes = _esc(_scopes_text(entry.get("scopes")))
+        keys = [k for k in entry.get("keys") or [] if isinstance(k, dict)]
+        visible = [
+            k for k in keys if show_all or k.get("status") not in _TERMINAL_KEY_STATUSES
+        ]
+        hidden += len(keys) - len(visible)
+        if not visible:
+            if entry.get("grant_id") or entry.get("scopes") or not keys:
+                rows.append((person, scopes, "[dim]—[/dim]", "", "", "", "", ""))
+            continue
+        for key in visible:
+            last_used = _humanize_age(key.get("last_used_at")) or "never"
+            rows.append(
+                (
+                    person,
+                    scopes,
+                    _esc(key.get("token_prefix") or "?"),
+                    _key_status_cell(key.get("status")),
+                    str(key.get("expires_at") or "never")[:10],
+                    last_used,
+                    str(key.get("linked_agent_count", 0)),
+                    _esc(key.get("id") or "?"),
+                )
+            )
+
+    if rows:
+        table = Table(title=f"API access — {agent['name']}", title_style="bold")
+        table.add_column("Person", overflow="fold")
+        table.add_column("Scopes")
+        table.add_column("Key", overflow="fold")
+        table.add_column("Status")
+        table.add_column("Expires", style="dim")
+        table.add_column("Last used", style="dim")
+        table.add_column("Agents", justify="right")
+        table.add_column("ID", style="dim", overflow="fold", no_wrap=True)
+        for row in rows:
+            table.add_row(*row)
+        console.console.print(table)
+    hidden_text = f"{hidden} ended key{'' if hidden == 1 else 's'} hidden (--all)"
+    if rows:
+        if hidden:
+            console.console.print(f"[dim]{hidden_text}[/dim]")
+    elif hidden:
+        console.status(f"No current API access to {_esc(agent['name'])}; {hidden_text}")
+    else:
+        console.status(f"Nobody has API access to {_esc(agent['name'])} yet.")
+    _print_access_footer(payload, agent, account_cfg)
+
+
+def run_agent_api_access_issue(
+    agent_ref: str,
+    to: str,
+    scopes: str | None = None,
+    expires_in_days: int | None = None,
+    service_uri: str | None = None,
+    label: str | None = None,
+    read_only: bool = False,
+    as_json: bool = False,
+) -> None:
+    """Issue a key to a person — `cinna agent-api access issue`.
+
+    The key value never appears: a self-issued key lands in the caller's
+    credentials and is revealed on the web; a key for someone else lands in
+    theirs.
+    """
+    recipient = _access_recipient(to)
+    scope_list = _parse_scope_list(scopes)
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Issuing key..."):
+            try:
+                result = client.issue_agent_api_key(
+                    agent["id"],
+                    issued_to_email=recipient,
+                    scopes=scope_list,
+                    expires_in_days=expires_in_days,
+                    service_uri=service_uri,
+                    label=label,
+                    read_only=read_only,
+                )
+            except CodedRefusal as exc:
+                if exc.code != "external_access_disabled":
+                    raise
+                detail = exc.detail
+                if "http" not in detail:
+                    url = _manage_url(account_cfg, agent["id"])
+                    detail = f"{detail}\nTurn it on in the web: {url}"
+                raise CodedRefusal(exc.status_code, exc.code, detail, paths=exc.paths)
+    result = drop_token(result)  # intentional second scrub (client drops it too)
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    prefix = _esc(result.get("token_prefix") or "?")
+    producer_hint = _agent_ref_for_hint(agent)
+    if result.get("issued_to_self"):
+        slot = result.get("service_uri") or "?"
+        console.status(
+            f"Key {prefix} is in your credentials as slot {_esc(slot)}. Its value is "
+            f"never shown here; reveal it on the web: "
+            f"{_esc(result.get('credential_url') or '—')}"
+        )
+        console.console.print(
+            "A local agent (Cinna Desktop) calls it with "
+            f'cinna_credentials.agent_api_session("{_esc(slot)}"). '
+            "To wire a cloud agent use 'cinna connect agent-api' instead."
+        )
+    else:
+        console.status(
+            f"Issued key {prefix} to {_esc(recipient or to)}. It lands in their "
+            "credentials; you never see its value. Revoke anytime: "
+            f"cinna agent-api access revoke {_esc(producer_hint)} {prefix}"
+        )
+    _warn_unknown_scopes(result.get("unknown_scopes"))
+
+
+def _resolve_access_key(payload: dict, key_ref: str) -> tuple[dict, dict]:
+    """``(key, entry)`` for a key id or exact token prefix in an access listing."""
+    ref = (key_ref or "").strip()
+    if any(marker in ref for marker in _ELIDED_MARKERS):
+        raise click.UsageError(
+            f"The key reference '{ref}' looks elided — copied out of a table cell "
+            f"that was too narrow to print it whole. Pass the full key id or the "
+            f"exact key prefix from 'cinna agent-api access list --all --json'."
+        )
+    pairs = [
+        (key, entry)
+        for entry in payload.get("data") or []
+        if isinstance(entry, dict)
+        for key in entry.get("keys") or []
+        if isinstance(key, dict)
+    ]
+    matches = [(k, e) for k, e in pairs if str(k.get("id")) == ref]
+    if not matches:
+        matches = [(k, e) for k, e in pairs if k.get("token_prefix") == ref]
+    if len(matches) == 1:
+        return matches[0]
+
+    def _describe(pair: tuple[dict, dict]) -> str:
+        key, entry = pair
+        return (
+            f"  {key.get('token_prefix') or '?'}  {_access_person(entry.get('user'))}  "
+            f"{key.get('status') or '?'}  {key.get('id') or '?'}"
+        )
+
+    if matches:
+        raise click.ClickException(
+            f"Key reference '{ref}' matches several keys — pass the key id:\n"
+            + "\n".join(_describe(p) for p in matches)
+        )
+    listing = "\n".join(_describe(p) for p in pairs) or "  (no keys)"
+    raise click.ClickException(
+        f"No key of this producer matches '{ref}'. Keys:\n{listing}"
+    )
+
+
+def run_agent_api_access_revoke(
+    agent_ref: str, key_ref: str, yes: bool = False, as_json: bool = False
+) -> None:
+    """Revoke one issued key — `cinna agent-api access revoke`."""
+    _require_yes_for_json(as_json, yes, "revoke")
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Fetching API access..."):
+            # Intentional second scrub: the client already drops `token`.
+            payload = drop_token(client.list_agent_api_access(agent["id"]))
+        key, entry = _resolve_access_key(payload, key_ref)
+        prefix = key.get("token_prefix") or "?"
+        person = _access_person(entry.get("user"))
+
+        if key.get("status") == "revoked_by_issuer":
+            if as_json:
+                click.echo(json.dumps(key, indent=2, default=str))
+            else:
+                console.status(f"Key {_esc(prefix)} is already revoked.")
+            return
+
+        if not yes:
+            status = key.get("status")
+            if status in _TERMINAL_KEY_STATUSES:
+                label = _KEY_STATUS_LABELS.get(status, (status, ""))[0]
+                question = f"Key {prefix} already ended ({label}); revoke it anyway?"
+            else:
+                question = (
+                    f"Revoke key {prefix} issued to {person}? It stops working at "
+                    "once and cannot be restored."
+                )
+            if not console.confirm(question, default=False):
+                raise click.Abort()
+
+        with console.spinner(f"Revoking {_esc(prefix)}..."):
+            # Intentional second scrub: the client already drops `token`.
+            result = drop_token(client.revoke_agent_api_key(agent["id"], str(key["id"])))
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    console.status(
+        f"Revoked key {_esc(prefix)} issued to {_esc(person)}. "
+        f"Status: {_key_status_cell(result.get('status'))}"
+    )
+
+
+def run_agent_api_access_scopes(
+    agent_ref: str,
+    to: str,
+    set_scopes: str | None = None,
+    clear: bool = False,
+    as_json: bool = False,
+) -> None:
+    """Set or clear a person's scopes on a producer — `cinna agent-api access scopes`."""
+    recipient = _access_recipient(to)
+    scope_list = None if clear else _parse_scope_list(set_scopes)
+    account_root = find_account_root()
+    account_cfg = load_account_config(account_root)
+
+    with AccountClient(account_cfg) as client:
+        agent = _resolve_one_agent(client, agent_ref)
+        with console.spinner("Updating scopes..."):
+            # Intentional second scrub: the client already drops `token`.
+            result = drop_token(
+                client.set_agent_api_scopes(agent["id"], recipient, scope_list)
+            )
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    entry = result.get("entry") if isinstance(result, dict) else None
+    who = _access_person(entry.get("user")) if entry else (recipient or "you")
+    if clear:
+        console.status(f"Grant removed for {_esc(who)} on {_esc(agent['name'])}.")
+    else:
+        scopes = (entry or {}).get("scopes") if entry else scope_list
+        console.status(
+            f"{_esc(who)} now has scopes on {_esc(agent['name'])}: "
+            f"{_esc(_scopes_text(scopes)) if scopes else 'none (empty grant)'}"
+        )
+    _warn_unknown_scopes(result.get("unknown_scopes"))
+
+
 def run_agent_restart_env(agent_ref: str) -> None:
     """Restart an agent's environment — `cinna agent restart-env`.
 
@@ -3544,6 +3888,69 @@ def run_user_workspace_clear() -> None:
 # ── Credentials (drafts only — never secret values) ─────────────────────────
 
 
+# Issued-key status → (label, colour). Same words as the web UI. Green works,
+# yellow recovers without anyone acting, red is terminal (a new key is needed).
+_KEY_STATUS_LABELS: dict[str, tuple[str, str]] = {
+    "active": ("Active", "green"),
+    "api_disabled": ("API turned off by producer", "yellow"),
+    "external_access_paused": ("External access paused", "yellow"),
+    "revoked_by_issuer": ("Revoked by issuer", "red"),
+    "producer_removed": ("Producer removed", "red"),
+    "issuer_removed": ("Issuer account removed", "red"),
+    "expired": ("Expired", "red"),
+}
+_TERMINAL_KEY_STATUSES = frozenset(
+    {"revoked_by_issuer", "producer_removed", "issuer_removed", "expired"}
+)
+
+
+def _key_status_cell(status: str | None) -> str:
+    """An issued key's status as a coloured label; an unknown value raw and dim."""
+    if not status:
+        return "[dim]—[/dim]"
+    known = _KEY_STATUS_LABELS.get(status)
+    if known is None:
+        return f"[dim]{_esc(status)}[/dim]"
+    label, colour = known
+    return f"[{colour}]{label}[/{colour}]"
+
+
+def _key_unavailable_state(status: str | None) -> str | None:
+    """Slot-readiness state for an issued key that cannot be used, else ``None``.
+
+    Same mapping as the platform's ``unavailable_reason_for``; a status this
+    CLI does not know yet is treated as unavailable rather than usable.
+    """
+    if not status or status == "active":
+        return None
+    if status in ("revoked_by_issuer", "producer_removed", "issuer_removed"):
+        return "key_revoked"
+    if status == "expired":
+        return "key_expired"
+    if status in ("api_disabled", "external_access_paused"):
+        return "key_paused"
+    return "key_unavailable"
+
+
+def agent_api_producer_from_slot(slot: str | None) -> str:
+    """The producer a default ``<producer-slug>-api`` slot names, else ``<producer>``."""
+    if slot and slot.endswith("-api") and len(slot) > 4:
+        return slot[:-4]
+    return "<producer>"
+
+
+def agent_api_issue_hint(slot: str | None) -> str:
+    """The self-issue command for an ``agent_api`` slot.
+
+    No slot means no ``--service-uri`` (the platform picks the default).
+    """
+    producer = agent_api_producer_from_slot(slot)
+    command = f"cinna agent-api access issue {producer} --to me"
+    if slot:
+        command += f" --service-uri {slot}"
+    return command
+
+
 def _credential_status_cell(status: str | None) -> str:
     if status == "complete":
         return "[green]complete[/green]"
@@ -3579,6 +3986,9 @@ def _credential_summary(cred: dict) -> str:
         parts.append("[yellow]placeholder[/yellow]")
     elif cred.get("status") == "incomplete":
         parts.append("[yellow]needs setup[/yellow]")
+    key_status = cred.get("agent_api_key_status")
+    if key_status and key_status != "active":
+        parts.append(_key_status_cell(key_status))
     if cred.get("id"):
         parts.append(f"[dim]{_esc(cred['id'])}[/dim]")
     return "  ".join(parts)
@@ -3589,7 +3999,12 @@ def _credential_summary(cred: dict) -> str:
 # no row for this id — a credential shared by someone else, or an unreadable
 # listing. "No slot" would be a claim; this is the absence of one.
 _SLOT_UNVERIFIED = "_slot_unverified"
-_ACCOUNT_AUTHORITATIVE_FIELDS = ("service_uri", "is_placeholder", "status")
+_ACCOUNT_AUTHORITATIVE_FIELDS = (
+    "service_uri",
+    "is_placeholder",
+    "status",
+    "agent_api_key_status",
+)
 
 
 def _fetch_linked_credentials(client: "AccountClient", agent_id: str) -> list[dict] | None:
@@ -3672,7 +4087,11 @@ def run_credentials_list(workspace: str | None, as_json: bool = False) -> None:
     table.add_column("ID", style="dim", overflow="fold", no_wrap=True)
 
     for c in items:
-        status_cell = _credential_status_cell(c.get("status"))
+        if c.get("agent_api_key_status"):
+            # An issued API key: its key status is the fact, not "complete".
+            status_cell = _key_status_cell(c.get("agent_api_key_status"))
+        else:
+            status_cell = _credential_status_cell(c.get("status"))
         if c.get("is_placeholder"):
             status_cell += " [dim]placeholder[/dim]"
         table.add_row(
@@ -4044,11 +4463,49 @@ def _declared_slots(addon: dict) -> list[dict]:
 
 
 def _needs_linked_credentials(payload: dict) -> bool:
-    """Whether any row's readiness has to be checked by the CLI itself."""
-    return any(
-        a.get("source") != "catalog" and _declared_slots(a)
-        for a in payload.get("addons") or []
-    )
+    """Whether any row's readiness needs the agent's linked credentials.
+
+    Every non-catalog row with declared slots does. A catalog row does when
+    the platform flagged a slot ``access_revoked`` (a newer platform reports a
+    dead or paused issued key that way, and only the carrier's key status says
+    which), or named no issue for a slot (an older platform ignores key status
+    entirely, so a dead key there reads as ready).
+    """
+    for addon in payload.get("addons") or []:
+        slots = _declared_slots(addon)
+        if not slots:
+            continue
+        if addon.get("source") != "catalog":
+            return True
+        issues = [i for i in addon.get("credential_issues") or [] if isinstance(i, dict)]
+        if any(i.get("reason") == "access_revoked" for i in issues):
+            return True
+        flagged = {i.get("slot") for i in issues}
+        if any(d.get("slot") not in flagged for d in slots):
+            return True
+    return False
+
+
+def _dead_key_carrier(
+    linked: list[dict] | None, slot, declared_type
+) -> tuple[str, dict] | None:
+    """``(key_state, carrier)`` when every filled carrier of the slot is a dead
+    or paused issued key; ``None`` when any filled carrier is usable or none
+    exists."""
+    filled = [
+        c
+        for c in linked or []
+        if c.get("service_uri") == slot
+        and (not declared_type or c.get("type") == declared_type)
+        and not c.get("is_placeholder")
+        and c.get("status") != "incomplete"
+    ]
+    if not filled:
+        return None
+    states = [_key_unavailable_state(c.get("agent_api_key_status")) for c in filled]
+    if all(states):
+        return states[0], filled[0]
+    return None
 
 
 def _slot_readiness(
@@ -4058,8 +4515,12 @@ def _slot_readiness(
 
     ``ready``; the platform's reasons ``not_linked`` / ``not_configured`` /
     ``access_revoked``; ``type_mismatch`` when the credential carrying the slot
-    is not the declared type; ``unknown`` when the agent's credentials could
-    not be read. ``credential`` is the linked one carrying the slot, if any.
+    is not the declared type; ``key_revoked`` / ``key_expired`` / ``key_paused``
+    / ``key_unavailable`` when every filled carrier is an issued API key that
+    cannot be used (revoked or removed, expired, paused by its producer, or a
+    status this CLI does not know); ``unknown`` when the agent's credentials
+    could not be read. ``credential`` is the linked one carrying the slot, if
+    any.
     """
     slot = decl.get("slot")
     declared_type = decl.get("type")
@@ -4073,9 +4534,21 @@ def _slot_readiness(
                 carriers = [c for c in linked if c.get("service_uri") == slot]
                 if carriers and all(c.get("type") != declared_type for c in carriers):
                     return "type_mismatch", carriers[0]
+            if reason == "access_revoked":
+                # A newer platform reports a dead or paused issued key as
+                # access_revoked; the key status names the real fix.
+                dead = _dead_key_carrier(linked, slot, declared_type)
+                if dead is not None:
+                    return dead
             return reason, None
     if addon.get("source") == "catalog":
-        # The platform computed this row's slots and named no issue for this one.
+        # The platform computed this row's slots and named no issue for this
+        # one. A platform that checks issued-key status would have flagged a
+        # dead key (handled above); an older one does not, so the carriers'
+        # key status is still checked here. Harmless on a newer platform.
+        dead = _dead_key_carrier(linked, slot, declared_type)
+        if dead is not None:
+            return dead
         return "ready", None
     if linked is None:
         return "unknown", None
@@ -4089,11 +4562,16 @@ def _slot_readiness(
     typed =[c for c in carriers if not declared_type or c.get("type") == declared_type]
     if not typed:
         return "type_mismatch", carriers[0]
-    usable = [
+    filled = [
         c for c in typed if not c.get("is_placeholder") and c.get("status") != "incomplete"
     ]
-    if not usable:
+    if not filled:
         return "not_configured", typed[0]
+    # An issued API key can be filled and still unusable: revoked, expired, or
+    # its producer paused. A status this CLI does not know counts as unusable.
+    usable = [c for c in filled if _key_unavailable_state(c.get("agent_api_key_status")) is None]
+    if not usable:
+        return _key_unavailable_state(filled[0].get("agent_api_key_status")), filled[0]
     return "ready", usable[0]
 
 
@@ -4155,6 +4633,24 @@ def _slot_remedy(
         return [
             "The credential carrying the slot is no longer shared with you. Provide "
             "your own, or ask the publisher.",
+        ]
+    if state in ("key_revoked", "key_expired"):
+        name = (cred or {}).get("name") or "The API key carrying the slot"
+        ended = "was revoked" if state == "key_revoked" else "has expired"
+        return [
+            f"'{name}' {ended}; a key never comes back. Ask the producer's owner for "
+            f"a new key (yours: {agent_api_issue_hint(slot)}), then delete this one.",
+        ]
+    if state == "key_paused":
+        return [
+            "The producer's owner turned its API or external access off. Once "
+            "they turn it back on, the key recovers by itself — nothing to "
+            "replace.",
+        ]
+    if state == "key_unavailable":
+        return [
+            "The key carrying the slot has a status this CLI does not know (a newer "
+            "platform). Upgrade the CLI.",
         ]
     return ["Check the agent's Credentials tab."]
 

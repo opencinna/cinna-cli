@@ -21,7 +21,7 @@ for** failure modes.
 - **Editable install** of the CLI under test:
   `python3 -c "import cinna,os;print(os.path.dirname(cinna.__file__))"` must
   point at this repo's `src/cinna`. Confirm `which cinna` resolves and
-  `cinna agent-api --help` lists `enable / refresh / spec / call`.
+  `cinna agent-api --help` lists `enable / refresh / spec / call / access`.
 - **A producer agent** you own whose workspace has (or will have) an
   `agent_api/` package + `policy.yaml`. Ideally synced locally
   (`cinna agent sync <producer>`) so you can edit + push the endpoint code.
@@ -196,6 +196,111 @@ for** failure modes.
 - **Watch for:** trying to test a producer endpoint via `cinna api` (wrong
   target — it calls platform routes, not the producer's served API).
 
+### 13. Issue yourself a key: URL, never a value
+
+- **Goal:** a builder gives themselves API access to a producer and never sees
+  the key value.
+- **Setup:** the producer's REST API is enabled; turn **external access** on in
+  the web (Integrations tab of the producer). It is web-only by design.
+- **Steps:**
+  ```
+  cinna agent-api access issue "<Producer>" --to me
+  cinna account credentials list
+  cinna agent-api access list "<Producer>"
+  ```
+- **Expected:** `Key <prefix> is in your credentials as slot <producer>-api …`
+  with a `…/credential/<id>` URL and the `cinna_credentials.agent_api_session`
+  hint; the output contains no key value. `credentials list` shows the new row
+  with Status `Active`; `access list` shows you with that key as Active.
+- **Watch for:** any full key or `token` field in the output (also with
+  `--json`); the credentials row showing `complete` instead of the key status.
+
+### 14. External access off refuses with the URL
+
+- **Goal:** issuing is fail-loud while external access is off.
+- **Setup:** turn external access off in the web.
+- **Steps:**
+  ```
+  cinna agent-api access issue "<Producer>" --to me; echo "exit=$?"
+  cinna agent-api access list "<Producer>"
+  ```
+- **Expected:** non-zero exit; the message says external access is disabled and
+  ends with `…/agent/<id>#integrations` (once, not doubled). `access list`
+  prints `External access: off` and a warning with the same URL. Turn it back on
+  before scenario 15.
+- **Watch for:** a generic error without the URL; any CLI path that switches it
+  on.
+
+### 15. Issue to another person, scopes, and list
+
+- **Goal:** give a colleague a scoped key without ever seeing it.
+- **Steps:**
+  ```
+  cinna agent-api access issue "<Producer>" --to <other-email> --scopes read --expires-in-days 30 --label qa
+  cinna agent-api access scopes "<Producer>" --to <other-email> --set read,write
+  cinna agent-api access list "<Producer>"
+  cinna agent-api access list "<Producer>" --json
+  cinna agent-api access issue "<Producer>" --to nobody@example.invalid; echo "exit=$?"
+  cinna agent-api access issue "<Producer>" --to nobody@example.invalid --json; echo "exit=$?"
+  ```
+- **Expected:** `Issued key <prefix> to <other-email>. It lands in their
+  credentials; you never see its value.` plus the revoke command. The scopes
+  command prints the person's resulting scopes and the key keeps working. The
+  table shows the person, scopes, key prefix, status, expiry, last used, linked
+  agent count and key id; `--json` is the full payload with no `token`
+  anywhere. The unknown recipient is refused and nothing is issued: the plain
+  run prints the server's sentence on stderr, and the `--json` run prints one
+  `{"result": "error", "code": "recipient_not_found", …}` line on stdout. Both
+  exit 1. An undeclared scope prints a warning but is stored.
+- **Watch for:** `--to` omitted not being a usage error; a key value in any
+  output; the scopes change revoking or replacing the key.
+
+### 16. Revoke: hidden by default, visible with `--all`, recipient sees it
+
+- **Goal:** revoking ends one key, keeps the grant, and is visible on both sides.
+- **Steps:**
+  ```
+  cinna agent-api access revoke "<Producer>" <prefix>          # answer n first, then y
+  cinna agent-api access list "<Producer>"
+  cinna agent-api access list "<Producer>" --all
+  cinna agent-api access revoke "<Producer>" <prefix> --yes     # again
+  cinna agent-api access revoke "<Producer>" <prefix> --json    # no --yes
+  ```
+  Then check the recipient's side. A recipient who is a developer can use their
+  own account workspace:
+  ```
+  cinna account credentials list
+  ```
+  An agent-user cannot create an account workspace (setup tokens are
+  developer-only), so for them sign in to the web app as the recipient and open
+  **Credentials**, or call `GET /api/v1/credentials` with their token and read
+  `agent_api_key_status`.
+- **Expected:** declining sends nothing; accepting prints `Revoked key <prefix>
+  issued to <email>. Status: Revoked by issuer`. The default list hides the key
+  with `1 ended key hidden (--all)` while the person's scopes row stays;
+  `--all` shows `Revoked by issuer`. Revoking again prints `already revoked`
+  and exits 0. `--json` without `--yes` is a usage error. The recipient still
+  has the credential, with Status `Revoked by issuer` (`agent_api_key_status:
+  revoked_by_issuer` in the API).
+- **Watch for:** the grant disappearing with the key; an elided prefix
+  (`ab12…`) not being refused locally; the recipient's credential being
+  deleted rather than flagged.
+
+### 17. The escape hatch cannot mint keys
+
+- **Goal:** `cinna api` is not a back door around the no-value rule.
+- **Steps:**
+  ```
+  cinna api POST agents/<producer-id>/agent-api/keys --json '{"label":"x"}'; echo "exit=$?"
+  cinna api GET agents/<producer-id>/agent-api/access; echo "exit=$?"
+  cinna agent-api access list "<Producer>"
+  ```
+- **Expected:** the POST prints `blocked by platform policy: …` on stderr and
+  exits 2; no key was created (the list is unchanged). The `access` GET through
+  the hatch is still reachable. The same refusal (403 `excluded_path`, exit 2)
+  applies to any method on `agents/*/agent-api/keys…`, `environments/*/workspace/download` and `view-file`, `dashboards/*/blocks/*/env-file`, and POST on token-minting routes (A2A access-tokens, MCP/ACP connector tokens, webhook create/regenerate-token), including percent-encoded spellings.
+- **Watch for:** exit 1 instead of 2; a key created by the call.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **Resolve-before-mutate.** A bad agent ref fails before any enable / refresh /
@@ -209,6 +314,8 @@ for** failure modes.
   both `agent-api call` and `cinna api`; only `cinna api` adds exit 2 for the
   hatch's own refusal (policy / rate limit / size cap), distinguished by the
   marker header — never conflated with an inner 4xx.
+- **No key value in any access output.** Not in the table, not in `--json`,
+  not on self-issue; reveal and rotate are web-only.
 - **Spec is pipeable.** `cinna agent-api spec` emits plain JSON to stdout (or the
   `-o` file), never Rich-decorated.
 
@@ -221,4 +328,8 @@ for** failure modes.
   `cinna agent-api enable "<Producer>" --disable`.
 - Remove any deliberately-broken `agent_api/` edits (revert + sync), then
   `cinna agent-api refresh` to restore a clean harvested spec.
+- Revoke test keys (`cinna agent-api access revoke "<Producer>" <prefix> --yes`),
+  clear test grants (`cinna agent-api access scopes "<Producer>" --to <email>
+  --clear`), delete the revoked credentials in the web, and set external access
+  back to its prior state.
 - Delete scratch files written by `cinna agent-api spec -o spec.json`.

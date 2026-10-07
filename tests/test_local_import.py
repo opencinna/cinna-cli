@@ -1190,7 +1190,7 @@ def test_a_same_major_contract_passes_silently(
 
     result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
     assert result.exit_code == 0, result.output
-    assert "contract 1.5.2 runs on contract 1.6.0" in result.output
+    assert "contract 1.5.2 runs on contract 1.7.0" in result.output
     (entry,) = json.loads((src / "publications.json").read_text())["publications"]
     assert entry["contract_version"] == "1.5.2"
 
@@ -1558,3 +1558,103 @@ def test_update_without_an_engine_says_nothing_about_keeping_it(
     result = runner.invoke(cli, ["agent", "import", str(src), "--update", "--yes"])
     assert result.exit_code == 0, result.output
     assert "not applied" not in result.output
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_import_never_drafts_an_agent_api_credential(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    """An empty agent_api credential has no key behind it; the importer names
+    the command that provides a real one instead of drafting it."""
+    creds = json.loads(json.dumps(MANIFEST["credentials"]))
+    creds.append(
+        {
+            "name": "orders-key",
+            "type": "agent_api",
+            "service_uri": "orders-api",
+            "description": "Orders API key",
+        }
+    )
+    make_kit(tmp_path)
+    src = make_local_agent(tmp_path, credentials=creds)
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
+    assert result.exit_code == 0, result.output
+
+    drafted = [c.args[0] if c.args else c.kwargs.get("name")
+               for c in client.create_credential.call_args_list]
+    assert drafted == ["billing-inbox"]
+    assert "orders-key" in result.output
+    # The default `<producer>-api` slot names its producer (review fix 6).
+    assert "cinna agent-api access issue orders --to me --service-uri orders-api" in result.output
+    assert "cinna connect agent-api --producer orders" in result.output
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_import_with_only_an_agent_api_credential_drafts_nothing(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    creds = [{"name": "orders-key", "type": "agent_api", "service_uri": "orders-api"}]
+    make_kit(tmp_path)
+    src = make_local_agent(tmp_path, credentials=creds)
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
+    assert result.exit_code == 0, result.output
+    client.create_credential.assert_not_called()
+    assert "orders-key" in result.output
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_import_attaches_an_existing_agent_api_credential_without_a_hint(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    """A same-name agent_api credential (a key issued earlier) is attached like
+    any other existing credential; no hint, and still never a draft."""
+    creds = [{"name": "orders-key", "type": "agent_api", "service_uri": "orders-api"}]
+    make_kit(tmp_path)
+    src = make_local_agent(tmp_path, credentials=creds)
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    client.list_credentials.return_value = {
+        "data": [{"id": "cred-key", "name": "orders-key", "type": "agent_api"}]
+    }
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
+    assert result.exit_code == 0, result.output
+    client.create_credential.assert_not_called()
+    client.share_credential_with_agent.assert_called_once_with("cred-key", AGENT_ID)
+    assert "'orders-key' already exists" in result.output
+    assert "needs an Agent API key" not in result.output
+
+
+@patch("cinna.local_import.sync_session")
+@patch("cinna.local_import.AccountClient")
+def test_import_hint_without_a_slot_leaves_out_service_uri(
+    mock_client_cls, mock_sync, runner, account_root, tmp_path, monkeypatch
+):
+    creds = [{"name": "orders-key", "type": "agent_api"}]
+    make_kit(tmp_path)
+    src = make_local_agent(tmp_path, credentials=creds)
+    make_child_workspace(account_root)
+    client = wire_client(mock_client_cls)
+    wire_sync(mock_sync)
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["agent", "import", str(src), "--yes"])
+    assert result.exit_code == 0, result.output
+    client.create_credential.assert_not_called()
+    assert "cinna agent-api access issue <producer> --to me (local)" in result.output
+    assert "--service-uri" not in result.output

@@ -216,6 +216,26 @@ Related (documented here as integration points): `cinna agent sync` →
 - `src/cinna/account.py:run_credentials_update()` — refuses an empty update;
   metadata fields only (`name`/`notes`/`service_uri`/`allow_sharing`).
 - `src/cinna/account.py:_credential_status_cell()` — complete / needs setup / —.
+- `src/cinna/account.py:_key_status_cell()` / `_KEY_STATUS_LABELS` — an issued
+  key's status as a coloured label; `run_credentials_list()` uses it in place of
+  the complete / needs-setup cell when `agent_api_key_status` is set, and
+  `_credential_summary()` appends it when not `active`.
+  `agent_api_key_status` is in `_ACCOUNT_AUTHORITATIVE_FIELDS`, so linked-credential
+  overlays carry it. (`tests/test_account.py`)
+- Skill slot readiness: `src/cinna/account.py:_slot_readiness()` treats a filled
+  carrier whose key status is not `active` as unusable and returns
+  `key_revoked` (revoked_by_issuer / producer_removed / issuer_removed),
+  `key_expired`, `key_paused` (api_disabled / external_access_paused) or
+  `key_unavailable` (a status this CLI does not know), via
+  `_key_unavailable_state()` / `_dead_key_carrier()` (every filled carrier of the
+  slot, of the declared type, holds a dead or paused key). A newer platform
+  flags such a slot itself as `access_revoked`; the CLI refines that reason to the
+  key state so the remedy fits. An older platform names no issue for catalog rows,
+  so the CLI checks key status there too. `_needs_linked_credentials()` fetches
+  the linked credentials for catalog rows with an `access_revoked` issue or an
+  unflagged declared slot. `_slot_remedy()` words the fix: ask the producer's owner
+  for a new key (`agent_api_issue_hint()`) for revoked/expired, "recovers by
+  itself" for paused, upgrade the CLI for unknown.
 - `src/cinna/account.py:run_credentials_list()` — `--json` echoes the listing
   untouched; otherwise the table adds a `Slot` column (`_credential_slot_cell()`,
   the escaped `service_uri` or a dim dash), marks `is_placeholder`, never wraps the

@@ -484,3 +484,135 @@ def test_create_agent_sends_the_engine_only_when_set(account_client, engine, sen
     assert ("engine" in body) is sent
     if sent:
         assert body["engine"] == "claude"
+
+
+# --- Agent REST API access: issued keys and scopes ---
+
+_ACCESS = "https://platform.example.com/api/v1/cli/account/agent-api"
+
+
+@respx.mock
+def test_list_agent_api_access_targets_the_route(account_client):
+    route = respx.get(f"{_ACCESS}/access").respond(200, json={"data": [], "count": 0})
+    out = account_client.list_agent_api_access("agent-123")
+    assert out["count"] == 0
+    assert route.calls.last.request.url.params["agent_id"] == "agent-123"
+
+
+@respx.mock
+def test_issue_agent_api_key_omits_unset_fields(account_client):
+    route = respx.post(f"{_ACCESS}/keys").respond(200, json={"id": "k1"})
+    account_client.issue_agent_api_key("agent-123")
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"agent_id": "agent-123", "read_only": False}
+
+
+@respx.mock
+def test_issue_agent_api_key_sends_every_field_and_empty_scopes(account_client):
+    route = respx.post(f"{_ACCESS}/keys").respond(200, json={"id": "k1"})
+    account_client.issue_agent_api_key(
+        "agent-123",
+        issued_to_email="ana@example.com",
+        scopes=[],
+        expires_in_days=30,
+        service_uri="orders-api",
+        label="ci",
+        read_only=True,
+    )
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {
+        "agent_id": "agent-123",
+        "read_only": True,
+        "issued_to_email": "ana@example.com",
+        "scopes": [],
+        "expires_in_days": 30,
+        "service_uri": "orders-api",
+        "label": "ci",
+    }
+
+
+@respx.mock
+def test_revoke_agent_api_key_body(account_client):
+    route = respx.post(f"{_ACCESS}/keys/revoke").respond(
+        200, json={"status": "revoked_by_issuer"}
+    )
+    out = account_client.revoke_agent_api_key("agent-123", "key-1")
+    assert out["status"] == "revoked_by_issuer"
+    assert json.loads(route.calls.last.request.content) == {
+        "agent_id": "agent-123",
+        "key_id": "key-1",
+    }
+
+
+@respx.mock
+def test_set_agent_api_scopes_set_clear_and_self(account_client):
+    route = respx.put(f"{_ACCESS}/access/scopes").respond(
+        200, json={"entry": None, "unknown_scopes": []}
+    )
+    account_client.set_agent_api_scopes("agent-123", "ana@example.com", ["read"])
+    assert json.loads(route.calls.last.request.content) == {
+        "agent_id": "agent-123",
+        "scopes": ["read"],
+        "user_email": "ana@example.com",
+    }
+    account_client.set_agent_api_scopes("agent-123", "ana@example.com", [])
+    assert json.loads(route.calls.last.request.content)["scopes"] == []
+    # --clear is an explicit null; "me" omits the email.
+    account_client.set_agent_api_scopes("agent-123", None, None)
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"agent_id": "agent-123", "scopes": None}
+
+
+@respx.mock
+def test_agent_api_access_coded_400_raises_coded_refusal(account_client):
+    respx.post(f"{_ACCESS}/keys").respond(
+        400,
+        json={
+            "detail": {
+                "code": "external_access_disabled",
+                "message": "External access is off.",
+            }
+        },
+    )
+    with pytest.raises(CodedRefusal) as exc:
+        account_client.issue_agent_api_key("agent-123")
+    assert exc.value.code == "external_access_disabled"
+    assert "External access is off." in str(exc.value.detail)
+
+
+@respx.mock
+def test_agent_api_access_drops_a_stray_token(account_client):
+    respx.post(f"{_ACCESS}/keys").respond(
+        200,
+        json={"id": "k1", "token": "SECRET-VALUE", "token_prefix": "ak_1"},
+    )
+    out = account_client.issue_agent_api_key("agent-123")
+    assert "token" not in out
+    assert out["token_prefix"] == "ak_1"
+
+
+@respx.mock
+def test_agent_api_access_drops_a_nested_token(account_client):
+    respx.get(f"{_ACCESS}/access").respond(
+        200,
+        json={"data": [{"keys": [{"id": "k1", "token": "SECRET-VALUE"}]}]},
+    )
+    out = account_client.list_agent_api_access("agent-123")
+    assert "SECRET-VALUE" not in json.dumps(out)
+
+
+@respx.mock
+def test_agent_api_access_bare_not_found_says_platform_predates(account_client):
+    respx.get(f"{_ACCESS}/access").respond(404, json={"detail": "Not Found"})
+    with pytest.raises(PlatformError) as exc:
+        account_client.list_agent_api_access("agent-123")
+    assert "predates" in str(exc.value)
+
+
+@respx.mock
+def test_agent_api_access_other_404_is_not_rewritten(account_client):
+    respx.get(f"{_ACCESS}/access").respond(404, json={"detail": "Agent not found"})
+    with pytest.raises(PlatformError) as exc:
+        account_client.list_agent_api_access("agent-123")
+    assert "predates" not in str(exc.value)
+    assert "Agent not found" in str(exc.value)
