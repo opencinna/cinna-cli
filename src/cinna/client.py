@@ -668,6 +668,73 @@ class AccountClient:
         )
         return self._access_response(response)
 
+    # --- Team library (/api/v1/library; git itself goes to /git/<repo_id>.git) ---
+
+    _LIBRARY_PREDATES = (
+        "This platform has no team library yet (it needs a cinna-core with the "
+        "team library)."
+    )
+
+    def _library_response(self, response: httpx.Response) -> dict:
+        """Shared handling for the library routes.
+
+        Refusals pass through with the server's code (``coded=True``). A bare
+        ``{"detail": "Not Found"}`` 404 is FastAPI's unknown-route answer, so
+        the platform predates the library: that gets its own code,
+        ``library_unavailable``, rather than "Not Found".
+        """
+        if response.status_code == 404:
+            try:
+                detail = response.json().get("detail")
+            except Exception:
+                detail = None
+            if detail == "Not Found":
+                raise CodedRefusal(404, "library_unavailable", self._LIBRARY_PREDATES)
+        return self._handle_response(response, coded=True).json()
+
+    def list_library(self) -> dict:
+        """GET /api/v1/library — ``{agents: LibraryAgent[], mirrors: LibraryMirror[]}``.
+
+        ``LibraryAgent``: ``repo_id, slug, name, description, clone_url,
+        default_branch, head_sha, updated_at, access, maintainers, manifest,
+        cloud_install_id``. Only repositories the caller may read are listed.
+        """
+        return self._library_response(self._client.get("/api/v1/library"))
+
+    def create_library_agent(
+        self, slug: str, name: str, description: str | None
+    ) -> dict:
+        """POST /api/v1/library/agents — an empty repository; the caller maintains it."""
+        response = self._client.post(
+            "/api/v1/library/agents",
+            json={"slug": slug, "name": name, "description": description or ""},
+        )
+        return self._library_response(response)
+
+    def get_library_agent(self, repo_id: str) -> dict:
+        """GET /api/v1/library/agents/{repo_id} — one ``LibraryAgent``."""
+        return self._library_response(
+            self._client.get(f"/api/v1/library/agents/{quote(repo_id, safe='')}")
+        )
+
+    def set_library_grants(self, repo_id: str, grants: list[dict]) -> dict:
+        """PUT /api/v1/library/agents/{repo_id}/grants — ``[{principal, access}]``.
+
+        The body is the full grant list; maintainers only.
+        """
+        response = self._client.put(
+            f"/api/v1/library/agents/{quote(repo_id, safe='')}/grants", json=grants
+        )
+        return self._library_response(response)
+
+    def suggest_library_change(self, repo_id: str, patch: str, message: str) -> dict:
+        """POST /api/v1/library/agents/{repo_id}/suggestions — a patch for the maintainers."""
+        response = self._client.post(
+            f"/api/v1/library/agents/{quote(repo_id, safe='')}/suggestions",
+            json={"patch": patch, "message": message},
+        )
+        return self._library_response(response)
+
     def restart_agent_env(self, agent_id: str) -> dict:
         """POST /api/v1/cli/account/agents/{id}/restart-env — restart the env.
 

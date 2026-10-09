@@ -731,8 +731,16 @@ def run_agent_import(
     dry_run: bool = False,
     no_push: bool = False,
     yes: bool = False,
+    *,
+    contract_from: Path | None = None,
+    known_agent: tuple[str, str] | None = None,
 ) -> None:
-    """Import a locally built agent — ``cinna agent import <path>``."""
+    """Import a locally built agent — ``cinna agent import <path>``.
+
+    ``contract_from`` is where to look for the kit contract when ``path`` is not
+    inside a workshop (a temporary clone); ``known_agent`` is an
+    ``(agent_id, source)`` to use when the folder's own ledger names none.
+    """
     source = Path(path).expanduser().resolve()
     if not source.is_dir():
         raise click.ClickException(f"'{path}' is not a directory.")
@@ -750,10 +758,12 @@ def run_agent_import(
     credentials = _manifest_list(manifest, "credentials")
     schedules = _manifest_list(manifest, "schedules")
     engine, not_carried = read_runtime(manifest)
-    contract = load_export_contract(source)
+    contract = load_export_contract(contract_from or source)
     known_agent_id, known_from = resolve_known_agent_id(
         source, manifest, account_cfg.platform_url
     )
+    if known_agent_id is None and known_agent is not None:
+        known_agent_id, known_from = known_agent
 
     files = plan_copy(source, contract.patterns, contract.secret_rules)
     assert_no_secrets(files, contract.secret_rules)
@@ -947,6 +957,40 @@ def run_agent_import(
         setup_urls=setup_urls,
         examples=manifest.get("example_prompts") or [],
     )
+
+
+def run_agent_import_from_library(slug: str, **kwargs) -> None:
+    """``cinna agent import --from-library <slug>``: get, then the ordinary import.
+
+    The source is the local copy under ``Local/`` when there is one, so its
+    ``publications.json`` keeps the record for the next ``--update``; otherwise
+    a temporary clone, removed afterwards. The library's ``cloud_install_id``
+    (the caller's cloud agent bound to the repository) stands in for a ledger
+    entry the folder lacks.
+    """
+    from cinna.library import checkout_for_import
+
+    src = checkout_for_import(slug)
+    try:
+        if src.temporary:
+            _line(f"  Library:     {slug} (temporary clone)")
+        else:
+            _line(f"  Library:     {slug} (your copy at {src.folder})")
+        cloud_id = src.agent.get("cloud_install_id")
+        run_agent_import(
+            str(src.folder),
+            contract_from=src.contract_from,
+            known_agent=(cloud_id, "the team library") if cloud_id else None,
+            **kwargs,
+        )
+        if src.temporary and not kwargs.get("dry_run"):
+            console.warn(
+                f"Imported from a temporary clone, so no {kit_contract.PUBLICATIONS_FILENAME} "
+                f"keeps the link. Re-import with --from-library {slug} --update "
+                f"(matches by name), or 'cinna library get {slug}' first to keep one."
+            )
+    finally:
+        src.cleanup()
 
 
 # ── Steps ───────────────────────────────────────────────────────────────────

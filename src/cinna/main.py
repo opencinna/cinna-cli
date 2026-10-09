@@ -714,7 +714,14 @@ def agent_create(name: str, description: str | None):
 
 
 @agent.command(name="import")
-@click.argument("path", type=click.Path(exists=True, file_okay=False))
+@click.argument("path", type=click.Path(exists=True, file_okay=False), required=False)
+@click.option(
+    "--from-library",
+    "from_library",
+    default=None,
+    metavar="SLUG",
+    help="Import an agent from the team library instead of a local folder",
+)
 @click.option("--name", default=None, help="Override the manifest's agent name")
 @click.option(
     "--workspace",
@@ -734,7 +741,8 @@ def agent_create(name: str, description: str | None):
 @click.option("--no-push", is_flag=True, help="Copy the files but skip 'cinna sync push'")
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
 def agent_import(
-    path: str,
+    path: str | None,
+    from_library: str | None,
     name: str | None,
     workspace: str | None,
     update: bool,
@@ -759,9 +767,27 @@ def agent_import(
     no secret value is ever read or printed. A partial import is resumed with
     ``--update``, which resolves the agent by the ledger entry whose
     ``platform_url`` matches the instance you are logged into.
+
+    ``--from-library SLUG`` imports the team library's agent instead of PATH:
+    your copy under ``Local/`` when you have one, else a temporary clone.
     """
     from cinna.local_import import run_agent_import
 
+    if (path is None) == (from_library is None):
+        raise click.UsageError("Pass PATH or --from-library SLUG (exactly one).")
+    if from_library is not None:
+        from cinna.local_import import run_agent_import_from_library
+
+        run_agent_import_from_library(
+            from_library,
+            name=name,
+            workspace=workspace,
+            update=update,
+            dry_run=dry_run,
+            no_push=no_push,
+            yes=yes,
+        )
+        return
     run_agent_import(
         path,
         name=name,
@@ -1688,6 +1714,141 @@ def agent_api_access_scopes(
     run_agent_api_access_scopes(
         producer_ref, to, set_scopes=set_scopes, clear=clear, as_json=as_json
     )
+
+
+# ─── team library ──────────────────────────────────────────────────────────
+
+
+@cli.group(name="library")
+def library():
+    """Share kit agents with your team through the Cinna instance.
+
+    A shared agent is a git repository cinna-core hosts; on disk it is an
+    ordinary ``Local/<slug>/`` folder with a remote. Git signs in with your
+    account token (never written to disk or printed). Same verbs as Cinna
+    Desktop: list = Team library, get = Get, share = Share with the team /
+    Share changes, update = Update, suggest = Suggest a change.
+
+    Fast-forward only: when the team's changes and yours do not combine
+    cleanly, nothing is merged — the command stops and names the two ways on.
+    """
+
+
+_PATH_HELP = "Agent folder (a path, or a slug under Local/; default: the current one)."
+
+
+@library.command(name="list")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
+def library_list(as_json: bool):
+    """The agents in the team library you can read, and whether you have them here."""
+    _access_json_mode(as_json)
+    from cinna.library import run_list
+
+    run_list(as_json=as_json)
+
+
+@library.command(name="get")
+@click.argument("slug")
+@click.option("--dir", "dir_opt", default=None, help="Parent folder (default: the workshop's Local/).")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def library_get(slug: str, dir_opt: str | None, as_json: bool):
+    """Get SLUG from the team library into Local/<slug>/.
+
+    Refuses when the folder exists, or when you already have the agent under
+    another name.
+    """
+    _access_json_mode(as_json)
+    from cinna.library import run_get
+
+    run_get(slug, dir_opt=dir_opt, as_json=as_json)
+
+
+@library.command(name="share")
+@click.argument("path", required=False, metavar="[PATH]")
+@click.option("-m", "--message", default=None, help="What changed (needed when there are changes).")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def library_share(path: str | None, message: str | None, as_json: bool):
+    """Share an agent with the team, or share your changes to it.
+
+    Not shared yet: creates the library repository from cinna-agent.json, runs
+    git init in the folder, commits everything and pushes. Shared already:
+    commits everything and pushes; if the team pushed first, your changes are
+    rebased once onto theirs when that applies cleanly, else nothing happens
+    and the two options are printed. credentials/, app-data/ and secret files
+    are refused before anything is committed.
+
+    Examples:
+      cinna library share ../../Local/invoice-reader -m "First version"
+      cinna library share -m "Handle credit notes"     # from inside the folder
+    """
+    _access_json_mode(as_json)
+    from cinna.library import run_share
+
+    run_share(path, message, as_json=as_json)
+
+
+@library.command(name="update")
+@click.argument("path", required=False, metavar="[PATH]")
+@click.option("--all", "all_", is_flag=True, help="Every library agent under Local/.")
+@click.option("--json", "as_json", is_flag=True, help="Print the results as JSON.")
+def library_update(path: str | None, all_: bool, as_json: bool):
+    """Bring in the team's changes (fast-forward, or a clean rebase).
+
+    Refuses on uncommitted changes, and when your shared-but-unpushed changes
+    and the team's do not combine cleanly.
+    """
+    _access_json_mode(as_json)
+    from cinna.library import run_update
+
+    run_update(path, all_, as_json=as_json)
+
+
+@library.command(name="status")
+@click.argument("path", required=False, metavar="[PATH]")
+@click.option("--all", "all_", is_flag=True, help="Every library agent under Local/.")
+@click.option("--no-fetch", is_flag=True, help="Compare with what was last fetched; no network.")
+@click.option("--json", "as_json", is_flag=True, help="Print the results as JSON.")
+def library_status(path: str | None, all_: bool, no_fetch: bool, as_json: bool):
+    """One line per agent: ahead / behind the team, uncommitted files."""
+    _access_json_mode(as_json)
+    from cinna.library import run_status
+
+    run_status(path, all_, fetch=not no_fetch, as_json=as_json)
+
+
+@library.command(name="grants")
+@click.argument("slug")
+@click.option("--add", "add", multiple=True, metavar="PRINCIPAL=ACCESS", help="Grant read|write|maintain to everyone, role:<name>, user:<id> or an email.")
+@click.option("--remove", "remove", multiple=True, metavar="PRINCIPAL", help="Remove a principal's grant.")
+@click.option("--json", "as_json", is_flag=True, help="Print the grants as JSON.")
+def library_grants(slug: str, add: tuple[str, ...], remove: tuple[str, ...], as_json: bool):
+    """Show or change who has access to SLUG (changes: maintainers only).
+
+    Examples:
+      cinna library grants invoice-reader
+      cinna library grants invoice-reader --add everyone=read --add ana@example.com=write
+    """
+    _access_json_mode(as_json)
+    from cinna.library import run_grants
+
+    run_grants(slug, add, remove, as_json=as_json)
+
+
+@library.command(name="suggest")
+@click.argument("path", required=False, metavar="[PATH]")
+@click.option("-m", "--message", required=True, help="What the change does and why.")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def library_suggest(path: str | None, message: str, as_json: bool):
+    """Send your changes to the agent's maintainers as a suggestion.
+
+    For agents you can read but not change: the difference between your
+    folder and the team's version goes to the maintainers, who apply and share
+    it. Your folder is not changed.
+    """
+    _access_json_mode(as_json)
+    from cinna.library import run_suggest
+
+    run_suggest(path, message, as_json=as_json)
 
 
 # ─── skills group ──────────────────────────────────────────────────────────
@@ -3407,10 +3568,12 @@ def _git_agent_opt(f):
 
 @cli.group()
 def git():
-    """Version the agent's workspace with git against its external remote.
+    """Version the agent's workspace with git against its remote.
 
     Thin, fail-loud wrappers over real git that run with YOUR own git/SSH
-    credentials (the platform's deploy key is never used locally). The CLI's job
+    credentials (the platform's deploy key is never used locally) — or, when
+    the remote is a cinna library repository, with this workspace's CLI token,
+    passed to git through its environment only. The CLI's job
     is discovering the agent's git coordinates, getting the working-tree layout
     and Mutagen wiring right, and surfacing fast-forward-only rejections clearly
     — not replacing git. See 'cinna git link' to get started.
@@ -3441,9 +3604,8 @@ def git_link(agent_ref: str | None):
         with console.spinner("Linking git working tree…"):
             result = git_versioning.link(config, client, root, coords)
 
-    console.status(
-        f"Linked {config.agent_name} to {coords.repo_url} (branch {result.ref})."
-    )
+    where = "the cinna library remote" if coords.is_cinna else coords.repo_url
+    console.status(f"Linked {config.agent_name} to {where} (branch {result.ref}).")
     console.console.print(f"  working tree: {result.clone}")
     if result.relayout_moved:
         console.warn(
@@ -3472,8 +3634,9 @@ def git_status(agent_ref: str | None):
             logger.debug("coordinates fetch failed: %s", exc)
             coords = None
         if coords is not None and coords.vcs_enabled:
+            where = "cinna library remote" if coords.is_cinna else coords.repo_url
             console.status(
-                f"This agent is git-versioned ({coords.repo_url}, branch "
+                f"This agent is git-versioned ({where}, branch "
                 f"{coords.effective_ref}) but not linked locally."
             )
             console.console.print("  Run 'cinna git link' to set up the working tree.")
@@ -3482,7 +3645,12 @@ def git_status(agent_ref: str | None):
         return
 
     g = config.git
-    console.status(f"Linked: {g.repo_url} (branch {g.ref})")
+    if g.auth_hint == git_versioning.CINNA_AUTH_HINT:
+        # Hosted by cinna-core: git signs in with this workspace's CLI token, so
+        # there is no URL to configure and no credential for the user to set up.
+        console.status(f"Linked: cinna library remote (branch {g.ref})")
+    else:
+        console.status(f"Linked: {g.repo_url} (branch {g.ref})")
     console.console.print(f"  working tree: {git_versioning.clone_root(config, root)}")
     console.console.print(f"  subdir:       {g.subdir or '(repo root)'}")
     console.console.print(f"  direction:    {g.sync_direction or 'bidirectional'}")
