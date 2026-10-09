@@ -237,10 +237,39 @@ linking, layout, the registry, or push/pull — that's where the subtle bugs liv
   - `cinna git unlink` stops the helpers and drops the registry git block but
     **leaves `.git` and history**; `cinna git link` re-enables.
 
+### 16. A cinna remote (`auth_hint: cinna`) needs no credential and leaves none
+
+> Needs a cinna-core with the team library (P7: an agent whose git source is a
+> library repository). Until core ships it, this scenario is covered by
+> `tests/test_library.py` against a local smart-HTTP server.
+
+- **Goal:** a cloud agent linked to a team-library repository links, pushes and
+  pulls with the workspace's own token; nothing about the token reaches disk.
+- **Setup:** an agent whose coordinates report `auth_hint: cinna`, synced locally.
+- **Steps:**
+  ```
+  cinna git status            # expect "cinna library remote", no URL
+  cinna git link
+  echo "# smoke" >> workspace/docs/SMOKE.md
+  cinna git commit -m "smoke" --push
+  cinna git pull
+  grep -c Bearer .git/config ../.git/config 2>/dev/null   # expect 0 / no file
+  grep -c "Bearer" cinna.log                               # expect 0
+  git push                    # plain git: expect a 401-style refusal
+  ```
+- **Expected:** link, commit/push and pull succeed with no prompt; `git remote -v`
+  shows the plain clone URL; no file holds the token; plain `git push` fails
+  ("could not read Username"), because only the wrappers carry the token.
+- **Watch for:** the token in `.git/config`, the remote URL or `cinna.log`; a
+  hanging username prompt instead of a failure; an expired per-agent token not
+  being re-minted through the account workspace.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **No secret ever staged/committed** — `.cinna/`, `credentials/`, `app-data/`,
   logs, databases never appear in `git status`/`ls-files` as tracked.
+- **No token on disk** — for a cinna remote, the token is in no file, URL,
+  argv or log line.
 - **No silent clobber** — every rejected push is fail-loud with recovery guidance;
   the CLI never force-pushes.
 - **No state drift between commands** — a command that re-writes the registry or

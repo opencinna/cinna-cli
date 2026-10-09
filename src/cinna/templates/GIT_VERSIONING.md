@@ -59,6 +59,13 @@ These are **thin wrappers over real git** that run with the developer's own
 git/SSH credentials. You can also drop to plain `git -C <clone-root> …` for
 anything not wrapped (`git diff`, `git log -p`, `git branch`, …).
 
+When `cinna git status` says **cinna library remote**, the repository is hosted
+by the Cinna instance itself and git signs in with this workspace's CLI token,
+which the wrappers pass to git through its environment. There is nothing to
+set up — but plain `git fetch` / `push` / `pull` against that remote will be
+refused (401): use the `cinna git` wrappers for anything that talks to it.
+Never put the token into the remote URL or `.git/config`.
+
 ## The two-writer, fast-forward-only model — fail loud, never force
 
 Both the backend (its deploy key) and the developer (their own creds) push to the

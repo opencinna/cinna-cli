@@ -18,16 +18,27 @@ Layout (see ``config.compute_agent_layout``): the agent dir (``workspace_root``)
 is the repo's ``<subdir>/`` node; its parent is the git working-tree root
 (``clone_path``). For a repo-root agent (``subdir`` is None) the clone root and
 the agent dir are the same directory.
+
+Remote kinds (``auth_hint``): an **external** remote (``ssh`` / ``https`` /
+anything else) authenticates with the developer's own git setup, as above. A
+**cinna** remote (``auth_hint == "cinna"``) is a repository cinna-core hosts
+for the team library; git authenticates to it with the CLI token the workspace
+already holds, passed to the git child through environment-provided config
+(:func:`remote_auth_env`) — never in argv, never in ``.git/config``, never
+logged. ``cinna library`` (:mod:`cinna.library`) drives the same
+:func:`run_git` with the account token.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import click
 
@@ -75,6 +86,11 @@ class GitCoordinates:
     def allows_pull(self) -> bool:
         return (self.sync_direction or "bidirectional") in ("pull", "bidirectional")
 
+    @property
+    def is_cinna(self) -> bool:
+        """The repo is hosted by cinna-core: git authenticates with the CLI token."""
+        return self.auth_hint == CINNA_AUTH_HINT
+
 
 def fetch_coordinates(client: PlatformClient) -> GitCoordinates:
     """Fetch the agent's git coordinates from the backend."""
@@ -83,9 +99,78 @@ def fetch_coordinates(client: PlatformClient) -> GitCoordinates:
 
 # ── git subprocess plumbing ───────────────────────────────────────────────
 
+#: ``auth_hint`` of a repository cinna-core hosts (the team library, or a cloud
+#: agent whose git source points at one).
+CINNA_AUTH_HINT = "cinna"
+
+
+@dataclass(frozen=True)
+class RemoteAuth:
+    """A token for one cinna remote: what :func:`remote_auth_env` injects.
+
+    ``url`` is any URL on the remote's origin (the clone URL will do); the
+    header is scoped to ``<scheme>://<host>[:port]/`` so git never sends it
+    anywhere else. ``repr`` hides the token so a stray log line cannot carry it.
+    """
+
+    url: str
+    token: str
+
+    def __repr__(self) -> str:
+        return f"RemoteAuth(url={self.url!r}, token=<hidden>)"
+
+
+def remote_auth_env(auth: RemoteAuth, base: dict | None = None) -> dict:
+    """``base`` (default ``os.environ``) plus the token as env-provided git config.
+
+    README §4.4 of the team-sharing plan: ``GIT_CONFIG_COUNT`` /
+    ``GIT_CONFIG_KEY_n`` / ``GIT_CONFIG_VALUE_n`` set
+    ``http.<origin>/.extraHeader``, so the token is in neither argv nor
+    ``.git/config``. Appended after any ``GIT_CONFIG_*`` entries the caller's
+    environment already carries rather than replacing them. Needs git ≥ 2.31.
+    ``GIT_TERMINAL_PROMPT=0`` turns a refused token into a failure instead of a
+    username prompt that would hang a driver.
+    """
+    env = dict(os.environ if base is None else base)
+    parts = urlsplit(auth.url)
+    if not parts.scheme or not parts.netloc:
+        raise click.ClickException(f"Not a usable remote URL: {auth.url}")
+    try:
+        n = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        n = 0
+    env[f"GIT_CONFIG_KEY_{n}"] = f"http.{parts.scheme}://{parts.netloc}/.extraHeader"
+    env[f"GIT_CONFIG_VALUE_{n}"] = f"Authorization: Bearer {auth.token}"
+    env["GIT_CONFIG_COUNT"] = str(n + 1)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
 
 def git_available() -> bool:
     return shutil.which("git") is not None
+
+
+#: ``GIT_CONFIG_COUNT`` (how the token reaches git) arrived in git 2.31.
+MIN_TOKEN_GIT = (2, 31)
+
+
+def require_token_capable_git() -> None:
+    """Refuse before any cinna-remote operation when git cannot take the token.
+
+    An older git silently ignores ``GIT_CONFIG_*`` and the request goes out
+    unauthenticated; that 401 would read as a token problem, so say the real one.
+    """
+    if not git_available():
+        raise click.ClickException(
+            "git is not installed or not on PATH — install git (2.31 or newer)."
+        )
+    out = run_git(["--version"], Path.cwd()).stdout or ""
+    m = re.search(r"(\d+)\.(\d+)", out)
+    if m and (int(m.group(1)), int(m.group(2))) < MIN_TOKEN_GIT:
+        raise click.ClickException(
+            f"{out.strip()} is too old for cinna remotes: git 2.31 or newer is "
+            "needed to pass the token without writing it to disk. Upgrade git."
+        )
 
 
 def run_git(
@@ -94,22 +179,87 @@ def run_git(
     *,
     check: bool = False,
     capture: bool = True,
+    auth: RemoteAuth | None = None,
+    extra_env: dict | None = None,
 ) -> subprocess.CompletedProcess:
     """Run ``git <args>`` in ``cwd`` with the developer's own environment.
 
-    No credential injection: the dev's git config, credential helpers and
-    ``ssh-agent`` drive auth (the deploy key is host-side only).
+    Without ``auth`` there is no credential injection: the dev's git config,
+    credential helpers and ``ssh-agent`` drive auth (the deploy key is
+    host-side only). With ``auth`` (a cinna remote) the token travels in the
+    child's environment only; the debug line logs argv, which never holds it.
+    ``extra_env`` adds plain variables (``GIT_INDEX_FILE`` for a throwaway
+    index).
     """
     cmd = ["git", *args]
-    logger.debug("exec: %s (cwd=%s)", " ".join(cmd), cwd)
+    logger.debug(
+        "exec: %s (cwd=%s%s)", " ".join(cmd), cwd, ", cinna auth" if auth else ""
+    )
+    env = remote_auth_env(auth) if auth else os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         cmd,
         cwd=str(cwd),
-        env=os.environ.copy(),
+        env=env,
         capture_output=capture,
         text=True,
         check=check,
     )
+
+
+def agent_remote_auth(config: CinnaConfig, workspace_root: Path, url: str) -> RemoteAuth:
+    """The per-agent CLI token as a :class:`RemoteAuth`, re-minted when expired.
+
+    An expired token is re-minted through the account workspace above the
+    agent (the path ``cinna doctor`` uses); without one, the message names
+    ``cinna set-token``, the per-agent refresh.
+    """
+    from cinna.auth import is_token_expired
+
+    if is_token_expired(config.cli_token):
+        try:
+            from cinna.doctor import _make_remint
+
+            _make_remint(config.agent_id, workspace_root)()
+        except click.ClickException as exc:
+            raise click.ClickException(
+                "This agent's CLI token has expired and could not be re-minted "
+                f"({exc.format_message()}).\nRefresh it with 'cinna set-token' "
+                "from the agent's Local Development page."
+            ) from exc
+        from cinna.config import load_config
+
+        config.cli_token = load_config(workspace_root).cli_token
+    return RemoteAuth(url=url, token=config.cli_token)
+
+
+def _layout_auth(config: CinnaConfig, workspace_root: Path) -> RemoteAuth | None:
+    """Auth for the linked remote: a token for ``cinna``, ``None`` for external."""
+    g = config.git
+    if g is None or g.auth_hint != CINNA_AUTH_HINT or not g.repo_url:
+        return None
+    return agent_remote_auth(config, workspace_root, g.repo_url)
+
+
+def auth_failure_hint(detail: str) -> str:
+    """A sentence for git's ``401`` / ``403`` against a cinna remote, or ``""``."""
+    if "403" in detail:
+        return (
+            "\n\nThe platform refused access to this repository (403): your "
+            "account has no access to it, or only read access."
+        )
+    # With GIT_TERMINAL_PROMPT=0 a 401 surfaces as git failing to prompt.
+    if any(
+        s in detail
+        for s in ("401", "Authentication failed", "could not read Username")
+    ):
+        return (
+            "\n\nThe platform did not accept the CLI token (401). Refresh it "
+            "('cinna set-token', or 'cinna account set-token' for an account "
+            "workspace) and retry."
+        )
+    return ""
 
 
 def _git_or_raise(args: list[str], cwd: Path, what: str) -> subprocess.CompletedProcess:
@@ -226,7 +376,11 @@ def link(
     prefix = _prefix(subdir)
     ref = coords.effective_ref
 
-    if coords.auth_hint == "ssh":
+    auth = None
+    if coords.is_cinna:
+        require_token_capable_git()
+        auth = agent_remote_auth(config, workspace_root, coords.repo_url)
+    elif coords.auth_hint == "ssh":
         console.status(
             f"This repo uses SSH — ensure your own SSH key can access {coords.repo_url} "
             "(the platform's deploy key is not used locally)."
@@ -256,11 +410,11 @@ def link(
             ["sparse-checkout", "set", subdir], clone, "git sparse-checkout set"
         )
 
-    # 4. fetch with the developer's own credentials
-    fetch = run_git(["fetch", "--depth=1", "origin", ref], clone)
+    # 4. fetch with the developer's own credentials (the CLI token for cinna)
+    fetch = run_git(["fetch", "--depth=1", "origin", ref], clone, auth=auth)
     if fetch.returncode != 0:
         detail = (fetch.stderr or fetch.stdout or "").strip()
-        hint = ""
+        hint = auth_failure_hint(detail) if auth else ""
         if coords.auth_hint == "ssh" and (
             "Permission denied" in detail or "publickey" in detail
         ):
@@ -475,9 +629,16 @@ def push(config: CinnaConfig, workspace_root: Path) -> None:
             "This agent's git source is pull-only (sync_direction=pull); local "
             "pushes are rejected. Edit on the platform side instead."
         )
-    result = run_git(["push", "origin", ref], clone)
+    auth = _layout_auth(config, workspace_root)
+    result = run_git(["push", "origin", ref], clone, auth=auth)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
+        if auth and ("non-fast-forward" in detail or "[rejected]" in detail):
+            raise click.ClickException(
+                "Push rejected — the remote advanced (someone, or the backend, "
+                "pushed first).\nReconcile with 'cinna git pull', then "
+                "'cinna git push' again. Never force-push a shared agent ref."
+            )
         if "non-fast-forward" in detail or "[rejected]" in detail:
             raise click.ClickException(
                 "Push rejected — the remote advanced (someone, or the backend, "
@@ -485,15 +646,21 @@ def push(config: CinnaConfig, workspace_root: Path) -> None:
                 f"origin {ref}\n\nthen 'cinna git push' again. Never force-push a "
                 "shared agent ref."
             )
-        raise click.ClickException(f"git push failed:\n{detail}")
+        raise click.ClickException(
+            f"git push failed:\n{detail}{auth_failure_hint(detail) if auth else ''}"
+        )
 
 
 def pull(config: CinnaConfig, workspace_root: Path) -> None:
     """Rebase-pull the remote into the local working tree."""
     clone, _, ref = _require_linked(config, workspace_root)
-    result = run_git(["pull", "--rebase", "origin", ref], clone)
+    auth = _layout_auth(config, workspace_root)
+    result = run_git(["pull", "--rebase", "origin", ref], clone, auth=auth)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
+        hint = auth_failure_hint(detail) if auth else ""
+        if hint:
+            raise click.ClickException(f"git pull failed:\n{detail}{hint}")
         raise click.ClickException(
             f"git pull --rebase failed:\n{detail}\n\nResolve the conflict in "
             f"{clone}, finish the rebase, and re-run."

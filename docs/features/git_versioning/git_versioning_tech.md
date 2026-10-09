@@ -21,7 +21,9 @@ CLI; all logic lives in `src/cinna/`, tests in `tests/`.
   restore, excludes, fileMode, multi-segment, CLI wiring),
   `tests/test_config.py` (registry git-block preserve/clear, `GitLayout`
   round-trip), `tests/test_account.py` (multi-segment subdir resolution, nested
-  sync layout), `tests/test_context.py` (guide writing + conditional pointer).
+  sync layout), `tests/test_context.py` (guide writing + conditional pointer),
+  `tests/test_library.py` (the `cinna` remote kind: token injection, push/pull
+  against a real smart-HTTP server, status wording).
 
 ## Command surface
 
@@ -64,6 +66,23 @@ workspace, or an account-root child).
   non-fast-forward to a `pull --rebase` instruction; honors the `pull`-direction
   guard.
 - `src/cinna/git_versioning.py:pull()` — `git pull --rebase origin <ref>`.
+- Cinna remotes (`auth_hint == "cinna"`, `GitCoordinates.is_cinna`):
+  - `src/cinna/git_versioning.py:RemoteAuth` — `(url, token)`; its `repr` hides
+    the token.
+  - `src/cinna/git_versioning.py:remote_auth_env()` — the token as
+    `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` setting
+    `http.<scheme>://<host>/.extraHeader`, appended after any `GIT_CONFIG_*`
+    already in the environment, plus `GIT_TERMINAL_PROMPT=0`.
+  - `src/cinna/git_versioning.py:run_git()` — `auth=` injects it; `extra_env=`
+    adds plain variables. The debug line logs argv only.
+  - `src/cinna/git_versioning.py:agent_remote_auth()` — the per-agent token,
+    re-minted via `src/cinna/doctor.py:_make_remint()` when locally expired.
+  - `src/cinna/git_versioning.py:_layout_auth()` — what `push()` / `pull()` use:
+    a `RemoteAuth` for a linked cinna remote, `None` for an external one.
+  - `src/cinna/git_versioning.py:require_token_capable_git()` — refuses git
+    older than 2.31 (no `GIT_CONFIG_COUNT`); called by `link()` for cinna.
+  - `src/cinna/git_versioning.py:auth_failure_hint()` — the 401 / 403 sentence
+    (a 401 under `GIT_TERMINAL_PROMPT=0` reads "could not read Username").
 - `src/cinna/git_versioning.py:checkout_version()` — `git checkout <ref> --
   <subdir>/workspace` (HEAD untouched); `--reload` is handled in the command via
   `src/cinna/sync_session.py:ensure_session()` + `flush()`.
@@ -114,7 +133,9 @@ clears it (`cinna git unlink`). `workspace_path` stays the **agent dir** so
   source pointers.
 - **git** (the developer's own binary on `PATH`): invoked via
   `src/cinna/git_versioning.py:run_git()` with `os.environ` (their git config /
-  credential helpers / `ssh-agent` drive auth). Relied-on invariants: cone-mode
+  credential helpers / `ssh-agent` drive auth) — plus, for `auth_hint: cinna`,
+  the CLI token as env-provided config (git ≥ 2.31). The coordinates' `subdir`
+  is null for a library repository, so the clone root is the agent dir. Relied-on invariants: cone-mode
   sparse-checkout includes repo-root files; `ls-files --deleted` skips
   skip-worktree (out-of-cone) entries; `reset --mixed` leaves the working tree.
 - **Mutagen** — unchanged; the alpha endpoint stays `workspace_root/workspace`
@@ -135,3 +156,6 @@ clears it (`cinna git unlink`). `workspace_path` stays the **agent dir** so
   `.cinna/` for `--agent`. (`tests/test_account.py`)
 - Token/secret never committed — `.cinna/` is in `.git/info/exclude`; verify with
   `git status` before committing. (`tests/test_git_versioning.py`)
+- Cinna remote token only in the git child's environment — never argv, never
+  `.git/config`, never logged. (`tests/test_library.py` — `TestRemoteAuthEnv`,
+  `test_git_push_and_pull_on_cinna_remote`, `test_git_status_names_the_cinna_remote`)
