@@ -538,7 +538,7 @@ Hand work to a remote agent as a **durable delegation** — a platform task with
 
 - `create --id KEY --target AGENT_UUID --title T --brief B [--execute]` — the identity is `--target` + `--id`: a retry with the same pair returns the original task (changed title/brief are ignored) and never launches execution twice (the backend deduplicates). Prints the backend **task id** the other commands take, and whether it executes. `--depth 2 --root ROOT` makes a sub-delegation (`--root` is required at depth 2, not allowed at depth 1); `--group` tags related work.
 - `status TASK_ID` — one read: state, latest result, and any open question with its result id. A requester agent should end its turn and let Cinna Desktop deliver the result rather than poll.
-- `report [TASK_ID] --status in_progress|blocked|done|failed --summary S` — `blocked` needs `--question`; `--audience user` when a human must decide (default `requester`). `--artifact` (repeatable) is a JSON object with non-empty `kind` (backend accepts `file` or `link`), `name` and an `http(s)` `ref` — upload local files separately. `--body` adds detail.
+- `report [TASK_ID] --status in_progress|blocked|done|failed --summary S` — `blocked` needs `--question`; `--audience user` when a human must decide (default `requester`). `--artifact` (repeatable) is a JSON object with non-empty `kind` (backend accepts `file` or `link`), `name` and an `http(s)` `ref` — upload local files separately (`cinna artifacts publish` prints such a link). `--body` adds detail.
 - **Inside a cloud task**, omit `TASK_ID`: the report goes to the current task using `AGENT_AUTH_TOKEN`, `BACKEND_URL`, `ENV_ID` and the session in `CINNA_SESSION_CONTEXT_PATH` (default `./session_context.json`); the backend checks the session belongs to this environment's agent and owner.
 - `reply TASK_ID --result-id ID --message M` — answer a blocked question.
 - `--json` (after the subcommand) prints `{"result": "ok", "delegation": {…}}`.
@@ -552,6 +552,25 @@ cinna delegation report --status done --summary 'Finished'     # inside the clou
 ```
 
 Inside cloud tasks, cinna-core's MCP task server also offers a `handover_report` tool for the same report.
+
+### `cinna artifacts publish | list | show | open | download | share | link | delete`
+
+Publish a folder or a file to Cinna as an **artifact** — a frozen, versioned copy people open on a Cinna page (a folder with `index.html` runs as a sandboxed static site; other files open in viewers). Run from the account workspace. Every verb first checks the server's artifacts capability and refuses with "This Cinna server does not support artifacts" when it is missing.
+
+- `publish PATH [--title T] [--description D] [--entry index.html] [--note N]` — zips the path and prints the page link. `.git/`, `.env*`, `credentials/`, `app-data/`, `.claude/`, `.cinna/`, `node_modules/`, key files and symlinks are never uploaded; the command lists what it left out. Private until shared. Publishing the same path again adds a revision to the same artifact (same link) — the CLI remembers `path → id` in `.cinna/artifacts.json`; `--update ID` names the artifact, `--new` publishes a separate one.
+- `list [--shared]` · `show ID` (revisions, people, links) · `open ID` (browser) · `download ID [--rev N] [-o DIR]` (default `artifacts/<short-id>/`). Ids may be shortened to a unique prefix.
+- `share ID [--instance | --private] [--user EMAIL]… [--remove-user EMAIL]…` and `link create ID [--expires 7d|12h|2w|never] [--code] [--label L] [--rev N]` — **a person runs these, in a terminal**: they refuse under `--json`, `--no-input` or without a TTY (code `needs_person`), and the account workspace's `.claude/settings.json` denies them to Claude Code. `link create` prints the link (and code) once.
+- `link revoke ID LINK` (link id or token prefix, from `show`) · `delete ID` — both confirm; `--yes` is required with `--json`.
+- `--json` (after the subcommand): NDJSON progress lines, then `{"result": "ok", "artifact_id", "action", "revision", "url", "excluded", …}`.
+
+```bash
+cinna artifacts publish ./reports/q3 --title "Q3 churn"
+cinna artifacts publish ./reports/q3            # revision 2, same link
+cinna artifacts share 3fa85f64 --user bob@example.com
+cinna artifacts link create 3fa85f64 --expires 7d --code
+```
+
+The printed page link is a valid `link` artifact for `cinna delegation report --artifact`.
 
 ### `cinna dev`
 

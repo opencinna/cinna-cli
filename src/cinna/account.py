@@ -795,17 +795,44 @@ def _write_account_claude_settings(account_root: Path) -> None:
     Code doesn't prompt "New MCP server found in this project" on first launch,
     and the ``mcp__platform-knowledge`` allow rule pre-approves that server's
     tool calls (e.g. ``knowledge_query``) so each invocation doesn't prompt.
+    The ``deny`` rules keep the person-only artifact verbs (``share``, ``link
+    create``) away from Claude Code even under the ``Bash(cinna:*)`` allow
+    (A8: agents publish, people share; the verbs also refuse without a TTY).
+
     Create-if-absent: never clobbers a user's own edits (so it is safe to call
-    again from ``refresh-context``).
+    again from ``refresh-context``). An existing file only gains the deny rules
+    it lacks; one that is not a JSON object is left alone.
     """
+    from cinna.artifacts import person_only_deny_rules
+
+    deny = person_only_deny_rules()
     settings_path = account_root / ".claude" / "settings.json"
     if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except (OSError, ValueError):
+            return
+        permissions = settings.get("permissions") if isinstance(settings, dict) else None
+        if permissions is None and isinstance(settings, dict):
+            permissions = settings["permissions"] = {}
+        if not isinstance(permissions, dict):
+            return
+        existing = permissions.get("deny")
+        if existing is None:
+            existing = permissions["deny"] = []
+        if not isinstance(existing, list):
+            return
+        missing = [rule for rule in deny if rule not in existing]
+        if missing:
+            existing.extend(missing)
+            settings_path.write_text(json.dumps(settings, indent=2) + "\n")
         return
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings = {
         "enableAllProjectMcpServers": True,
         "permissions": {
             "allow": ["Bash(cinna:*)", "mcp__platform-knowledge"],
+            "deny": deny,
         },
     }
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")

@@ -53,7 +53,9 @@ the silent-secret and scope-drift bugs live.
   `account_token` / `platform_url` / `frontend_url` / `machine_name`; an empty
   `agents/` dir; an orchestrator `CLAUDE.md` (contains "Account Workspace");
   `.claude/settings.json` with `permissions.allow == ["Bash(cinna:*)",
-  "mcp__platform-knowledge"]` and `enableAllProjectMcpServers: true`; `.mcp.json`
+  "mcp__platform-knowledge"]`, `permissions.deny == ["Bash(cinna artifacts
+  share:*)", "Bash(cinna artifacts link create:*)"]` and
+  `enableAllProjectMcpServers: true`; `.mcp.json`
   + `opencode.json` pointing the proxy at `.cinna/account.json` via
   `CINNA_ACCOUNT_CONFIG`; a `context/` tree; and the next-step hints
   (`cinna account agents`, `cinna agent sync`).
@@ -226,7 +228,8 @@ the silent-secret and scope-drift bugs live.
 - **Expected:** `context/` is replaced (old-only files gone); the orchestrator
   `CLAUDE.md`, `.mcp.json`/`opencode.json`, and **every** synced child's
   per-agent `CLAUDE.md` are regenerated from the bundled templates; a
-  user-edited `.claude/settings.json` is left untouched; the run reports how many
+  user-edited `.claude/settings.json` keeps every entry and only gains the
+  artifact `deny` rules it lacks; the run reports how many
   child workspaces were regenerated.
 - **Watch for (non-destructive rule):** simulate a download failure (point at an
   unreachable platform) and confirm the **old `context/` survives** and the
@@ -388,7 +391,8 @@ the silent-secret and scope-drift bugs live.
 - **Single-use setup token is never burned on a doomed run** — guards precede the
   exchange.
 - **No silent clobber** — `refresh-context` removes the old `context/` only after
-  a successful download; user-edited `.claude/settings.json` is never overwritten.
+  a successful download; user-edited `.claude/settings.json` is never overwritten
+  (only the missing artifact `deny` rules are merged in).
 - **No state drift between commands** — a synced child is a standard per-agent
   workspace (registry + config) indistinguishable from `cinna setup`; the active
   user workspace is the single source for both the listing scope and the create

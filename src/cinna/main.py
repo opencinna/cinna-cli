@@ -22,6 +22,7 @@ from cinna.config import (
     load_config,
     remove_agent_registry,
 )
+from cinna.artifacts import artifacts
 from cinna.delegation import delegation
 from cinna.errors import EXIT_ERROR, CinnaExit, NetworkError
 from cinna.mcp_proxy import run_mcp_proxy
@@ -139,6 +140,22 @@ def cli(verbose: bool):
 for _delegation_command in delegation.commands.values():
     json_option(_delegation_command)
 cli.add_command(delegation)
+
+
+# ─── artifacts ─────────────────────────────────────────────────────────────
+
+# Same reason as delegation: `--json` and `--no-input` are attached here, on
+# every leaf command (the `link` subgroup's included).
+def _attach_driver_options(group: click.Group) -> None:
+    for command in group.commands.values():
+        if isinstance(command, click.Group):
+            _attach_driver_options(command)
+        else:
+            json_option(no_input_option(command))
+
+
+_attach_driver_options(artifacts)
+cli.add_command(artifacts)
 
 
 # ─── setup ─────────────────────────────────────────────────────────────────

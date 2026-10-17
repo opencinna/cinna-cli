@@ -273,6 +273,11 @@ def test_account_setup_creates_workspace(
         "mcp__platform-knowledge",
     ]
     assert settings["enableAllProjectMcpServers"] is True
+    # A8: the person-only artifact verbs are denied to Claude Code.
+    assert settings["permissions"]["deny"] == [
+        "Bash(cinna artifacts share:*)",
+        "Bash(cinna artifacts link create:*)",
+    ]
 
     # Knowledge MCP proxy wiring (.mcp.json / opencode.json) in account mode.
     mcp = json.loads((root / ".mcp.json").read_text())
@@ -584,8 +589,19 @@ def test_refresh_context_preserves_user_claude_settings(
 
     result = runner.invoke(cli, ["account", "refresh-context"])
     assert result.exit_code == 0, result.output
-    # Untouched — the user's extra permission survives.
-    assert json.loads((claude_dir / "settings.json").read_text()) == custom
+    # The user's extra permission survives; only the artifact deny rules join.
+    settings = json.loads((claude_dir / "settings.json").read_text())
+    assert settings["permissions"]["allow"] == ["Bash(cinna:*)", "Bash(git:*)"]
+    assert settings["permissions"]["deny"] == [
+        "Bash(cinna artifacts share:*)",
+        "Bash(cinna artifacts link create:*)",
+    ]
+    assert set(settings) == {"permissions"}
+
+    # A second refresh changes nothing.
+    before = (claude_dir / "settings.json").read_text()
+    assert runner.invoke(cli, ["account", "refresh-context"]).exit_code == 0
+    assert (claude_dir / "settings.json").read_text() == before
 
 
 def test_refresh_context_outside_account_workspace(runner, tmp_path, monkeypatch):

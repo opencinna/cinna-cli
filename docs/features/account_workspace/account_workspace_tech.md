@@ -344,7 +344,9 @@ All consumed by `src/cinna/client.py:AccountClient` with the account token
   `CLAUDE.md` regeneration is independent of the download.
   (`tests/test_account.py:test_refresh_context_failure_preserves_old_tree`)
 - **Settings is create-if-absent** — `_write_account_claude_settings` never
-  clobbers a user-edited `.claude/settings.json`.
+  clobbers a user-edited `.claude/settings.json`; it only appends the missing
+  `artifacts.person_only_deny_rules()` to `permissions.deny`, and leaves a file
+  that is not a JSON object alone.
   (`tests/test_account.py:test_refresh_context_preserves_user_claude_settings`)
 - **Per-agent URL is rejected** — `parse_account_setup_input` must not silently
   accept a `/cli-setup/<token>` (non-account) URL.

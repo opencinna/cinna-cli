@@ -109,7 +109,8 @@ remote control over it; nothing is written to the workspace.
   with a non-empty `kind`, a non-empty `name`, and an `http(s)` `ref`. The CLI
   checks only that shape; the backend further restricts `kind` (currently
   `file` or `link`). Local files must be uploaded separately first; the CLI
-  never uploads them.
+  never uploads them. `cinna artifacts publish` is the way to do that: the page
+  link it prints is a valid `link` ref (see [Artifacts](../artifacts/artifacts.md)).
 - **Executor report is session-bound** — without a task id, `report` needs the
   environment's agent token, backend URL and environment id, plus the current
   session context. Missing any of them is a hard failure. The backend verifies

@@ -1140,6 +1140,108 @@ class AccountClient:
             json_body={"result_id": result_id, "message": message},
         )
 
+    # --- Artifacts ---
+    #
+    # The JSON verbs ride the api-proxy. Publishing (multipart), the zip
+    # download (binary) and link creation (the one-time token, which the proxy
+    # refuses to relay) have dedicated account routes.
+
+    def get_artifacts_capabilities(self) -> dict:
+        """GET /api/v1/artifacts/capabilities — ``{version, limits}``.
+
+        Older servers answer 404/405; the caller turns that into a clean
+        "not supported" message.
+        """
+        return self._proxy_json("GET", "artifacts/capabilities")
+
+    def list_artifacts(self, scope: str = "mine", skip: int = 0, limit: int = 200) -> dict:
+        """GET /api/v1/artifacts — ``{data: [...], count: N}``, newest change first."""
+        return self._proxy_json(
+            "GET",
+            "artifacts",
+            query={"scope": scope, "skip": str(skip), "limit": str(limit)},
+        )
+
+    def get_artifact(self, artifact_id: str) -> dict:
+        """GET /api/v1/artifacts/{id} — detail; owners also get revisions, grants, links.
+
+        Link codes arrive blanked: the proxy redacts ``links[*].code``.
+        """
+        return self._proxy_json("GET", f"artifacts/{artifact_id}")
+
+    def update_artifact(self, artifact_id: str, body: dict) -> dict:
+        """PATCH /api/v1/artifacts/{id} — title, description, entry_path, visibility."""
+        return self._proxy_json("PATCH", f"artifacts/{artifact_id}", json_body=body)
+
+    def delete_artifact(self, artifact_id: str) -> dict:
+        """DELETE /api/v1/artifacts/{id} — rows, files and every link, at once."""
+        return self._proxy_json("DELETE", f"artifacts/{artifact_id}")
+
+    def replace_artifact_grants(self, artifact_id: str, grants: list[dict]) -> list:
+        """PUT /api/v1/artifacts/{id}/grants — the full list of people who can view."""
+        return self._proxy_json(
+            "PUT", f"artifacts/{artifact_id}/grants", json_body=grants
+        )
+
+    def revoke_artifact_link(self, artifact_id: str, link_id: str) -> dict:
+        """DELETE /api/v1/artifacts/{id}/links/{link_id}."""
+        return self._proxy_json("DELETE", f"artifacts/{artifact_id}/links/{link_id}")
+
+    def search_users(self, query: str, limit: int = 25) -> dict:
+        """GET /api/v1/users/search — ``{data: [{id, email, full_name}], count}``.
+
+        Fuzzy over name and email; 25 is the server's cap per call.
+        """
+        return self._proxy_json(
+            "GET",
+            "users/search",
+            query={"q": query, "limit": str(limit), "include_self": "true"},
+        )
+
+    def publish_artifact(
+        self, archive_path, fields: dict, artifact_id: str | None = None
+    ) -> dict:
+        """POST /cli/account/artifacts (or ``…/{id}/revisions``) — one zip, multipart.
+
+        The archive is streamed from disk (httpx reads the file object in
+        chunks). Returns ``ArtifactPublished``.
+        """
+        url = "/api/v1/cli/account/artifacts"
+        if artifact_id:
+            url += f"/{artifact_id}/revisions"
+        data = {k: v for k, v in fields.items() if v is not None}
+        with open(archive_path, "rb") as fh:
+            response = self._client.post(
+                url,
+                data=data,
+                files={"archive": ("artifact.zip", fh, "application/zip")},
+                timeout=DOWNLOAD_TIMEOUT,
+            )
+        return self._handle_response(response).json()
+
+    def download_artifact(self, artifact_id: str, destination, rev: int | None = None) -> None:
+        """GET /cli/account/artifacts/{id}/download — stream the zip into ``destination``."""
+        params = {"rev": rev} if rev is not None else None
+        with self._client.stream(
+            "GET",
+            f"/api/v1/cli/account/artifacts/{artifact_id}/download",
+            params=params,
+            timeout=DOWNLOAD_TIMEOUT,
+        ) as response:
+            if response.status_code >= 400:
+                response.read()
+                self._handle_response(response)
+            with open(destination, "wb") as fh:
+                for chunk in response.iter_bytes():
+                    fh.write(chunk)
+
+    def create_artifact_link(self, artifact_id: str, body: dict) -> dict:
+        """POST /cli/account/artifacts/{id}/links — the token is in this response only."""
+        response = self._client.post(
+            f"/api/v1/cli/account/artifacts/{artifact_id}/links", json=body
+        )
+        return self._handle_response(response).json()
+
     @staticmethod
     def error_detail(response: httpx.Response) -> str:
         """The backend's ``detail`` for an error response, else the raw text.

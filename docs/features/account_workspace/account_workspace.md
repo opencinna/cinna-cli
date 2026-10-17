@@ -219,7 +219,9 @@ each with its own token, registry entry, and Mutagen session.
   orchestrator/child `CLAUDE.md` regeneration is offline and per-workspace, so one
   unreadable child never aborts the rest.
 - **User-edited config is preserved.** `.claude/settings.json` is create-if-absent
-  (never clobbered on refresh); `.mcp.json` / `opencode.json` and the generated
+  (never clobbered on refresh; an existing file only gains the two `deny` rules
+  that keep `cinna artifacts share` / `link create` away from Claude Code — see
+  [Artifacts](../artifacts/artifacts.md)); `.mcp.json` / `opencode.json` and the generated
   `CLAUDE.md` are auto-generated infra and are overwritten.
 - **Child checkouts are standard.** A synced child is identical to a `cinna setup`
   checkout — same Model-A layout, same auto-link when git-versioned, same
