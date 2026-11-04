@@ -156,6 +156,13 @@ class _Emitter:
             console.warn(message)
         elif kind == "detached":
             console.console.print("[dim]stopped watching — the turn keeps running[/dim]")
+        elif kind == "tiles":
+            for tile in event.get("changed", []):
+                console.console.print(
+                    f"[cyan]tile {str(tile.get('tile_id'))[:8]} params[/cyan] "
+                    f"[dim]{json.dumps(tile.get('params_before'), ensure_ascii=False)} → "
+                    f"{json.dumps(tile.get('params'), ensure_ascii=False)}[/dim]"
+                )
         elif kind == "error":
             console.error(event.get("message", "error"))
         else:
@@ -175,8 +182,16 @@ def run_chat(
     timeout: int,
     pretty: bool,
     include_events: bool = True,
+    board_ref: str | None = None,
+    focus_ref: str | None = None,
+    context_json: str | None = None,
+    new_chat: bool = False,
 ) -> None:
-    """Drive one chat turn: send a message to a session and stream the reply."""
+    """Drive one chat turn: send a message to a session and stream the reply.
+
+    With ``board_ref`` the turn runs in the agent's dashboard chat on that
+    dashboard and carries a ``<dashboard_context>`` (see ``cinna.dashboards``).
+    """
     emit = _Emitter(pretty)
 
     # 1. Account workspace (the api-proxy auth context) — required.
@@ -205,7 +220,39 @@ def run_chat(
 
     with AccountClient(account_cfg) as client:
         # 4. Resolve the session — resume an existing one or open a new one.
-        if resume:
+        board = dashboard_context = None
+        tiles_before: dict | None = None
+        if board_ref:
+            from cinna.dashboards import prepare_dashboard_chat, tile_params_snapshot
+
+            resumed = _open_session(client, resume) if resume else None
+            if resumed is not None:
+                agent_id = str(resumed.get("agent_id") or "")
+                if not agent_id:
+                    raise click.ClickException(f"Session {resume} names no agent.")
+            else:
+                agent_id = _resolve_agent_id(client, agent_ref)
+            board, dashboard_context = prepare_dashboard_chat(
+                client, agent_id, board_ref, focus_ref, context_json
+            )
+            if resumed is not None and str(resumed.get("dashboard_id") or "") != str(board["id"]):
+                # Core keeps a dashboard context only on that dashboard's chat;
+                # anywhere else it is dropped and the tile tools answer no_dashboard.
+                raise click.ClickException(
+                    f"Session {resume} is not the dashboard chat of '{board.get('name')}'. "
+                    "Drop --resume to continue that dashboard's chat, or --board to "
+                    "resume an ordinary session."
+                )
+            tiles_before = tile_params_snapshot(client, board["id"], board)
+        if board is not None and not resume:
+            opened = client.open_dashboard_chat(board["id"], agent_id, new=new_chat)
+            session = opened.get("session") or {}
+            if not session.get("id"):
+                raise click.ClickException(
+                    f"Core opened no dashboard chat on '{board.get('name')}'."
+                )
+            session_id = session["id"]
+        elif resume:
             session_id = resume
             try:
                 session = client.get_session(session_id)
@@ -218,7 +265,10 @@ def run_chat(
             session = client.create_session(agent_id, mode=mode, title=title)
             session_id = session["id"]
 
-        emit.emit(_session_event(session_id, session, resumed=bool(resume)))
+        opened_event = _session_event(session_id, session, resumed=bool(resume))
+        if board is not None:
+            opened_event["dashboard"] = {"id": board.get("id"), "name": board.get("name")}
+        emit.emit(opened_event)
 
         # 5. Upload attachments → file_ids.
         file_ids: list[str] = []
@@ -239,7 +289,12 @@ def run_chat(
         consumed = _message_count(client, session_id)
 
         # 7. Send the message (returns a JSON ack; the turn runs asynchronously).
-        ack = client.send_message(session_id, message, file_ids=file_ids or None)
+        ack = client.send_message(
+            session_id,
+            message,
+            file_ids=file_ids or None,
+            dashboard_context=dashboard_context,
+        )
         expect_turn = bool(
             ack.get("streaming") or ack.get("pending") or ack.get("queued")
         )
@@ -269,7 +324,32 @@ def run_chat(
             if not _is_transient(exc):
                 raise
             _abort_with_recovery(emit, session_id, exc)
+        if board is not None and tiles_before is not None:
+            _emit_tile_changes(client, emit, board, tiles_before)
         _emit_done(client, emit, session_id, outcome)
+
+
+def _emit_tile_changes(client: AccountClient, emit: "_Emitter", board: dict, before: dict) -> None:
+    """A ``tiles`` event naming the tiles whose stored params the turn changed.
+
+    The agent's ``dashboards_update_tile`` changes a tile on core; the
+    transcript shows the tool call, this shows what it left behind. A
+    highlight draws only in an open browser page, so it has no trace here.
+    """
+    from cinna.dashboards import tile_params_snapshot
+
+    try:
+        after = tile_params_snapshot(client, board["id"])
+    except Exception as exc:  # noqa: BLE001 — a report, never a failure
+        logger.info("tile snapshot after the turn failed: %s", exc)
+        return
+    changed = [
+        {"tile_id": tile_id, "params_before": before.get(tile_id, {}), "params": params}
+        for tile_id, params in after.items()
+        if before.get(tile_id, {}) != params
+    ]
+    if changed:
+        emit.emit({"event": "tiles", "dashboard_id": board.get("id"), "changed": changed})
 
 
 def run_chat_attach(

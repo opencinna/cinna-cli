@@ -138,6 +138,19 @@ authenticate the tunnel and auto-wake a suspended environment.
 - **Transparent recovery.** A stale shared daemon (wrong `MUTAGEN_SSH_PATH`) is
   bounced and retried once; a still-waking environment (WebSocket close `1013`) is
   retried with backoff before a friendly "environment still waking" error.
+- **A replaced container reconnects at once.** Restarting or rebuilding the
+  environment kills the remote Mutagen agent ("unexpected EOF"). Mutagen only
+  retries on its own backoff, and until then a flush fails with "session is not
+  currently able to synchronize". Every flush (`sync push`/`pull`, the flush
+  before a `cinna dashboards` read, `agent sync`, `agent import`, `git checkout
+  --reload`) now forces a reconnect (`mutagen sync resume`), waits up to 90 s for
+  it, and flushes again. If the sync tunnel refuses the token (HTTP 401/403) in an
+  account-managed workspace, the agent's token is re-minted through the account,
+  as `cinna doctor` does, and the reconnect is tried once more. A session that
+  still can't connect fails with one sentence naming its state and last error.
+  `cinna agent restart-env` / `rebuild-env` reconnect this machine's session
+  themselves once the environment is back. While Mutagen reconnects, `status`
+  reads `disconnected`, not `error`.
 
 ## Architecture overview
 

@@ -95,6 +95,15 @@ message itself.
 - `--attach` / `--show` take no message, `--resume`, `--file` or `--agent` — they
   name an existing session and send nothing.
 
+### Talk in a dashboard chat
+- `cinna chat --agent <agent> --board <dashboard> [--focus <tile>] "<message>"`
+  opens (or continues) the agent's chat on one of the owner's web dashboards and
+  sends the `<dashboard_context>` the web panel would. The agent then has its tile
+  tools; a tile whose params the turn changed is reported in a `tiles` event
+  before `done`. `--new-chat` starts a fresh one, `--context @file.json` sends a
+  hand-written context, and `--resume` must name that dashboard's chat. See
+  [Dashboards](../dashboards/dashboards.md).
+
 ### Re-run recorded scenarios
 - A builder records the agent's regression set as `docs/test_scenarios/*.md` in the
   agent's workspace: one file per kind of question, each with a `## Say | Expect`
@@ -208,6 +217,10 @@ cinna agent scenarios run ─► scenarios.py ── parse docs/test_scenarios/*
   low-level shell into the container; chat is the high-level "talk to the agent the
   way a user would". Both stream agent activity, but chat polls persisted messages
   while exec reads SSE directly.
+
+- **Dashboards** ([dashboards](../dashboards/dashboards.md)): `--board` reuses
+  this poll loop for a dashboard chat; the context builder and the tile snapshot
+  live in `src/cinna/dashboards.py`.
 
 Implementation: see [remote_chat_tech.md](remote_chat_tech.md). Real-usage e2e
 test scenarios: see [remote_chat_acceptance.md](remote_chat_acceptance.md).

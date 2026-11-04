@@ -25,7 +25,8 @@ The platform also handles scheduling, triggers, email, A2A, MCP serving, and ses
 - Testing credential integrations (keys and tokens stay on the platform, exercised by the remote env)
 - Installing and validating Python / system packages
 - Writing and iterating on prompt files
-- Building webapp dashboards and data endpoints
+- Building the agent's webapp and data endpoints
+- Building dashboard components, checking and running them in the env, placing them as tiles
 - Preparing output files and reports
 
 ### What stays in the cloud
@@ -55,6 +56,10 @@ The live-sync rewrite removes the local container entirely. Mutagen keeps the wo
 ### Agent
 
 A self-contained automation unit on the platform. Has a name, template, scripts, prompts, webapp, credentials, and a knowledge base. Identified by `agent_id`.
+
+### Dashboard component
+
+A live view an agent keeps in `dashboards/<name>/` (`component.json` plus endpoint scripts or a page). The owner places it as a **tile** on a dashboard (core's web dashboards, or Cinna Desktop); the agent offers it by printing its reference `cinna://component/bundle:<bundle_id>/<name>`. It runs only in the agent's environment. See [Dashboards](features/dashboards/dashboards.md).
 
 ### Environment
 
@@ -298,6 +303,7 @@ authoring convention.
 | **Git versioning** | `cinna git` (link, status, commit, push, pull, log, checkout, unlink) — external remotes with your own credentials, `cinna` remotes with the CLI token | [business](features/git_versioning/git_versioning.md) · [tech](features/git_versioning/git_versioning_tech.md) · [acceptance](features/git_versioning/git_versioning_acceptance.md) |
 | **Durable delegation** | `cinna delegation` (create — idempotent per target + `--id`, status, report — owner side with a task id or from inside a cloud task, reply), gated on the backend capability version | [business](features/delegation/delegation.md) · [tech](features/delegation/delegation_tech.md) · [acceptance](features/delegation/delegation_acceptance.md) |
 | **Artifacts** | `cinna artifacts` (publish — republishes a remembered path, `--new` / `--update`; list, show, open, download, share and link create — person-only, refused without a TTY; link revoke, delete), gated on the server's artifacts capability | [business](features/artifacts/artifacts.md) · [tech](features/artifacts/artifacts_tech.md) · [acceptance](features/artifacts/artifacts_acceptance.md) |
+| **Dashboards** | `cinna dashboards` (list, show, check `[--run]`, run, ref `[--check]` — an agent's components as its environment sees them; boards, board create, add, tiles, tile data / refresh / params / call / edit / remove — tiles on the owner's web dashboards, desktop dashboards read-only) · `cinna chat --board [--focus] [--context] [--new-chat]` (dashboard chat with the tile tools); gated on the server's dashboards capability | [business](features/dashboards/dashboards.md) · [tech](features/dashboards/dashboards_tech.md) · [acceptance](features/dashboards/dashboards_acceptance.md) |
 | **Improvement requests** | `cinna improve` (list, show, download, status) | [business](features/improvement_requests/improvement_requests.md) · [tech](features/improvement_requests/improvement_requests_tech.md) · [acceptance](features/improvement_requests/improvement_requests_acceptance.md) |
 | **Local agent import** | `cinna agent import` (Local Agent Kit → cloud agent), incl. the versioned folder contract (`.cinna-kit/layout.json`), `publications.json` and `content_hash` | [business](features/local_agent_import/local_agent_import.md) · [tech](features/local_agent_import/local_agent_import_tech.md) · [acceptance](features/local_agent_import/local_agent_import_acceptance.md) |
 | **Team library** | `cinna library` (list, get, share, update, status, grants, suggest) — kit folders in `Local/<slug>/` shared through cinna-core-hosted git with the account token; `cinna agent import --from-library` | [business](features/team_library/team_library.md) · [tech](features/team_library/team_library_tech.md) · [acceptance](features/team_library/team_library_acceptance.md) |
@@ -526,6 +532,8 @@ The platform's send-message route (`POST /sessions/{id}/messages/stream`) return
 3. Records the current message count as a cursor, then sends the message (`file_ids` carry the attachments).
 4. **Polls** `GET /sessions/{id}/messages?offset=<cursor>` (messages are ordered ascending by `sequence_number`, so `offset` is the cursor) and `GET …/messages/streaming-status` (`{is_streaming}`) until the turn settles — `is_streaming` false with no message flagged `streaming_in_progress`. A start-grace window covers env wake / queueing before the turn begins; an overall `--timeout` bounds the wait.
 
+With `--board`, the session is the agent's **dashboard chat** (`POST /dashboards/{id}/chat`), each message carries `dashboard_context`, and a `tiles` event before `done` reports tiles whose params the turn changed (see [Dashboards](features/dashboards/dashboards.md)).
+
 Each finalized message is emitted as one NDJSON line (`session` / `upload` / `message` / `status` / `done`); the in-progress assistant message is held back (its content is still growing) and emitted once final. Every `message` also carries the agent's reasoning/tool trace under **`events`** — the normalized `streaming_events` (thinking blocks, `tool` calls with their full `tool_input` payloads, tool results), with the bookkeeping/`attachment` entries stripped (attachments are surfaced separately). The final coalesced text stays in `content`; the trace shows *how* the agent got there. `--no-events` drops the trace; `--pretty` swaps NDJSON for a Rich transcript. Ctrl-C calls `POST …/messages/interrupt` and exits 130.
 
 ### Attachments
@@ -626,6 +634,7 @@ When a CLI token expires (or is revoked) the normal remedy is `cinna set-token <
 | POST | `/api/v1/cli/account/agents/{id}/mint` | Account token | Mint a per-agent CLI token (`cinna agent sync`, `cinna doctor` re-mint) |
 | POST | `/api/v1/cli/account/api-proxy` | Account token | Buffered JSON escape hatch — `cinna api`, and the transport for every `cinna chat` session/message call |
 | POST | `/api/v1/cli/account/files/upload` | Account token | Multipart upload for `cinna chat --file` (the proxy can't carry multipart) |
+| (proxy) | `dashboards/capabilities`, `agents/{id}/dashboards/…`, `dashboards/…`, `dashboards/{id}/blocks/{block}/component/…`, `dashboards/{id}/chat`, `dashboards/component-refs/resolve` | Account token | `cinna dashboards` and `cinna chat --board`, all through the api-proxy; never the `…/frame` routes (core's proxy refuses them) |
 | GET/PATCH | `/api/v1/cli/account/improvement-requests[/{id}[/archive]]` | Account token | Improvement requests received on the agents the account owns (`cinna improve`); the `/archive` route returns a binary ZIP the JSON-only proxy can't carry |
 
 `cinna chat` reaches the conversation API **through** the api-proxy (so these are inner routes, not CLI routes): `POST /sessions/`, `GET /sessions/{id}`, `GET /sessions/{id}/messages`, `POST /sessions/{id}/messages/stream`, `GET /sessions/{id}/messages/streaming-status`, `POST /sessions/{id}/messages/interrupt`, and `GET /files/{id}/download`.

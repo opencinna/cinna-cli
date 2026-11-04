@@ -58,6 +58,7 @@ def test_default_exclude_matches_the_contract_list():
         ".vscode/",
         ".idea/",
         "app-data/",
+        "artifacts/",
         "temp/",
         "credentials/",
         "credentials.json",

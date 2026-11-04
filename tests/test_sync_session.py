@@ -600,3 +600,88 @@ def test_ensure_session_creates_when_missing(
     mock_find.return_value = None
     ensure_session(sample_config, tmp_path)
     mock_create.assert_called_once()
+
+
+# ─── reconnect after the environment was restarted or rebuilt ──────────────
+
+_EOF_ERROR = "beta polling error: unable to receive poll response: unable to read message length: unexpected EOF"
+_CANT_SYNC = "Error: unable to flush session: session is not currently able to synchronize"
+
+
+def _session(status, last_error=None, cycles=1):
+    return {"name": "cinna-agent-12", "status": status, "lastError": last_error, "successfulCycles": cycles}
+
+
+def test_connecting_after_an_error_reads_as_disconnected(sample_config):
+    assert _to_status(sample_config, _session("connecting-beta", _EOF_ERROR)).state == "disconnected"
+    assert _to_status(sample_config, _session("halted-on-root-deletion", "gone")).state == "error"
+
+
+@patch("cinna.sync_session.time.sleep", lambda s: None)
+@patch("cinna.sync_session._run_mutagen")
+@patch("cinna.sync_session._find_session")
+def test_flush_reconnects_a_session_that_lost_its_environment(mock_find, mock_run, sample_config):
+    """A rebuilt env killed the remote Mutagen agent: resume, wait, flush again."""
+    from cinna.sync_session import flush
+
+    flushes = iter([MagicMock(returncode=1, stderr=_CANT_SYNC, stdout=""), MagicMock(returncode=0, stderr="", stdout="")])
+
+    def run(args, config, **kw):
+        if args[:2] == ["sync", "flush"]:
+            return next(flushes)
+        return MagicMock(returncode=0, stderr="", stdout="")
+
+    mock_run.side_effect = run
+    mock_find.side_effect = [_session("connecting-beta", _EOF_ERROR), _session("watching"), _session("watching")]
+    st = flush(sample_config)
+    assert st.state == "connected"
+    verbs = [c[0][0][:2] for c in mock_run.call_args_list]
+    assert verbs == [["sync", "flush"], ["sync", "resume"], ["sync", "flush"]]
+
+
+@patch("cinna.sync_session.time.sleep", lambda s: None)
+@patch("cinna.sync_session._run_mutagen")
+@patch("cinna.sync_session._find_session")
+def test_flush_re_mints_a_refused_token_in_an_account_workspace(mock_find, mock_run, sample_config, tmp_path, monkeypatch):
+    from cinna import doctor
+    from cinna.sync_session import flush
+
+    flushes = iter([MagicMock(returncode=1, stderr=_CANT_SYNC, stdout=""), MagicMock(returncode=0, stderr="", stdout="")])
+    mock_run.side_effect = lambda args, config, **kw: next(flushes) if args[:2] == ["sync", "flush"] else MagicMock(returncode=0, stderr="", stdout="")
+    refused = "unable to connect to beta: … server rejected WebSocket connection: HTTP 403"
+    mock_find.side_effect = [_session("connecting-beta", refused), _session("watching"), _session("watching")]
+    reminted = []
+    monkeypatch.setattr(doctor, "_account_root_for", lambda root: tmp_path)
+    monkeypatch.setattr(doctor, "_make_remint", lambda agent_id, root: lambda: reminted.append(agent_id) or "ok")
+    monkeypatch.setattr("cinna.config.load_config", lambda root: sample_config)
+    st = flush(sample_config, workspace_root=tmp_path)
+    assert st.state == "connected"
+    assert reminted == [sample_config.agent_id]
+
+
+@patch("cinna.sync_session.time.monotonic")
+@patch("cinna.sync_session.time.sleep", lambda s: None)
+@patch("cinna.sync_session._run_mutagen")
+@patch("cinna.sync_session._find_session")
+def test_flush_gives_a_clear_error_when_the_session_never_reconnects(mock_find, mock_run, mock_clock, sample_config):
+    import click
+    import pytest
+    from cinna.sync_session import flush
+
+    mock_clock.side_effect = [0.0] + [1000.0] * 10
+    mock_run.return_value = MagicMock(returncode=1, stderr=_CANT_SYNC, stdout="")
+    mock_find.return_value = _session("connecting-beta", _EOF_ERROR)
+    with pytest.raises(click.ClickException, match="could not reconnect"):
+        flush(sample_config)
+
+
+@patch("cinna.sync_session._run_mutagen")
+def test_an_ordinary_flush_failure_is_not_retried(mock_run, sample_config):
+    import click
+    import pytest
+    from cinna.sync_session import flush
+
+    mock_run.return_value = MagicMock(returncode=1, stderr="Error: unable to locate requested sessions", stdout="")
+    with pytest.raises(click.ClickException, match="Sync flush failed"):
+        flush(sample_config)
+    assert mock_run.call_count == 1

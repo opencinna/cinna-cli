@@ -3,6 +3,7 @@
 import importlib.resources
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from datetime import datetime, timezone
@@ -103,6 +104,18 @@ def generate_context_files(
     )
     (workspace_root / "BUILDING_AGENT.md").write_text(building_md)
 
+    # --- platform skills (kept for the offline CLAUDE.md re-render) ---
+    skills = building_context.get("platform_skills")
+    if isinstance(skills, list):
+        config.platform_skills = [
+            {"name": str(s["name"]), "kit_path": str(s.get("kit_path") or f"skills/{s['name']}")}
+            for s in skills
+            if isinstance(s, dict) and s.get("name")
+        ]
+        from cinna.config import save_config
+
+        save_config(config, workspace_root)
+
     # --- CLAUDE.md ---
     regenerate_claude_md(config, workspace_root)
 
@@ -124,6 +137,7 @@ def regenerate_claude_md(config: CinnaConfig, workspace_root: Path) -> None:
         .replace("{timestamp}", timestamp)
         .replace("{mcp_tools_section}", mcp_tools)
         .replace("{git_versioning_section}", _git_versioning_reference(config))
+        .replace("{dashboards_section}", _dashboards_section(config, workspace_root))
     )
     (workspace_root / "CLAUDE.md").write_text(claude_md)
     write_chat_testing_guide(workspace_root)
@@ -153,6 +167,104 @@ def write_git_versioning_guide(workspace_root: Path) -> None:
     Overwritten on every regenerate so a CLI upgrade ships the latest guidance.
     """
     (workspace_root / "GIT_VERSIONING.md").write_text(_load_template("GIT_VERSIONING.md"))
+
+
+# Where the account context package keeps the local agent kit. Platform skills
+# are projected outside /app/workspace in the environment, so Mutagen never
+# brings them down; the kit copy in the account workspace is the one the local
+# assistant can read, at each skill's ``kit_path`` (from the building context).
+_LOCAL_KIT_DIR = Path("context") / "local-kit"
+_DASHBOARDS_SKILL_NAME = "cinna-dashboards"
+_DASHBOARDS_GUIDE = "guides/14-dashboards.md"
+
+
+def _dashboards_skill_path(config: CinnaConfig) -> str | None:
+    """The dashboards skill's ``SKILL.md`` inside the kit, per the environment.
+
+    None when the building context listed the environment's platform skills
+    and the dashboards skill is not among them (an environment built before
+    dashboard components). Before any listing was recorded, the kit's
+    standard place.
+    """
+    if not config.platform_skills:
+        return f"skills/{_DASHBOARDS_SKILL_NAME}/SKILL.md"
+    for skill in config.platform_skills:
+        if skill.get("name") == _DASHBOARDS_SKILL_NAME:
+            return f"{str(skill.get('kit_path') or 'skills/' + _DASHBOARDS_SKILL_NAME).rstrip('/')}/SKILL.md"
+    return None
+
+
+def _account_root_above(workspace_root: Path) -> Path | None:
+    current = workspace_root.resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".cinna" / "account.json").is_file():
+            return candidate
+    return None
+
+
+def local_kit_path(workspace_root: Path) -> str | None:
+    """The account workspace's ``context/local-kit/``, relative to this workspace.
+
+    None for a standalone ``cinna setup`` workspace (no account above it).
+    """
+    account_root = _account_root_above(workspace_root)
+    if account_root is None or account_root == workspace_root.resolve():
+        return None
+    return os.path.relpath(account_root / _LOCAL_KIT_DIR, workspace_root.resolve())
+
+
+def _dashboards_section(config: CinnaConfig, workspace_root: Path) -> str:
+    """The per-agent guide's "Dashboard components" section.
+
+    Fills in this agent's own reference prefix when the bundle id is known,
+    and the relative path to the kit's dashboards skill and guide when the
+    workspace sits inside an account workspace.
+    """
+    kit = local_kit_path(workspace_root)
+    skill_path = _dashboards_skill_path(config)
+    if skill_path is None:
+        read = (
+            "This agent's environment has no `cinna-dashboards` skill yet — it predates dashboard "
+            f"components. Rebuild it first: `cinna agent rebuild-env {config.agent_name}` (from the "
+            "account workspace)."
+        )
+    elif kit:
+        read = (
+            f"Before building one, read [`{kit}/{_DASHBOARDS_GUIDE}`]({kit}/{_DASHBOARDS_GUIDE}) and "
+            f"[`{kit}/{skill_path}`]({kit}/{skill_path}) (the account's copy of the "
+            "local agent kit; `cinna account refresh-context` updates it). The environment's own copy "
+            "of the skill is not synced here."
+        )
+    else:
+        read = (
+            "Before building one, read the local agent kit's `guides/14-dashboards.md` and "
+            "`skills/cinna-dashboards/SKILL.md` (an account workspace keeps them under "
+            "`context/local-kit/`; this standalone workspace has no copy)."
+        )
+    if config.bundle_id:
+        prefix = f"cinna://component/bundle:{config.bundle_id}/"
+        ref = (
+            f"print its reference on a line of its own, never in backticks or a code block: "
+            f"{prefix}<name> (a skill's component: {prefix}<skill>/<name>). "
+            f"`cinna dashboards ref {config.agent_name} <name> --check` prints the exact line and "
+            "confirms it resolves."
+        )
+    else:
+        ref = (
+            "print its reference on a line of its own, never in backticks or a code block — "
+            f"copy it from `cinna dashboards ref {config.agent_name} <name>` (run from the account "
+            "workspace)."
+        )
+    return f"""A **dashboard component** is a live view the owner keeps on a dashboard: a folder `dashboards/<name>/` with a `component.json`, small endpoint scripts and, for an `html` view, a page. The owner places it as a **tile** on their web dashboards or in Cinna Desktop, and it refreshes itself when shown. A component is not the webapp (the agent's own app, shareable) and not an artifact (a frozen copy for people).
+
+- {read}
+- Write `component.json` first, then the endpoints. Keep endpoints fast: read prepared data (a schedule or `refresh.command` writes it to `app-data/dashboards/<name>/`), never call slow external systems on every refresh.
+- Node endpoints are plain JavaScript: `node_modules/` is neither synced nor present in the environment.
+- `requires_credentials` lists names of credentials linked to this agent (`cinna agent show {config.agent_name}`); a name nothing resolves to blocks the tile with "needs credentials".
+- Check in the environment, never locally: `cinna dashboards check {config.agent_name} <name> --run` (exit 1 on any error), then `cinna dashboards run {config.agent_name} <name> [--param k=v]` shows exactly what a tile receives.
+- To offer a component, {ref} The owner's chat turns that line into a card with Preview and Add to dashboard. (If `BUILDING_AGENT.md` says to name a component in plain words instead, it was written from an environment that predates references in the building prompt — the line above is still right.)
+- Place a tile only when the user asks: `cinna dashboards add {config.agent_name} <name> --board <dashboard>`.
+- The tile tools (`dashboards_tiles`, `dashboards_update_tile`) exist only in a chat opened from a dashboard. Test them with `cinna chat --board <dashboard> --focus <tile> "<message>"`."""
 
 
 def _git_versioning_reference(config: CinnaConfig) -> str:

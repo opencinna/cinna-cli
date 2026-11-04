@@ -80,6 +80,17 @@ class CinnaConfig:
     # Git working-tree layout for this agent. Present for every checkout made by
     # a CLI new enough to write it; ``None`` for legacy flat workspaces.
     git: GitLayout | None = None
+    # The agent's reverse-DNS bundle id — the ``bundle:`` segment of its
+    # dashboard component references. Fetched through the account workspace
+    # (`cinna agent sync`, `cinna account refresh-context`); ``None`` in a
+    # standalone `cinna setup` workspace, which has no account client.
+    bundle_id: str | None = None
+    # The platform skills installed in the agent's environment, as the
+    # building context reports them: ``[{name, kit_path}]`` (``kit_path`` is
+    # the skill's path inside the local agent kit, e.g. ``skills/cinna-dashboards``).
+    # Recorded so the offline CLAUDE.md re-render can point at the account's
+    # kit copy; empty until a building context carrying it was fetched.
+    platform_skills: list[dict] = field(default_factory=list)
 
 
 def find_workspace_root(start: Path | None = None) -> Path:

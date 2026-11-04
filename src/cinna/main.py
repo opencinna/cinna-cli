@@ -23,6 +23,7 @@ from cinna.config import (
     remove_agent_registry,
 )
 from cinna.artifacts import artifacts
+from cinna.dashboards import dashboards
 from cinna.delegation import delegation
 from cinna.errors import EXIT_ERROR, CinnaExit, NetworkError
 from cinna.mcp_proxy import run_mcp_proxy
@@ -156,6 +157,12 @@ def _attach_driver_options(group: click.Group) -> None:
 
 _attach_driver_options(artifacts)
 cli.add_command(artifacts)
+
+
+# ─── dashboards ────────────────────────────────────────────────────────────
+
+_attach_driver_options(dashboards)
+cli.add_command(dashboards)
 
 
 # ─── setup ─────────────────────────────────────────────────────────────────
@@ -2631,6 +2638,33 @@ def _run_remote_exec(config, command_str: str, timeout: int = 1800) -> int:
     is_flag=True,
     help="Human-readable output instead of the default NDJSON event stream.",
 )
+@click.option(
+    "--board",
+    "board_ref",
+    default=None,
+    metavar="BOARD",
+    help="Talk in the agent's dashboard chat on this web dashboard (name or id): "
+    "the agent gets the dashboard context and its tile tools.",
+)
+@click.option(
+    "--focus",
+    "focus_ref",
+    default=None,
+    metavar="TILE",
+    help="With --board: the tile the owner is looking at (id, title or component).",
+)
+@click.option(
+    "--context",
+    "context_json",
+    default=None,
+    metavar="@FILE|JSON",
+    help="With --board: send this <dashboard_context> object instead of building one.",
+)
+@click.option(
+    "--new-chat",
+    is_flag=True,
+    help="With --board: start a new dashboard chat instead of continuing the current one.",
+)
 @click.argument("message", nargs=-1, type=click.UNPROCESSED)
 def chat_cmd(
     agent_ref: str | None,
@@ -2646,6 +2680,10 @@ def chat_cmd(
     timeout: int,
     include_events: bool,
     pretty: bool,
+    board_ref: str | None,
+    focus_ref: str | None,
+    context_json: str | None,
+    new_chat: bool,
     message: tuple[str, ...],
 ):
     """Chat with an agent through a real platform session.
@@ -2675,13 +2713,34 @@ def chat_cmd(
       echo "ping" | cinna chat --agent crm-agent
       cinna chat --attach 3f2c…    # wait for a turn a dead command left running
       cinna chat --show 3f2c…      # print a session's transcript
+      cinna chat --agent crm-agent --board Sales --focus deals "Which deal first?"
 
     A poll request that fails (a proxy timeout, a 5xx) is retried within
     --timeout. If contact is lost for good, the error names the session and
     the --attach command: the agent's turn keeps running on the platform.
     The closing "done" event carries "outcome": completed, timeout or
     not_started (in_progress or idle for --show).
+
+    --board opens the agent's dashboard chat on one of your web dashboards
+    (one chat per dashboard and agent; --new-chat starts another) and sends
+    the <dashboard_context> the web panel would: the dashboard, the --focus
+    tile with its params and cached data, and the other tiles. The agent then
+    has its dashboards_tiles and dashboards_update_tile tools; a tile whose
+    params the agent changed is reported in a "tiles" event.
     """
+    board_flags = [
+        name
+        for name, value in (("--focus", focus_ref), ("--context", context_json), ("--new-chat", new_chat))
+        if value
+    ]
+    if board_flags and not board_ref:
+        raise click.UsageError(f"{' and '.join(board_flags)} only go with --board.")
+    if focus_ref and context_json:
+        raise click.UsageError("--focus builds the context; --context sends your own. Pass one.")
+    if board_ref and (attach or show):
+        raise click.UsageError("--board sends a message; --attach and --show send nothing.")
+    if new_chat and resume:
+        raise click.UsageError("--new-chat starts a dashboard chat; --resume continues a session. Pass one.")
     if attach or show:
         if attach and show:
             raise click.UsageError("--attach and --show are alternatives; pass one.")
@@ -2738,6 +2797,10 @@ def chat_cmd(
         timeout=timeout,
         pretty=pretty,
         include_events=include_events,
+        board_ref=board_ref,
+        focus_ref=focus_ref,
+        context_json=context_json,
+        new_chat=new_chat,
     )
 
 
@@ -3453,7 +3516,7 @@ def sync_push(agent_ref: str | None, force: bool):
     # `mutagen sync flush` is bidirectional; the push/pull distinction is the
     # --force resolution direction, not the flush itself.
     with console.spinner("Flushing sync…"):
-        st = sync_session.flush(config)
+        st = sync_session.flush(config, workspace_root=root)
     _report_flush(st, winner="local")
 
 
@@ -3497,7 +3560,7 @@ def sync_pull(agent_ref: str | None, force: bool):
     # `mutagen sync flush` is bidirectional; the push/pull distinction is the
     # --force resolution direction, not the flush itself.
     with console.spinner("Flushing sync…"):
-        st = sync_session.flush(config)
+        st = sync_session.flush(config, workspace_root=root)
     _report_flush(st, winner="remote")
 
 
@@ -3772,7 +3835,7 @@ def git_checkout(ref: str, reload: bool, manifest: bool, agent_ref: str | None):
     if reload:
         with console.spinner("Flushing restored files to the running env…"):
             sync_session.ensure_session(config, root)
-            st = sync_session.flush(config)
+            st = sync_session.flush(config, workspace_root=root)
         console.status(f"Live env updated ({st.state}).")
         if st.conflict_count:
             console.warn(

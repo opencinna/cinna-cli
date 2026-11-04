@@ -66,10 +66,14 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
    conflicts against untouched remote originals. A session that cannot start is a
    warning naming `cinna sync push --agent <slug>` to run *before* editing — never
    a failed sync.
-3. Re-running sync for an agent **already synced** in that folder is refused
+3. Sync also records the agent's **bundle id** and the environment's **platform
+   skills** in the workspace config. The per-agent `CLAUDE.md` uses them for its
+   Dashboard components section: the agent's own `cinna://component/bundle:<id>/`
+   prefix, and the path to the account's kit copy of the `cinna-dashboards` skill.
+4. Re-running sync for an agent **already synced** in that folder is refused
    (with a `cinna agent unsync` / `cinna set-token` hint) — it never silently
    re-clones or duplicates.
-4. The workspace lands at `agents/<slug>/<subdir>/` (the Model-A nested layout;
+5. The workspace lands at `agents/<slug>/<subdir>/` (the Model-A nested layout;
    `<subdir>` is the slug unless the agent is git-versioned with another subdir) —
    the command prints the exact path. Afterward `cd` there and `cinna dev`, or stay
    at the account root and use `cinna sync push --agent <slug>` /
@@ -92,6 +96,12 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
    re-materializes the backend scaffold and can clobber local changes, so the
    builder is told to `cinna sync push` first.
 3. It blocks until the container is back, then prints the post-restart status.
+4. If the agent is synced on this machine, it then **reconnects the sync
+   session** ("Sync session reconnected."). The old container took the remote
+   Mutagen agent with it, and without this the next `cinna sync push` failed
+   until Mutagen's own retry came round. A refused token is re-minted through
+   the account. A session that doesn't come back is a warning naming
+   `cinna sync push` / `cinna doctor`, never a failed restart.
 
 ### Rebuild an environment that predates a feature
 1. `cinna agent rebuild-env <agent_ref> [--yes]` is **not** a louder restart.
@@ -120,6 +130,8 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
    row states; the server inside can still be starting, and a chat sent into that
    window sat streaming with no reply. It ends with "ready to chat", or a warning
    that the environment has not answered yet.
+7. Like `restart-env`, it then reconnects this machine's sync session for the
+   agent (see [Live Sync](../live_sync/live_sync.md)).
 
 ### Inspect what's live
 1. `cinna agent show <agent_ref>` prints the **effective prompts** (each under its
@@ -132,6 +144,11 @@ This doc covers the agent **lifecycle** verbs. The CRON automation subgroup
      `credentials:` block names. A credential shared by someone else whose slot
      this account cannot see reads `slot: unknown`, never `no slot`. When the
      agent's credential listing cannot be read, it falls back to name + type.
+   - A **Dashboard components** section (count, errors, tiles) when the server
+     has dashboards. It is read only while the environment is running, because
+     listing components would wake a suspended one; otherwise a dim note says the
+     environment's state. It never fails `show`. See
+     [Dashboards](../dashboards/dashboards.md).
 
 ### Choose the model per mode
 1. `cinna agent model show <agent_ref> [--json]` prints, for conversation and

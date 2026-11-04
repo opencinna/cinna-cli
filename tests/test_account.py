@@ -2635,6 +2635,39 @@ def test_agent_restart_env_warns_on_unsynced_edits(
     mock_client.restart_agent_env.assert_called_once_with("agent-123")
 
 
+@patch("cinna.account.sync_session.heal_session")
+@patch("cinna.account.sync_session.status")
+@patch("cinna.account.list_child_workspaces")
+@patch("cinna.account.resolve_child_workspace", return_value=None)
+@patch("cinna.account.AccountClient")
+def test_agent_restart_env_reconnects_this_machines_sync_session(
+    mock_client_cls, _resolve, mock_children, mock_status, mock_heal, runner, account_root, monkeypatch, sample_config
+):
+    """The restart replaced the container; reconnect the session now, not on
+    Mutagen's backoff, so the next `cinna sync push` works at once."""
+    from cinna.sync_session import SyncStatus
+
+    monkeypatch.chdir(account_root)
+    sample_config.agent_id = "agent-123"
+    child = account_root / "agents" / "crm-agent"
+    mock_children.return_value = [(child, sample_config)]
+    mock_status.return_value = SyncStatus(session_name="cinna-abc", state="error")
+    mock_heal.return_value = (SyncStatus(session_name="cinna-abc", state="connected"), sample_config)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_account_agents.return_value = AGENTS_LISTING
+    mock_client.restart_agent_env.return_value = {"environment_id": "env-1", "status": "running"}
+
+    result = runner.invoke(cli, ["agent", "restart-env", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    mock_heal.assert_called_once_with(sample_config, child)
+    assert "Sync session reconnected" in result.output
+
+    mock_heal.return_value = (SyncStatus(session_name="cinna-abc", state="error", last_error="HTTP 403"), sample_config)
+    result = runner.invoke(cli, ["agent", "restart-env", "CRM Agent"])
+    assert result.exit_code == 0, result.output
+    assert "did not reconnect" in result.output and "HTTP 403" in result.output
+
+
 # --- cinna agent rebuild-env ---
 
 
@@ -5921,7 +5954,7 @@ def test_establish_sync_session_flushes_a_baseline(monkeypatch, sample_config, t
     )
     monkeypatch.setattr(
         "cinna.account.sync_session.flush",
-        lambda c: SyncStatus(session_name="cinna-agent123", state="watching"),
+        lambda c, workspace_root=None: SyncStatus(session_name="cinna-agent123", state="watching"),
     )
 
     assert _real_establish_sync_session(sample_config, tmp_path, "crm") is True

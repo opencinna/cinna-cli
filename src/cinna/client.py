@@ -9,7 +9,7 @@ import httpx
 
 from cinna.config import CinnaConfig
 from cinna.auth import get_auth_headers
-from cinna.errors import AuthenticationError, CodedRefusal, PlatformError
+from cinna.errors import EXIT_ERROR, AuthenticationError, CinnaExit, CodedRefusal, PlatformError
 
 logger = logging.getLogger("cinna.client")
 
@@ -53,6 +53,29 @@ def _coded_refusal(response: httpx.Response) -> CodedRefusal | None:
         str(detail.get("message") or detail["code"]),
         paths=[str(p) for p in (detail.get("paths") or [])],
     )
+
+
+def _body_detail(response: httpx.Response) -> str:
+    """The ``detail`` of an error body, else its text."""
+    try:
+        parsed = response.json()
+        if isinstance(parsed, dict):
+            return str(parsed.get("detail", response.text))
+    except Exception:
+        pass
+    return response.text
+
+
+class DashboardsUnsupported(CinnaExit):
+    """The server has no dashboard components (it predates cinna-core C2)."""
+
+    def __init__(self):
+        super().__init__(
+            EXIT_ERROR,
+            "dashboards_unsupported",
+            "This Cinna server does not support dashboard components (it "
+            "predates them). Ask its admin to update cinna-core.",
+        )
 
 
 def drop_token(data):
@@ -1023,27 +1046,17 @@ class AccountClient:
         repr of a dict.
         """
         response = self.api_proxy(method, path, query=query, json_body=json_body)
-
-        def _detail() -> str:
-            try:
-                parsed = response.json()
-                if isinstance(parsed, dict):
-                    return str(parsed.get("detail", response.text))
-            except Exception:
-                pass
-            return response.text
-
         if PROXY_MARKER_HEADER not in response.headers:
             raise PlatformError(
                 response.status_code,
-                f"escape hatch refused {method} {path}: {_detail()}",
+                f"escape hatch refused {method} {path}: {_body_detail(response)}",
             )
         if response.status_code >= 400:
             if coded:
                 refusal = _coded_refusal(response)
                 if refusal is not None:
                     raise refusal
-            raise PlatformError(response.status_code, _detail())
+            raise PlatformError(response.status_code, _body_detail(response))
         if not response.content:
             return {}
         return response.json()
@@ -1081,11 +1094,15 @@ class AccountClient:
         file_ids: list[str] | None = None,
         answers_to_message_id: str | None = None,
         page_context: str | None = None,
+        dashboard_context: str | None = None,
     ) -> dict:
         """POST /api/v1/sessions/{id}/messages/stream — enqueue a user message.
 
         Returns the JSON ack (``{status, session_id, streaming|pending|...}``);
         the agent turn runs asynchronously and is observed by polling.
+        ``dashboard_context`` is the dashboard chat's ``<dashboard_context>``
+        JSON (a string); core keeps it only on a session opened from a
+        dashboard and dedupes it by hash, so sending it every turn is fine.
         """
         body: dict = {"content": content}
         if file_ids:
@@ -1094,6 +1111,8 @@ class AccountClient:
             body["answers_to_message_id"] = answers_to_message_id
         if page_context:
             body["page_context"] = page_context
+        if dashboard_context:
+            body["dashboard_context"] = dashboard_context
         return self._proxy_json(
             "POST", f"sessions/{session_id}/messages/stream", json_body=body
         )
@@ -1186,6 +1205,187 @@ class AccountClient:
     def revoke_artifact_link(self, artifact_id: str, link_id: str) -> dict:
         """DELETE /api/v1/artifacts/{id}/links/{link_id}."""
         return self._proxy_json("DELETE", f"artifacts/{artifact_id}/links/{link_id}")
+
+    # --- Dashboards (routed through the api-proxy) ---
+    #
+    # Agent components (`agents/{id}/dashboards/…`), the owner's dashboards and
+    # blocks (`dashboards/…`), tile operations
+    # (`dashboards/{id}/blocks/{block}/component/…`), the dashboard chat and
+    # component references. The component and tile routes refuse with
+    # `{"error": {code, message, retry_after_s?, field?}}`; the dashboard CRUD
+    # and chat routes with the usual `{"detail": …}`. Never the `…/frame`
+    # routes: a frame URL is a 12-hour credential and the CLI has no use for it.
+
+    def _dashboards_json(
+        self,
+        method: str,
+        path: str,
+        query: dict | None = None,
+        json_body=None,
+    ):
+        """``_proxy_json`` that understands the component routes' error body.
+
+        A coded ``{"error": …}`` becomes a ``ComponentRefusal``, a
+        ``{"detail": {code, …}}`` a ``CodedRefusal``, anything else the
+        ordinary ``PlatformError``. Whether the server has dashboards at all is
+        decided once, up front, by ``get_dashboards_capabilities()``.
+        """
+        from cinna.errors import ComponentRefusal
+
+        response = self.api_proxy(method, path, query=query, json_body=json_body)
+        if PROXY_MARKER_HEADER not in response.headers:
+            raise PlatformError(
+                response.status_code,
+                f"escape hatch refused {method} {path}: {_body_detail(response)}",
+            )
+        if response.status_code < 400:
+            if not response.content:
+                return {}
+            return response.json()
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict) and error.get("code"):
+            retry = error.get("retry_after_s")
+            raise ComponentRefusal(
+                response.status_code,
+                str(error["code"]),
+                str(error.get("message") or error["code"]),
+                retry_after_s=int(retry) if isinstance(retry, (int, float)) else None,
+                field=error.get("field") or None,
+            )
+        refusal = _coded_refusal(response)
+        if refusal is not None:
+            raise refusal
+        raise PlatformError(response.status_code, _body_detail(response))
+
+    def get_dashboards_capabilities(self) -> dict | None:
+        """GET dashboards/capabilities — ``{version, contract_version, limits, chat, component_refs}``.
+
+        None when the server has no such route: 404/405, or 422 on a server
+        whose ``dashboards/{dashboard_id}`` route takes the path and fails the
+        UUID check. Either way it has no (usable) dashboard components.
+        """
+        response = self.api_proxy("GET", "dashboards/capabilities")
+        if PROXY_MARKER_HEADER not in response.headers:
+            # The escape hatch itself refused (its rate limit, a policy change):
+            # that says nothing about the server's dashboards.
+            raise PlatformError(
+                response.status_code,
+                f"escape hatch refused GET dashboards/capabilities: {_body_detail(response)}",
+            )
+        if response.status_code in (404, 405, 422):
+            return None
+        if response.status_code >= 400:
+            raise PlatformError(response.status_code, _body_detail(response))
+        try:
+            body = response.json()
+        except Exception:
+            return None
+        return body if isinstance(body, dict) else None
+
+    def list_agent_components(self, agent_id: str, fresh: bool = False) -> dict:
+        """GET agents/{id}/dashboards/ — ``{components: [...]}`` with findings and placements.
+
+        ``fresh`` asks core to skip its per-worker list cache (10 s), so a
+        check right after a sync push sees the edit. A core that does not know
+        the flag ignores it.
+        """
+        query = {"fresh": "true"} if fresh else None
+        return self._dashboards_json("GET", f"agents/{agent_id}/dashboards/", query=query)
+
+    def get_agent_component(
+        self, agent_id: str, name: str, skill: str | None = None, fresh: bool = False
+    ) -> dict:
+        """GET agents/{id}/dashboards/{name}[?skill=&fresh=] — one component."""
+        query: dict = {}
+        if skill:
+            query["skill"] = skill
+        if fresh:
+            query["fresh"] = "true"
+        return self._dashboards_json(
+            "GET", f"agents/{agent_id}/dashboards/{quote(name, safe='')}", query=query or None
+        )
+
+    def run_agent_component(self, agent_id: str, name: str, body: dict) -> dict:
+        """POST agents/{id}/dashboards/{name}/run — ``{value, fetched_at, notice, params_resolved}``."""
+        return self._dashboards_json(
+            "POST", f"agents/{agent_id}/dashboards/{quote(name, safe='')}/run", json_body=body
+        )
+
+    def resolve_component_refs(self, refs: list[str]) -> dict:
+        """POST dashboards/component-refs/resolve — ``{results: [{ref, status, …}]}``."""
+        return self._dashboards_json(
+            "POST", "dashboards/component-refs/resolve", json_body={"refs": refs}
+        )
+
+    def list_dashboards(self, origin: str = "web") -> list:
+        """GET dashboards/?origin= — the owner's dashboards with their blocks."""
+        return self._dashboards_json("GET", "dashboards/", query={"origin": origin})
+
+    def get_dashboard(self, dashboard_id: str) -> dict:
+        """GET dashboards/{id} — one dashboard (any origin) with its blocks."""
+        return self._dashboards_json("GET", f"dashboards/{dashboard_id}")
+
+    def create_dashboard(self, name: str, description: str | None = None) -> dict:
+        """POST dashboards/ — a web dashboard (the CLI never creates a desktop one)."""
+        body: dict = {"name": name}
+        if description:
+            body["description"] = description
+        return self._dashboards_json("POST", "dashboards/", json_body=body)
+
+    def add_dashboard_block(self, dashboard_id: str, body: dict) -> dict:
+        """POST dashboards/{id}/blocks — a block (an ``agent_component`` tile)."""
+        return self._dashboards_json("POST", f"dashboards/{dashboard_id}/blocks", json_body=body)
+
+    def update_dashboard_block(self, dashboard_id: str, block_id: str, body: dict) -> dict:
+        """PUT dashboards/{id}/blocks/{block_id}."""
+        return self._dashboards_json(
+            "PUT", f"dashboards/{dashboard_id}/blocks/{block_id}", json_body=body
+        )
+
+    def delete_dashboard_block(self, dashboard_id: str, block_id: str) -> dict:
+        """DELETE dashboards/{id}/blocks/{block_id}."""
+        return self._dashboards_json("DELETE", f"dashboards/{dashboard_id}/blocks/{block_id}")
+
+    def _tile_path(self, dashboard_id: str, block_id: str, leaf: str) -> str:
+        return f"dashboards/{dashboard_id}/blocks/{block_id}/component/{leaf}"
+
+    def get_tile_data(self, dashboard_id: str, block_id: str) -> dict:
+        """GET …/component/data — cached data; never wakes the environment."""
+        return self._dashboards_json("GET", self._tile_path(dashboard_id, block_id, "data"))
+
+    def refresh_tile(self, dashboard_id: str, block_id: str, reason: str = "manual") -> dict:
+        """POST …/component/refresh {reason}."""
+        return self._dashboards_json(
+            "POST", self._tile_path(dashboard_id, block_id, "refresh"), json_body={"reason": reason}
+        )
+
+    def set_tile_params(self, dashboard_id: str, block_id: str, params: dict) -> dict:
+        """PUT …/component/params {params} — the WHOLE set; omitted keys go back to the default."""
+        return self._dashboards_json(
+            "PUT", self._tile_path(dashboard_id, block_id, "params"), json_body={"params": params}
+        )
+
+    def call_tile_endpoint(
+        self, dashboard_id: str, block_id: str, endpoint: str, params: dict
+    ) -> dict:
+        """POST …/component/call {endpoint, params} — ``{value}``."""
+        return self._dashboards_json(
+            "POST",
+            self._tile_path(dashboard_id, block_id, "call"),
+            json_body={"endpoint": endpoint, "params": params},
+        )
+
+    def open_dashboard_chat(self, dashboard_id: str, agent_id: str, new: bool = False) -> dict:
+        """POST dashboards/{id}/chat {agent_id, new} — ``{session}``, created when missing."""
+        return self._dashboards_json(
+            "POST",
+            f"dashboards/{dashboard_id}/chat",
+            json_body={"agent_id": agent_id, "new": new},
+        )
 
     def search_users(self, query: str, limit: int = 25) -> dict:
         """GET /api/v1/users/search — ``{data: [{id, email, full_name}], count}``.

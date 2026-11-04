@@ -12,7 +12,7 @@ You are working in the **local development copy** of a Cinna Core agent. The wor
 
 ## 1. Mental model
 
-- **Bundle-owned files** (`scripts/`, `docs/`, `webapp/`, `knowledge/`, `files/`, `workspace_requirements.txt`, `workspace_system_packages.txt`) are the agent's *source*. They are snapshotted when a new bundle revision is published. Edits here become the next shipped revision.
+- **Bundle-owned files** (`scripts/`, `docs/`, `webapp/`, `dashboards/`, `knowledge/`, `files/`, `workspace_requirements.txt`, `workspace_system_packages.txt`) are the agent's *source*. They are snapshotted when a new bundle revision is published. Edits here become the next shipped revision.
 - **`app-data/`** is per-user persistent runtime state (per `(user_id, bundle_id)` volume). **Not** part of bundle revisions. Survives `apply-update` and uninstall/reinstall. Your local copy is your *own* developer install's runtime state.
 - **`credentials/`** is backend-managed. Read-only on your side. Never commit, never read in agent output.
 
@@ -60,12 +60,14 @@ workspace/                      # continuously synced with remote /app/workspace
 │   ├── ENTRYPOINT_PROMPT.md    # how the agent starts a conversation
 │   ├── REFINER_PROMPT.md       # post-processing / quality pass
 │   └── <domain>.md             # additional domain-knowledge docs
-├── webapp/                     # bundle-owned — dashboard HTML/CSS/JS + Python data endpoints
+├── webapp/                     # bundle-owned — the agent's own web app: HTML/CSS/JS + Python data endpoints
+├── dashboards/                 # bundle-owned — dashboard components, one folder per component (§7b)
 ├── knowledge/                  # bundle-owned — static integration docs shipped in bundle
 ├── files/                      # bundle-owned — static publisher-shipped assets (lookup tables, fixtures, email templates)
 ├── app-data/                   # per-user persistent (NOT shipped in bundle revisions)
 │   ├── storage/                #   long-lived output (DBs, reports, derived data, run-state)
 │   ├── uploads/                #   runtime user uploads — read-only from scripts' POV
+│   ├── dashboards/             #   component data, written by scripts/schedules (§7b)
 │   └── cache/                  #   disposable caches scripts rebuild on demand
 ├── credentials/                # backend-managed; read-only; never log or echo
 ├── workspace_requirements.txt  # Python deps installed in the remote env
@@ -95,7 +97,9 @@ Rules of thumb:
 | Domain knowledge docs the *agent* should read at runtime | `docs/` or `knowledge/` | `docs/` if the prompt references it inline; `knowledge/` if it should be indexed and queried via `knowledge_query`. |
 | Static lookup tables, fixtures, sample inputs shipped with the agent | `files/` | Treated as static publisher assets, not source code. |
 | Email / notification templates (Jinja2 `.html.j2`, `.txt.j2`) | `files/templates/email/` | Bundle-owned: shape stays identical across installs. See §13. |
-| Dashboard pages, data endpoints | `webapp/` | Served by the env's webapp slot. |
+| The agent's own web app (pages, data endpoints) | `webapp/` | Served by the env's webapp slot; shareable. |
+| A live view the owner keeps on a dashboard | `dashboards/<name>/` | A dashboard component: `component.json` + endpoints (or a page). See §7b. |
+| A component's prepared data | `app-data/dashboards/<name>/` | Written by a schedule or the component's `refresh.command`; endpoints read it. |
 | Python dependencies | `workspace_requirements.txt` | Installed in the remote env. See §9. |
 | System (apt) packages | `workspace_system_packages.txt` | Installed in the remote env on env build. |
 | Long-lived runtime output (DB, reports, derived data, run-state files) | `app-data/storage/` | Survives bundle updates and reinstalls. |
@@ -180,8 +184,14 @@ Keep shared utilities at the top level. Keep single-purpose scripts that don't b
 ## 7. Webapp (`webapp/`)
 
 - Static frontend assets + Python data endpoints under the env's webapp slot.
-- Keep dashboard logic in the frontend; keep data-shaping in Python endpoints. Don't query external systems directly from the browser.
+- Keep page logic in the frontend; keep data-shaping in Python endpoints. Don't query external systems directly from the browser.
 - Read state from `app-data/storage/` — never recompute heavy results on every request.
+
+---
+
+## 7b. Dashboard components (`dashboards/`)
+
+{dashboards_section}
 
 ---
 
@@ -225,6 +235,8 @@ After installing, **persist the dependency** by adding it to `workspace_requirem
 | List conflicts, and compare both copies | `cinna sync conflicts [--diff]` |
 | Talk to the agent to test it (conversation) | `cinna chat "<message>"` |
 | Get back a turn after a timeout / lost connection | `cinna chat --attach <session_id>` |
+| Check / run a dashboard component in the environment (§7b) | `cinna dashboards check . <name> --run` · `cinna dashboards run . <name> [--param k=v]` |
+| Test the agent in a dashboard chat (tile tools) | `cinna chat --board <dashboard> --focus <tile> "<message>"` |
 | Re-run the recorded scenarios (`docs/test_scenarios/`) | `cinna agent scenarios run <agent>` — one fresh session per Say row; you mark each against Expect |
 | Show or switch the model per mode (§10 of the design patterns) | `cinna agent model show <agent>` · `cinna agent model set <agent> --conversation <model>` (rebuilds; re-run the scenarios after) |
 | Refresh expired CLI token | `cinna set-token <token_or_url>` |

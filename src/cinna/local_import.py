@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+from rich.markup import escape
 
 from cinna import console
 from cinna import kit_contract
@@ -791,6 +792,7 @@ def run_agent_import(
         )
     _line(f"  Credentials: {len(credentials)} draft(s)")
     _line(f"  Schedules:   {len(schedules)}")
+    components = _report_components(source, files, credentials, account_root / "context" / "local-kit")
     # Without a known id, --update decides create-or-reattach only when it
     # looks the agent up by name, so the plan cannot say which yet.
     existing = True if known_agent_id else (None if update else False)
@@ -956,6 +958,8 @@ def run_agent_import(
         child_root=child_root.relative_to(account_root),
         setup_urls=setup_urls,
         examples=manifest.get("example_prompts") or [],
+        components=components,
+        bundle_id=child_config.bundle_id,
     )
 
 
@@ -1142,7 +1146,7 @@ def _push_workspace(config, workspace_root: Path) -> bool:
     """Flush the local workspace to the agent. Returns True when it settled."""
     try:
         sync_session.ensure_session(config, workspace_root)
-        status = sync_session.flush(config)
+        status = sync_session.flush(config, workspace_root=workspace_root)
     except Exception as exc:
         console.warn(f"Sync push failed: {exc}")
         console.warn(
@@ -1271,6 +1275,31 @@ def _sync_schedules(
             )
 
 
+def _report_components(
+    source: Path, files: list[str], credentials: list[dict], kit_dir: Path | None = None
+) -> list[dict]:
+    """List the dashboard components that travel and warn about cloud gaps (never refuse).
+
+    ``kit_dir`` is the account workspace's own kit copy: the static checker is
+    loaded from there, never from the folder being imported.
+    """
+    from cinna.dashboards import survey_local_components
+
+    names = {str(c.get("name")) for c in credentials if c.get("name")}
+    components = survey_local_components(source, files, names, kit_dir)
+    if not components:
+        return components
+    labels = ", ".join(
+        f"{c['skill']}/{c['name']}" if c.get("skill") else c["name"] for c in components
+    )
+    _line(f"  Dashboards:  {len(components)} component(s): {labels}")
+    for component in components:
+        label = f"{component['skill']}/{component['name']}" if component.get("skill") else component["name"]
+        for warning in component["warnings"]:
+            console.warn(escape(f"Dashboard component {label}: {warning}"))
+    return components
+
+
 def _print_summary(
     account_cfg,
     agent_id: str,
@@ -1279,6 +1308,8 @@ def _print_summary(
     child_root: Path,
     setup_urls: list[tuple[str, str]],
     examples: list[str],
+    components: list[dict] | None = None,
+    bundle_id: str | None = None,
 ) -> None:
     frontend = account_cfg.frontend_url.rstrip("/")
     console.console.print()
@@ -1295,6 +1326,21 @@ def _print_summary(
         )
         for cred_name, url in setup_urls:
             _line(f"    • {cred_name}: {url}")
+
+    if components:
+        from cinna.dashboards import reference
+
+        console.console.print()
+        _line(f"Dashboard components ({len(components)}) — offer one by printing its reference:")
+        for component in components:
+            if bundle_id:
+                _line(f"    {reference(bundle_id, component['name'], component.get('skill'))}")
+            else:
+                _line(f"    {component.get('skill') + '/' if component.get('skill') else ''}{component['name']}")
+        first = components[0]
+        skill_opt = f" --skill {first['skill']}" if first.get("skill") else ""
+        _line(f"  Check them in the cloud: cinna dashboards check {slug} --run")
+        _line(f"  Place one (only when wanted): cinna dashboards add {slug} {first['name']}{skill_opt} --board <dashboard>")
 
     console.console.print()
     _line("Next:")

@@ -248,6 +248,30 @@ session lifecycle, or resolution — that's where the subtle bugs live.
   space reported missing on the remote; binary files dumped as text; the command
   failing when the container is asleep.
 
+### 17. A rebuilt or restarted environment doesn't break the next push
+- **Goal:** edit → push straight after `rebuild-env` / `restart-env`, the way a
+  developer does after an `adapter_unsupported` remedy.
+- **Setup:** an agent synced here with a connected session
+  (`cinna sync status --agent <slug>` → `connected`).
+- **Steps:**
+  ```bash
+  cinna agent rebuild-env <slug> --yes
+  echo "probe $(date +%s)" > agents/<slug>/<slug>/workspace/files/sync-probe.txt
+  cinna sync push --agent <slug>
+  cinna exec --agent <slug> cat files/sync-probe.txt
+  ```
+  Then the fallback without the CLI hook: restart through the raw API
+  (`AccountClient.restart_agent_env()` from a Python one-liner, or the web UI),
+  confirm `cinna sync status` reads `disconnected` with an "unexpected EOF"
+  last error, edit the probe again, and run `cinna sync push --agent <slug>`.
+- **Expected:** the rebuild ends with "Sync session reconnected."; both pushes
+  print "Sync settled (connected)"; `cinna exec` prints the new probe line.
+- **Watch for (found live 2026-11-04):** `Sync flush failed: … session is not
+  currently able to synchronize` right after the rebuild (Mutagen's reconnect
+  backoff), and an expired child token turning every reconnect into
+  `server rejected WebSocket connection: HTTP 403`. The flush now re-mints that
+  token in an account workspace.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **No silent clobber / no silent loss** — a two-sided edit always parks a conflict;

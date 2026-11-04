@@ -178,7 +178,13 @@ each with its own token, registry entry, and Mutagen session.
 - `cinna account refresh-context` re-downloads `context/` and regenerates the
   orchestrator `CLAUDE.md`, the MCP wiring, and every synced child's per-agent
   `CLAUDE.md` from the bundled templates — so a CLI upgrade's new commands reach
-  existing workspaces without a re-setup.
+  existing workspaces without a re-setup. A child whose config predates the
+  `bundle_id` field gets it filled in first (best effort), so its guide's
+  Dashboard components section carries the agent's own reference prefix.
+- The orchestrator `CLAUDE.md` has a **Dashboards** command table and a
+  "Which one?" note (webapp / dashboard component / artifact). The Artifacts
+  heading says "a frozen copy", and its starter points at
+  `artifact-sqlite-report/`. See [Dashboards](../dashboards/dashboards.md).
 
 ## Business rules / guardrails
 

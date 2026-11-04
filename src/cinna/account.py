@@ -1187,8 +1187,11 @@ def run_account_refresh_context() -> None:
     # platform's building prompt and is refreshed on sync, not from a template).
     from cinna.context import regenerate_claude_md
 
+    children = list_child_workspaces(account_root)
+    _backfill_bundle_ids(account_cfg, children)
+
     refreshed = 0
-    for child, child_cfg in list_child_workspaces(account_root):
+    for child, child_cfg in children:
         try:
             regenerate_claude_md(child_cfg, child)
             refreshed += 1
@@ -1199,6 +1202,40 @@ def run_account_refresh_context() -> None:
             f"Regenerated CLAUDE.md for {refreshed} synced agent "
             f"workspace{'s' if refreshed != 1 else ''}"
         )
+
+
+def _fetch_bundle_id(client: "AccountClient", agent_id: str) -> str | None:
+    """The agent's bundle id (``GET agents/{id}``), or None — best effort.
+
+    It goes into the per-agent ``CLAUDE.md`` as the ``bundle:`` segment of the
+    agent's dashboard component references; a failure only means the guide
+    names the segment instead of filling it in.
+    """
+    try:
+        record = client.get_agent(agent_id)
+    except Exception as exc:  # noqa: BLE001 — never fail a sync over this
+        logger.info("bundle id lookup failed for %s: %s", agent_id, exc)
+        return None
+    value = record.get("bundle_id") if isinstance(record, dict) else None
+    return str(value) if value else None
+
+
+def _backfill_bundle_ids(account_cfg: AccountConfig, children) -> None:
+    """Record the bundle id of synced agents whose config predates the field."""
+    from cinna.config import save_config
+
+    missing = [(child, cfg) for child, cfg in children if not cfg.bundle_id]
+    if not missing:
+        return
+    try:
+        with AccountClient(account_cfg) as client:
+            for child, cfg in missing:
+                bundle_id = _fetch_bundle_id(client, cfg.agent_id)
+                if bundle_id:
+                    cfg.bundle_id = bundle_id
+                    save_config(cfg, child)
+    except Exception as exc:  # noqa: BLE001 — offline refresh still regenerates
+        logger.info("bundle id backfill skipped: %s", exc)
 
 
 def run_account_agents(show_all: bool = False) -> None:
@@ -1523,6 +1560,7 @@ def run_agent_sync(agent_ref: str, machine_name: str | None) -> None:
             )
 
         mint = client.mint_agent_token(item["id"], machine, machine_info)
+        bundle_id = _fetch_bundle_id(client, item["id"])
 
     payload = {
         "cli_token": mint["token"],
@@ -1540,6 +1578,7 @@ def run_agent_sync(agent_ref: str, machine_name: str | None) -> None:
 
     agents_dir(account_root).mkdir(exist_ok=True)
     config = config_from_payload(payload)
+    config.bundle_id = bundle_id
     agent_client = PlatformClient(config)
     try:
         # Same Model-A nested layout + auto-link as `cinna setup`, rooted under
@@ -1599,7 +1638,7 @@ def _establish_sync_session(config: CinnaConfig, workspace_root: Path, ref: str)
     try:
         with console.spinner("Starting the sync session..."):
             sync_session.ensure_session(config, workspace_root)
-            st = sync_session.flush(config)
+            st = sync_session.flush(config, workspace_root=workspace_root)
     except Exception as exc:  # noqa: BLE001 — mutagen / transport, all non-fatal here
         logger.warning("sync session not started after agent sync: %s", exc)
         detail = exc.format_message() if isinstance(exc, click.ClickException) else str(exc)
@@ -2342,6 +2381,7 @@ def run_agent_restart_env(agent_ref: str) -> None:
     console.console.print(f"  Status: {result.get('status')}")
     if result.get("status_message"):
         console.console.print(f"  Message: {result['status_message']}")
+    _reconnect_sync_session(account_root, agent)
 
 
 def run_agent_rebuild_env(agent_ref: str, yes: bool = False) -> None:
@@ -2382,6 +2422,44 @@ def run_agent_rebuild_env(agent_ref: str, yes: bool = False) -> None:
             result = client.rebuild_agent_env(agent["id"])
 
         _report_rebuild(client, agent, result)
+    _reconnect_sync_session(account_root, agent)
+
+
+def _reconnect_sync_session(account_root: Path, agent: dict) -> None:
+    """Reconnect this machine's sync session after the container was replaced.
+
+    The old container took the remote Mutagen agent with it; Mutagen notices
+    on its next poll and then retries on a backoff, so for a while every
+    `cinna sync push` (and every flush before a `cinna dashboards` read)
+    failed with "session is not currently able to synchronize". Reconnecting
+    here (re-minting an expired token through the account if the tunnel
+    refuses it) makes the next push work at once. Best effort: only for an
+    agent synced here with an existing session, and never a failure.
+    """
+    found = None
+    for child, child_cfg in list_child_workspaces(account_root):
+        if str(child_cfg.agent_id) == str(agent["id"]):
+            found = (child, child_cfg)
+            break
+    if found is None:
+        return
+    child, child_cfg = found
+    try:
+        if not sync_session.status(child_cfg).exists:
+            return
+        with console.spinner("Reconnecting this machine's sync session..."):
+            state, _ = sync_session.heal_session(child_cfg, child)
+    except Exception as exc:  # noqa: BLE001 — Mutagen missing / daemon down
+        logger.info("sync reconnect after env change skipped: %s", exc)
+        return
+    if state.state == "connected":
+        console.status("Sync session reconnected.")
+    else:
+        detail = f" ({state.last_error})" if state.last_error else ""
+        console.warn(
+            f"Sync session did not reconnect: {state.state}{detail}. "
+            f"Run 'cinna sync push --agent {child.name}' before editing, or 'cinna doctor'."
+        )
 
 
 def _confirm_unsynced_edits(
@@ -2833,6 +2911,7 @@ def run_agent_show(
         with console.spinner("Inspecting agent..."):
             info = client.inspect_agent(agent["id"])
             linked = None if prompts_only else _fetch_linked_credentials(client, agent["id"])
+            components = None if prompts_only else _fetch_components_summary(client, agent["id"])
 
     show_full = full or not _stdout_is_tty()
 
@@ -2876,6 +2955,71 @@ def run_agent_show(
         console.console.print()
         console.console.print("Agent REST API:")
         _print_agent_api_status(status)
+
+    _print_components_summary(components, agent_ref)
+
+
+def _fetch_components_summary(client: "AccountClient", agent_id: str):
+    """The agent's dashboard components for `agent show`, or a note why not.
+
+    Returns a list of components, or a string (a dim note) when they cannot be
+    read: a server without dashboards, an environment that predates them, or
+    any other refusal. Never fails `agent show`.
+    """
+    from cinna.errors import ComponentRefusal
+
+    try:
+        if client.get_dashboards_capabilities() is None:
+            return None  # the server has no dashboard components
+    except Exception as exc:  # noqa: BLE001
+        logger.info("dashboards capabilities unavailable: %s", exc)
+        return None
+    # Listing components wakes a suspended environment; `agent show` must not.
+    try:
+        env_id = client.get_agent(agent_id).get("active_environment_id")
+        env_status = client.get_environment(env_id).get("status") if env_id else None
+    except Exception as exc:  # noqa: BLE001
+        logger.info("environment status unavailable for %s: %s", agent_id, exc)
+        env_status = None
+    if env_status != "running":
+        if env_status is None:
+            return None
+        return f"environment is {env_status}; `cinna dashboards list` wakes it"
+    try:
+        result = client.list_agent_components(agent_id)
+    except ComponentRefusal as error:
+        if error.code == "adapter_unsupported":
+            return "environment predates dashboard components (cinna agent rebuild-env)"
+        return error.sentence
+    except Exception as exc:  # noqa: BLE001 — a section, never a failed show
+        logger.info("dashboard components unavailable for %s: %s", agent_id, exc)
+        return "could not read them"
+    return [c for c in (result.get("components") or []) if isinstance(c, dict)]
+
+
+def _print_components_summary(components, agent_ref: str) -> None:
+    if components is None:
+        return
+    console.console.print()
+    if isinstance(components, str):
+        console.console.print(f"Dashboard components: [dim]{_esc(components)}[/dim]")
+        return
+    errors = sum(1 for c in components if c.get("has_errors"))
+    placed = sum(len(c.get("placements") or []) for c in components)
+    summary = f"{len(components)}"
+    if errors:
+        summary += f", {errors} with errors"
+    if placed:
+        summary += f", {placed} tile{'s' if placed != 1 else ''}"
+    console.console.print(f"Dashboard components ({summary}):")
+    for component in components:
+        label = component.get("name")
+        if component.get("skill"):
+            label = f"{component['skill']}/{label}"
+        mark = " [red](errors)[/red]" if component.get("has_errors") else ""
+        console.console.print(f"  - {_esc(label)}{mark}")
+    if components:
+        console.console.print(f"  [dim]cinna dashboards list {_esc(agent_ref)}[/dim]")
 
 
 # ── Prompts as files (pull / diff / push) ───────────────────────────────────

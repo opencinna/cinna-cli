@@ -66,7 +66,13 @@ The group/subgroup objects are `src/cinna/main.py:agent()` and
 - `src/cinna/account.py:run_agent_restart_env()` — resolve the agent; if a local
   child workspace exists (`resolve_child_workspace()`), read `sync_session.status()`
   and warn+confirm when `pending_to_remote > 0` or `conflict_count > 0`; then
-  `AccountClient.restart_agent_env()` (blocking) and print status.
+  `AccountClient.restart_agent_env()` (blocking) and print status, then
+  `_reconnect_sync_session()`.
+- `src/cinna/account.py:_reconnect_sync_session()` — shared by restart and
+  rebuild: for the child workspace of this agent (`list_child_workspaces()`)
+  whose session exists, `sync_session.heal_session(child_cfg, child)` (a forced
+  reconnect, plus a token re-mint on a 401/403). It prints "Sync session
+  reconnected." or a warning, and never raises.
 - `src/cinna/account.py:run_agent_rebuild_env()` — the same shape as
   `run_agent_restart_env()` plus a second gate: the D2 unsynced-changes
   warn+confirm, then a `Rebuild …?` confirmation (default No) that `--yes`

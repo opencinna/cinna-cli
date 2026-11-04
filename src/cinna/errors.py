@@ -219,6 +219,56 @@ class CodedRefusal(CinnaExit):
         self.paths = list(paths or [])
 
 
+class ComponentRefusal(CinnaExit):
+    """A dashboard-component route refused: ``{"error": {code, message, …}}``.
+
+    cinna-core's agent-component and tile routes answer every refusal with
+    that body (not ``detail``). The server's sentence is kept as the message
+    and its code as the machine code; ``retry_after_s`` and ``field`` ride
+    along for the caller (``cinna dashboards`` adds its remedy on top).
+
+    Exit codes: ``invalid_input`` is a usage error (2) — the caller passed a
+    value the component refuses; ``env_unavailable`` is the platform's
+    "try again" (12); every other code is an ordinary failure (1), including
+    ``call_failed`` (502): that is the agent's own script failing, not the
+    platform being down.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        retry_after_s: int | None = None,
+        field: str | None = None,
+    ):
+        if code == "invalid_input":
+            exit_code = EXIT_USAGE
+        elif code == "env_unavailable":
+            exit_code = EXIT_NETWORK
+        else:
+            exit_code = EXIT_ERROR
+        extra: dict = {"http_status": status_code}
+        if retry_after_s is not None:
+            extra["retry_after_s"] = retry_after_s
+        if field:
+            extra["field"] = field
+        super().__init__(exit_code, code or "platform_error", message, extra=extra)
+        self.status_code = status_code
+        self.sentence = message
+        self.retry_after_s = retry_after_s
+        self.field = field
+
+    def with_remedy(self, remedy: str) -> "ComponentRefusal":
+        """The same refusal with the CLI's next step on a line of its own."""
+        if remedy:
+            self.detail = f"{self.sentence}\n{remedy}"
+            # ClickException renders ``self.message``; keep both in step.
+            self.message = self.detail
+        return self
+
+
 class MutagenNotFoundError(CinnaExit):
     """Mutagen is not installed or not on PATH."""
 

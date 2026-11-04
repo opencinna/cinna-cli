@@ -6,7 +6,7 @@ You are working in a **Cinna account workspace** — the multi-agent root for lo
 
 ## The model
 
-Cinna Core agents run in **managed cloud environments** — there is no local runtime. Each agent is a self-contained unit: Python scripts, prompt files, a webapp dashboard, credentials, and a knowledge base. Agents have two modes:
+Cinna Core agents run in **managed cloud environments** — there is no local runtime. Each agent is a self-contained unit: Python scripts, prompt files, a web app, dashboard components, credentials, and a knowledge base. Agents have two modes:
 
 - **Building mode** — developing the agent itself: its scripts under `workspace/scripts/`, prompts under `workspace/docs/`, webapp, packages. This is what local workspaces are for. Each synced workspace's `BUILDING_AGENT.md` carries the platform-assembled building prompt for that agent.
 - **Conversation mode** — end users chatting with the finished agent. That stays in the cloud; you influence it by editing the agent's prompts and scripts in building mode.
@@ -147,7 +147,7 @@ Refresh after platform updates with `cinna account refresh-context`.
 
 > **"Share this agent with the team" is `cinna library share`; "get the team's version" / "pull their changes" is `cinna library update`.** Git signs in with the account token through its environment — never paste a token into a remote URL or `.git/config`. `credentials/`, `app-data/` and secret files never leave the machine (the share is refused, naming them). When the team's changes and the user's do not combine cleanly (`diverged`), do **not** merge or force anything: relay the two options the command prints — use the team's version and keep theirs as a copy, or keep working and share later — and let the user choose. `read_only` ⇒ `cinna library suggest`.
 
-**Artifacts — publish a report, dashboard or file to Cinna and get a link:**
+**Artifacts — publish a frozen copy (a report, snapshot or file) to Cinna and get a link:**
 
 | Command | What it does |
 |---------|--------------|
@@ -155,7 +155,22 @@ Refresh after platform updates with `cinna account refresh-context`.
 | `cinna artifacts list [--shared]` · `show <id>` · `open <id>` · `download <id> [-o DIR]` | Find, inspect, open and fetch artifacts |
 | `cinna artifacts link revoke <id> <link> --yes` · `delete <id> --yes` | Revoke a public link; delete an artifact and every link |
 
-> **Agents publish, people share.** `cinna artifacts share` and `cinna artifacts link create` are the user's — they refuse here and are denied in `.claude/settings.json`; tell the user the command to run in their terminal, or to use Share on the artifact page. Before building something to publish, read `context/local-kit/skills/cinna-artifacts/SKILL.md`: the page runs sandboxed, so bundle every library (no CDN), use relative paths, no `localStorage`/cookies, keep data small (a starter is in `context/local-kit/templates/artifact-sqlite-dashboard/`). The printed link is a valid `link` artifact for `cinna delegation report --artifact`.
+> **Agents publish, people share.** `cinna artifacts share` and `cinna artifacts link create` are the user's — they refuse here and are denied in `.claude/settings.json`; tell the user the command to run in their terminal, or to use Share on the artifact page. Before building something to publish, read `context/local-kit/skills/cinna-artifacts/SKILL.md`: the page runs sandboxed, so bundle every library (no CDN), use relative paths, no `localStorage`/cookies, keep data small (a starter is in `context/local-kit/templates/artifact-sqlite-report/`). The printed link is a valid `link` artifact for `cinna delegation report --artifact`.
+
+**Dashboards — an agent's live components and the owner's dashboards:**
+
+| Command | What it does |
+|---------|--------------|
+| `cinna dashboards list <agent>` · `show <agent> <name>` | The agent's components as its environment sees them: checker findings (`E`/`W`), where each is placed, and the **reference** line per component |
+| `cinna dashboards check <agent> [<name>] [--run]` | The owner's card checks; `--run` also runs each source in the environment (never locally). Exit 1 on any error |
+| `cinna dashboards run <agent> <name> [--endpoint E] [--param k=v …]` | Run it exactly as a tile would (owner timezone, credential gate, runner limits); prints the value |
+| `cinna dashboards ref <agent> <name> [--check]` | Print the reference line that offers the component (`--check`: does it resolve?) |
+| `cinna dashboards boards` · `board create <name>` | The owner's web dashboards; make one |
+| `cinna dashboards add <agent> <name> --board <dashboard> [--size s\|m\|l\|wide\|tall] [--param k=v]` | Place a component as a tile — **only when the user asks** |
+| `cinna dashboards tiles <dashboard>` · `tile data\|refresh\|params\|call\|edit\|remove <dashboard> <tile> …` | Read and drive tiles; `tile params --set k=v` changes the stored params |
+| `cinna chat --agent <agent> --board <dashboard> [--focus <tile>] "<message>"` | Talk to the agent in its dashboard chat: it gets the dashboard context and its tile tools |
+
+> **Which one?** "Something I can open and share" → the agent's **webapp**. "A live view I keep on my dashboard" → a **dashboard component** (`dashboards/<name>/` in the agent; read `context/local-kit/guides/14-dashboards.md` and `context/local-kit/skills/cinna-dashboards/SKILL.md` first). "A copy to hand to people" → an **artifact**. "Make me a dashboard" almost always means a component. Offer a finished component by printing its reference on a line of its own (never in backticks): the owner's chat — web or Cinna Desktop — turns it into a card with Add to dashboard. Every verb pushes pending local edits first. Cinna Desktop's own dashboards appear as "Cinna Desktop" placements; the CLI reads their tiles but changes them only in the desktop.
 
 **Addons — what an agent carries beyond its prompt (plugins + `skills/<name>/` folders):**
 

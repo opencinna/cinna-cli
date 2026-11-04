@@ -194,7 +194,8 @@ reported as a healthy one.
 
 `DEFAULT_EXCLUDE` must stay content-identical to the shipped `layout.json` —
 same entries, same order — and `tests/test_kit_contract.py` asserts it entry by
-entry. A fallback that diverges is a silent hash-parity break.
+entry (`artifacts/`, contract 1.13.0, was missing until 2026-11-04; the opt-in
+parity test with `CINNA_CORE_LAYOUT` caught it). A fallback that diverges is a silent hash-parity break.
 
 `local_import.py:load_export_contract()` wraps the resolution and appends
 `MANDATORY_EXCLUDE = ("credentials/", "app-data/")` unconditionally: **a

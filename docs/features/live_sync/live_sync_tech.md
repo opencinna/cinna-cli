@@ -58,9 +58,24 @@ child via `--agent`).
   `cinna@cinna-agent-<agent_id>:/app/workspace` <!-- nocheck --> and runs
   `mutagen sync create --name … --sync-mode=two-way-safe --ignore-vcs`. Retries
   transparently on a stale daemon and on a still-waking env (see guardrails).
-- `flush(config)` — `mutagen sync flush <session>`; blocks until the cycle settles.
-  Parked conflicts do **not** fail the flush (they surface in the returned status);
-  only a genuine transport/session error raises.
+- `flush(config, timeout, workspace_root=None)` — `mutagen sync flush <session>`;
+  blocks until the cycle settles. Parked conflicts do **not** fail the flush (they
+  surface in the returned status); only a genuine transport/session error raises.
+  A stderr in `_RECONNECTABLE_FLUSH_ERRORS` ("not currently able to synchronize",
+  "synchronization failed while waiting for flush response") means the session
+  lost its remote: `heal_session()`, then one more flush.
+- `reconnect(config, timeout=RECONNECT_TIMEOUT)` — `mutagen sync resume <session>`
+  restarts a running session's loop (an immediate reconnect instead of Mutagen's
+  backoff), then polls `status()` until `connected`, stopping early on
+  `_auth_refused()` (HTTP 401/403 in `lastError`, as the shim reports a refused
+  WebSocket upgrade).
+- `heal_session(config, workspace_root)` — `reconnect()`; on an auth refusal in an
+  account-managed workspace (`doctor._account_root_for()`), re-mint through
+  `doctor._make_remint()`, reload the config, and reconnect again. Returns
+  `(status, config)`. Callers pass `workspace_root` so the re-mint can happen:
+  `main.sync_push()` / `sync_pull()` / `git_checkout()`,
+  `account._establish_sync_session()`, `local_import._push_workspace()`,
+  `dashboards.flush_local_changes()`.
 - `stop(config)` / `terminate_named(name, config)` — terminate this agent's session /
   an arbitrary named session (the latter for `cinna doctor`, which has no per-agent
   config). `list_all_sessions(config)` returns the whole daemon inventory.
@@ -73,7 +88,9 @@ child via `--agent`).
   `base_status()` strips the side suffix (`staging-beta` → `staging`); the watching/
   scanning/staging/… family collapses to `connected`. Pending counts come from
   `alpha.stagedChanges` / `beta.stagedChanges`; conflict count from `conflictCount`
-  or `len(conflicts)`. `state == "missing"` when no session exists.
+  or `len(conflicts)`. `state == "missing"` when no session exists. `connecting-*`
+  maps to `disconnected` even with a `lastError` (Mutagen is retrying), so only a
+  session that isn't reconnecting reads as `error`.
 - `_list_sessions()` — `mutagen sync list --template '{{json .}}'` (Mutagen 0.18.x has
   no `--json` flag); tolerant of `null`/list/dict shapes. `_find_session()` matches by
   `name`/`identifier` suffix.

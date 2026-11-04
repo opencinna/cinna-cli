@@ -110,7 +110,13 @@ Each prints as `[n/9]`:
    warn on an older one or on a folder that records none, resolve the exclude
    list and the secret rules, plan the copy and compute the tree's
    `content_hash`. Read `runtime` tolerantly and print the `Engine:` line and,
-   when any are present, the `Not carried to the cloud:` line.
+   when any are present, the `Not carried to the cloud:` line. List the
+   dashboard components that travel (`Dashboards:`) and warn, never refuse,
+   about what won't work in the cloud: the kit checker's errors (from the
+   account's own `context/local-kit/`, never a kit inside the imported folder),
+   a source under `app-data/`, `package.json`/`node_modules/`,
+   `refresh.on_app_start`, and a `requires_credentials` name the manifest
+   doesn't declare.
 2. **Agent** — resolve by the `publications.json` entry for this instance
    (requires `--update`) or create a new agent in the active user workspace
    (`--workspace` overrides), passing `runtime.engine` on creation only.
@@ -137,8 +143,9 @@ Each prints as `[n/9]`:
 9. **Record** — add or update this instance's entry in `publications.json`
    (`platform_url`, `agent_id`, `workspace`, `imported_at`, `updated_at`,
    `contract_version`, `content_hash`) and print the summary (agent id, web UI
-   link, workspace path, credential setup URLs, and the `cinna chat`
-   verification line).
+   link, workspace path, credential setup URLs, the components' `bundle:`
+   references with the `cinna dashboards check|add` hints, and the `cinna chat`
+   verification line). See [Dashboards](../dashboards/dashboards.md).
 
 ## User flows
 

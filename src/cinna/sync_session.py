@@ -399,17 +399,99 @@ def _create_session(config: CinnaConfig, workspace_root: Path) -> None:
         )
 
 
-def flush(config: CinnaConfig, timeout: float = 600.0) -> SyncStatus:
+# What `mutagen sync flush` says when the session has lost its remote
+# endpoint and is waiting out Mutagen's own reconnect backoff — typically right
+# after the agent's environment was restarted or rebuilt (the remote Mutagen
+# agent died with the old container: "unexpected EOF").
+_RECONNECTABLE_FLUSH_ERRORS = (
+    "not currently able to synchronize",
+    "synchronization failed while waiting for flush response",
+)
+# The sync tunnel refusing the CLI token: the shim reports the WebSocket
+# upgrade's status in the session's lastError.
+_AUTH_REFUSED_ERRORS = ("HTTP 401", "HTTP 403")
+RECONNECT_TIMEOUT = 90.0
+_RECONNECT_POLL_SECONDS = 1.0
+
+
+def _auth_refused(state: SyncStatus) -> bool:
+    return any(marker in (state.last_error or "") for marker in _AUTH_REFUSED_ERRORS)
+
+
+def reconnect(config: CinnaConfig, timeout: float = RECONNECT_TIMEOUT) -> SyncStatus:
+    """Make Mutagen reconnect now and wait until the session is connected.
+
+    After the environment restarts, Mutagen only notices the dead remote agent
+    on its next poll and then retries on a backoff, so a session can sit in
+    ``error`` / ``connecting`` for a while. ``mutagen sync resume`` on a
+    running session restarts its loop, which reconnects immediately. Returns
+    the status at the end: ``connected``, or whatever it was when the timeout
+    ran out — or as soon as the tunnel refuses the token (waiting cannot fix
+    that; see ``heal_session``).
+    """
+    _run_mutagen(["sync", "resume", session_name(config.agent_id)], config)
+    deadline = time.monotonic() + timeout
+    state = status(config)
+    while state.state not in ("connected", "missing", "paused") and not _auth_refused(state):
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_RECONNECT_POLL_SECONDS)
+        state = status(config)
+    return state
+
+
+def heal_session(config: CinnaConfig, workspace_root: Path | None) -> tuple[SyncStatus, CinnaConfig]:
+    """Reconnect the session; re-mint an expired token through the account when needed.
+
+    Returns ``(status, config)`` — the config is reloaded when its token was
+    re-minted. A standalone workspace (no account above it) is never touched
+    beyond the reconnect: its token comes from a pasted setup token.
+    """
+    state = reconnect(config)
+    if state.state == "connected" or not _auth_refused(state) or workspace_root is None:
+        return state, config
+    from cinna.doctor import _account_root_for, _make_remint
+
+    if _account_root_for(workspace_root) is None:
+        return state, config
+    logger.info("sync tunnel refused the token for %s; re-minting", config.agent_id)
+    _make_remint(config.agent_id, workspace_root)()
+    from cinna.config import load_config
+
+    config = load_config(workspace_root)
+    return reconnect(config), config
+
+
+def flush(
+    config: CinnaConfig, timeout: float = 600.0, workspace_root: Path | None = None
+) -> SyncStatus:
     """Force a sync cycle and block until it completes; return the new status.
 
     ``mutagen sync flush`` triggers an immediate reconciliation and blocks until
     it finishes (or fails), so a one-shot ``cinna sync push`` / ``pull`` exits
     only once local↔remote is settled. Parked conflicts do not fail the flush —
     they surface in the returned status's ``conflict_count``.
+
+    A session that lost its remote (the environment was restarted or rebuilt)
+    is reconnected — and, given ``workspace_root`` of an account-managed
+    workspace, its expired token re-minted — and the flush retried once.
     """
     result = _run_mutagen(
         ["sync", "flush", session_name(config.agent_id)], config
     )
+    if result.returncode != 0 and any(
+        marker in (result.stderr or "") for marker in _RECONNECTABLE_FLUSH_ERRORS
+    ):
+        logger.info("sync flush: session cannot synchronize; reconnecting")
+        state, config = heal_session(config, workspace_root)
+        if state.state != "connected":
+            detail = f" ({state.last_error})" if state.last_error else ""
+            raise click.ClickException(
+                f"Sync session could not reconnect to the agent's environment: "
+                f"{state.state}{detail}. Check the environment ('cinna agent show') "
+                f"and run 'cinna doctor'."
+            )
+        result = _run_mutagen(["sync", "flush", session_name(config.agent_id)], config)
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         # A flush with unresolved conflicts can exit non-zero on some Mutagen
@@ -508,7 +590,9 @@ def _to_status(config: CinnaConfig, session: dict) -> SyncStatus:
         state = "paused"
     elif base in {"watching", "scanning", "staging", "transitioning", "saving", "reconciling", "connected"}:
         state = "connected"
-    elif raw_state in {"disconnected", "connecting"}:
+    elif raw_state in {"disconnected", "connecting"} or base == "connecting":
+        # ``connecting-alpha`` / ``connecting-beta``: Mutagen is (re)connecting,
+        # possibly after an error it will retry — not a dead session.
         state = "disconnected"
     elif "error" in raw_state or session.get("lastError"):
         state = "error"
