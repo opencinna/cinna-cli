@@ -4701,6 +4701,92 @@ def test_skills_revisions_reads_release_notes_not_notes(
     assert top < result.output.index("first cut")
 
 
+COMAINTAINED_DETAIL = {
+    **PACKAGE_DETAIL,
+    "revisions": [
+        {
+            **PACKAGE_DETAIL["revisions"][0],
+            "published_by": {"user_id": "u-a", "display_name": "Ann"},
+            "base_revision_number": None,
+        },
+        {
+            **PACKAGE_DETAIL["revisions"][1],
+            "published_by": {"user_id": "u-b", "display_name": "Bob"},
+            "base_revision_number": 1,
+        },
+        {
+            "revision_number": 3,
+            "version": "1.2.0",
+            "published_at": "2026-03-04T10:00:00",
+            "release_notes": "x",
+            # The sharer's account is gone.
+            "published_by": None,
+            "base_revision_number": 2,
+        },
+    ],
+}
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_revisions_names_who_shared_each_and_its_base(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "200")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = COMAINTAINED_DETAIL
+
+    result = runner.invoke(cli, ["skills", "revisions", "localhost.skill.dad-jokes"])
+    assert result.exit_code == 0, result.output
+    assert "Shared by" in result.output and "Based on" in result.output
+    lines = result.output.splitlines()
+    rev3 = next(line for line in lines if "1.2.0" in line)
+    rev2 = next(line for line in lines if "1.1.0" in line)
+    rev1 = next(line for line in lines if "1.0.0" in line)
+    assert "Version 2" in rev3 and "—" in rev3
+    assert "Bob" in rev2 and "Version 1" in rev2
+    assert "Ann" in rev1 and "Version" not in rev1 and rev1.count("—") == 1
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_revisions_renders_an_older_server_without_the_new_fields(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A server before co-maintainers sends neither field: dashes, no crash."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "200")
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = PACKAGE_DETAIL
+
+    result = runner.invoke(cli, ["skills", "revisions", "localhost.skill.dad-jokes"])
+    assert result.exit_code == 0, result.output
+    rev2 = next(line for line in result.output.splitlines() if "1.1.0" in line)
+    assert rev2.count("—") == 2
+
+
+@patch("cinna.account.AccountClient")
+def test_skills_revisions_json_passes_the_new_fields_through(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    mock_client = mock_client_cls.return_value.__enter__.return_value
+    mock_client.list_skill_catalog.return_value = CATALOG_LISTING
+    mock_client.get_skill_package.return_value = COMAINTAINED_DETAIL
+
+    result = runner.invoke(
+        cli, ["skills", "revisions", "localhost.skill.dad-jokes", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)
+    assert [r["revision_number"] for r in rows] == [3, 2, 1]
+    assert rows[0]["published_by"] is None
+    assert rows[1]["published_by"] == {"user_id": "u-b", "display_name": "Bob"}
+    assert rows[1]["base_revision_number"] == 1
+    assert rows[2]["base_revision_number"] is None
+
+
 @patch("cinna.account.AccountClient")
 def test_skills_show_falls_back_to_the_package_when_content_is_unreachable(
     mock_client_cls, runner, account_root, monkeypatch

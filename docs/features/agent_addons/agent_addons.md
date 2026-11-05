@@ -242,6 +242,20 @@ change without cutting a new one:
   it never revokes (revoking is its own verb in the web UI, so a stale
   invocation cannot silently remove access). An unknown address fails the whole
   publish rather than half-sharing it.
+- **A CLI publish is never refused as stale.** It goes through the agent path
+  (`POST /agents/{id}/skills/{name}/publish`), which records the package's
+  latest revision as the new revision's base, so a version a co-maintainer
+  shared in the meantime is built on rather than checked against. Cinna
+  Desktop's Share sends the base its folder holds instead, and core refuses
+  that share (`stale_base`) when a co-maintainer has shared a newer version
+  since. The CLI never calls the desktop upload, so it never sees
+  `stale_base` or `editable_package_exists`.
+- **Each revision names who shared it and what it was based on.**
+  `cinna skills revisions` and `cinna skills show` print **Shared by** (the
+  publisher's display name, `—` once the account is deleted) and **Based on**
+  (`Version N`, the revision the sharer's copy held; `—` for a first revision,
+  a share from an older Cinna Desktop, and any revision published before core
+  recorded it). An older server sends neither field and both read `—`.
 - **Publishing reads the cloud workspace.** The files come from the agent's
   remote workspace on disk — which is why a suspended environment publishes
   normally — so an unsynced local edit is simply not in the revision. Push

@@ -516,10 +516,35 @@ cinna skills revisions <PACKAGE_ID>
 ```
 
 **Expected** — one row per revision, newest first, with number, version, release
-date, size and the `release_notes` given at publish time.
+date, size, **Shared by**, **Based on** and the `release_notes` given at publish
+time.
 
 **Watch for** — a permanently blank notes column (the field is `release_notes`,
 not `notes`); ascending order, which buries the answer at the bottom.
+
+### 20a. Each revision names who shared it and what it was based on
+
+**Goal** — the revision table shows the sharer and the base core recorded, and a
+CLI re-publish is recorded as built on the latest revision. Needs core
+d08c10d8 and 465c43c2 (revisions carrying `published_by` and
+`base_revision_number`).
+
+**Steps** — after scenarios 4 and 5 have published `acceptance-demo` twice:
+
+```bash
+cinna skills revisions <PACKAGE_ID>
+cinna skills revisions <PACKAGE_ID> --json
+```
+
+**Expected** — the table has **Shared by** and **Based on** columns. Revision 2
+reads **Based on** `Version 1`; revision 1 reads `—` there (a first revision has
+no base). Both rows name the publisher's display name under **Shared by**.
+`--json` carries the server's `published_by` (`{user_id, display_name}`) and
+`base_revision_number` (`1` on revision 2, `null` on revision 1) as sent.
+
+**Watch for** — revision 2 with no base (the agent publish path did not record
+one); a crash or a blank cell instead of `—` on a revision published before
+core recorded these fields.
 
 ### 21. Sharing changes after the publish
 

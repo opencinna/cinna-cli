@@ -139,6 +139,10 @@
 - `src/cinna/account.py:_revision_rows()` — revisions sorted newest first. The
   question this list answers is "what is the newest"; a payload that happened to
   be ascending would put the answer at the bottom.
+- `src/cinna/account.py:_revision_shared_by()` / `_revision_based_on()` — the
+  revision table's **Shared by** (`published_by.display_name`) and **Based on**
+  (`Version <base_revision_number>`) cells, each `—` when the field is null or
+  absent.
 - `src/cinna/account.py:_addon_link()` — the row's `link` sub-object. Every
   fact about an *install* rather than a package lives there: `id` (the link id
   the plugin routes address), `installed_version`, `latest_version`,
@@ -242,11 +246,19 @@ hatch, `POST /api/v1/cli/account/api-proxy`:
   `grant_emails`, `package_id`). Returns the new revision; consumed fields are
   `package_id` (the package's UUID), `revision_number`, `version` and
   `frontmatter` (the last one only to tell whether the version reached the
-  workspace's `SKILL.md`).
+  workspace's `SKILL.md`). Core records the package's previous latest revision
+  as the new one's `base_revision_number`; this route never answers
+  `stale_base` or `editable_package_exists` — those come only from the desktop
+  upload (`POST /skills/packages/publish`), which the CLI does not call.
 - `GET /api/v1/skills/packages/{package_id}` — consumed fields are the
   reverse-DNS `package_id` string, `display_name`, `visibility`,
   `latest_version` and `revisions[]` (`revision_number`, `version`,
-  `created_at`, `release_notes` — **not** `notes` — and `size_bytes`).
+  `created_at`, `release_notes` — **not** `notes` — `size_bytes`,
+  `published_by` `{user_id, display_name}` (null once the account is deleted)
+  and `base_revision_number` (int or null)). The last two are absent on a
+  server older than skill co-maintainers; `_revision_shared_by()` and
+  `_revision_based_on()` render a missing or null value as `—`, and `--json`
+  passes both through untouched.
 - `POST /api/v1/agents/{agent_id}/skills/install` — `SkillInstallRequest`:
   `package_id` (the package **UUID**), optional `revision_number`,
   `conversation_mode`, `building_mode`. Answers `PluginSyncResponse`; 409

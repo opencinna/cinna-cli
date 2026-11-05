@@ -6078,6 +6078,8 @@ def _print_revisions(package: dict) -> None:
     table.add_column("Version")
     table.add_column("Released", style="dim")
     table.add_column("Size", justify="right", style="dim")
+    table.add_column("Shared by")
+    table.add_column("Based on", style="dim")
     table.add_column("Release notes")
 
     for rev in revisions:
@@ -6089,12 +6091,41 @@ def _print_revisions(package: dict) -> None:
             # only the first is ever filled.
             str(rev.get("published_at") or rev.get("created_at") or "")[:19],
             _format_size(size),
+            _esc(_revision_shared_by(rev)),
+            _revision_based_on(rev),
             # `release_notes`, not `notes`: the field a publisher fills at
             # publish time is the field this column has to read.
             _esc(rev.get("release_notes") or ""),
         )
 
     console.console.print(table)
+
+
+def _revision_shared_by(rev: dict) -> str:
+    """Who shared a revision, or a dash.
+
+    `published_by` is null once that account is deleted, and absent on a
+    server older than skill co-maintainers; both read as a dash.
+    """
+    published_by = rev.get("published_by")
+    if isinstance(published_by, dict):
+        name = published_by.get("display_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return "—"
+
+
+def _revision_based_on(rev: dict) -> str:
+    """The revision the sharer's copy held, as "Version N", or a dash.
+
+    `base_revision_number` is null for a first revision, a share from an
+    older Cinna Desktop and every revision published before core recorded
+    it, and absent on an older server.
+    """
+    base = rev.get("base_revision_number")
+    if isinstance(base, int) and not isinstance(base, bool):
+        return f"Version {base}"
+    return "—"
 
 
 def _format_size(size) -> str:
