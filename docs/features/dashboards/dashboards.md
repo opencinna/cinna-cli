@@ -69,10 +69,15 @@ cinna-core**. The CLI is a remote control for both and runs nothing locally.
    `board create Sales` makes one.
 7. `cinna dashboards add crm-agent deals --board Sales [--size l] [--param k=v]`
    adds the tile and prints its id and the dashboard link. `--new-board`
-   creates the dashboard if no dashboard has that name.
+   creates the dashboard if no dashboard has that name. `--title`, `--max-age`,
+   `--every` and `--after-turn/--no-after-turn` set the tile's title and
+   refresh overrides. A component a skill ships is named with `--skill <skill>`
+   on `show`, `check`, `run`, `ref` and `add`.
 8. `cinna dashboards tiles Sales` shows each tile's params, size and data age
    without waking any environment. `tile data|refresh|params|call|edit|remove`
-   reads or changes one tile.
+   reads or changes one tile. `tile edit` takes `--title` (`''` goes back to
+   the component's title), `--size`, `--max-age`, `--every` and
+   `--after-turn/--no-after-turn`.
 
 ### Test the agent in a dashboard chat
 9. `cinna chat --agent crm-agent --board Sales --focus deals "Which deal first?"`
@@ -101,13 +106,17 @@ cinna-core**. The CLI is a remote control for both and runs nothing locally.
 - **Server support first.** Every verb asks `GET dashboards/capabilities`
   before anything else. If the route is missing (the server predates
   dashboard components), the answer is one message with code
-  `dashboards_unsupported`. Another version is refused up front too. The
+  `dashboards_unsupported`. Another version is refused up front too.
+  `cinna chat --board` asks the same route but also needs its `chat` flag, and
+  refuses with `dashboard_chat_unsupported` when the server has no dashboard
+  chat. The
   limits it reports (runs a minute, blocks per dashboard, context size) are
   the ones the CLI enforces and quotes. A refusal by the api-proxy itself
   (its own per-token rate limit) is reported as exactly that, never as
   "no dashboards".
-- **Waking environments.** `env_unavailable` is retried until `--timeout`,
-  waiting `retry_after_s` (default 5 s) between tries. Listing components or
+- **Waking environments.** `env_unavailable` is retried until `--timeout`
+  (default 120 s; on `check` the same flag also bounds each `--run` check, and
+  defaults to 300 s), waiting `retry_after_s` (default 5 s) between tries. Listing components or
   running one wakes a suspended environment. Reading a tile's data never does.
   `cinna agent show` lists components only when the server has dashboards
   and the environment is already running. `cinna doctor` doesn't check
@@ -122,6 +131,15 @@ cinna-core**. The CLI is a remote control for both and runs nothing locally.
   - `invalid_input` → names the field.
   - `call_failed` → core's sentence, which carries the script's stderr tail.
   - Exit codes: `invalid_input` 2, `env_unavailable` 12, everything else 1.
+- **The CLI's own refusals** (exit 1, with the remedy in the message):
+  - `component_errors`: `check` found an error, or `add` was asked to place a
+    component with errors; the JSON lists the components.
+  - `dashboard_full`: `add` on a dashboard that already holds the block limit.
+  - `not_synced`: `check --run` for an agent with no synced workspace under
+    this account (the checker runs with that workspace's token).
+  - `ref_<status>` (e.g. `ref_gone`, `ref_invalid`): `ref --check` got a status
+    other than `ok`.
+  - `desktop_dashboard`: see Desktop dashboards below.
 - **Own run budget.** Core allows 30 runs a minute per target. CLI runs carry
   `tile_key: "cli"`, so a developer looping `run` doesn't use up the budget of
   core's Preview dialog. The CLI never auto-loops past a `rate_limited`.

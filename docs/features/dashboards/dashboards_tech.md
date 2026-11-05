@@ -92,9 +92,10 @@ AGENT is resolved by `_Session.agent()`: a name, slug or id via
 - `src/cinna/dashboards.py:refresh_overrides()`: `max_age` and
   `while_open_every` checked with core's patterns (`_DURATION_RE`,
   `_DURATION_1M_RE`), plus `after_turn`.
-- `src/cinna/dashboards.py:add()`: component (fresh) → `has_errors` refusal →
+- `src/cinna/dashboards.py:add()`: component (fresh) → `has_errors` refusal
+  (`component_errors`) →
   `resolve_board()` (or, only on `BoardNotFound`, `create_dashboard()` with `--new-board`) →
-  `refuse_desktop_board()` → block-limit check → `POST dashboards/{id}/blocks`
+  `refuse_desktop_board()` → block-limit check (`dashboard_full`) → `POST dashboards/{id}/blocks`
   with `grid_x/grid_y` 0 and `size_grid()` of `--size`, else the component's
   `size`, else `DEFAULT_SIZE`.
 - `src/cinna/dashboards.py:resolve_board()`: web dashboards by id, exact name
@@ -109,14 +110,17 @@ AGENT is resolved by `_Session.agent()`: a name, slug or id via
 - `src/cinna/dashboards.py:check()`: core findings (source `core`). With
   `--run`, `run_env_checker()` per component adds findings not already present
   by `(path, code)` (source `run`). Any error → `CinnaExit` code
-  `component_errors` with `components` in the extra fields.
+  `component_errors` with `components` in the extra fields. `--run` for an
+  agent with no child workspace under this account → `not_synced`. `--timeout`
+  bounds both the wake retry and each `--run` check.
 - `src/cinna/dashboards.py:run_env_checker()`: `checker_command()` quoted into
   one string, streamed through `PlatformClient.stream_exec()` with the child
   workspace's token. Only `stdout` deltas feed `_parse_checker_output()`;
   `stderr` is kept for the error tail. Code `checker_missing` (with the
   rebuild remedy) only when stderr shows the interpreter couldn't open
   `ENV_CHECKER`.
-- `src/cinna/dashboards.py:prepare_dashboard_chat()`: resolves the board
+- `src/cinna/dashboards.py:prepare_dashboard_chat()`: no capabilities, another
+  version or no `chat` flag → `dashboard_chat_unsupported`; then resolves the board
   (desktop → `desktop_dashboard`), validates `--context` (a JSON object, at most
   `context_chars`), or builds the context with `build_dashboard_context()` from
   the focused tile's `get_tile_data()` and its component's `context`.
@@ -131,7 +135,7 @@ AGENT is resolved by `_Session.agent()`: a name, slug or id via
 - `src/cinna/dashboards.py:survey_local_components()`: matches
   `dashboards/<name>/component.json` and `skills/<skill>/dashboards/<name>/component.json`
   in the copy plan, warns per component, and runs the kit checker loaded by
-  `_load_kit_checker()` (`kit_contract.find_kit_root()` →
+  `_load_kit_checker()` (the kit dir the caller passes —
   the account workspace's `context/local-kit/skills/cinna-dashboards/scripts/check_component.py`,
   via importlib, `check_path(run=False)`). `local_import._report_components()`
   passes that kit dir; a `.cinna-kit/` beside the imported folder is never

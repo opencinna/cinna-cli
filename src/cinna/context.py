@@ -226,7 +226,7 @@ def _dashboards_section(config: CinnaConfig, workspace_root: Path) -> str:
     if skill_path is None:
         read = (
             "This agent's environment has no `cinna-dashboards` skill yet — it predates dashboard "
-            f"components. Rebuild it first: `cinna agent rebuild-env {config.agent_name}` (from the "
+            f"components. Rebuild it first: `cinna agent rebuild-env {shlex.quote(config.agent_name)}` (from the "
             "account workspace)."
         )
     elif kit:
@@ -261,10 +261,10 @@ def _dashboards_section(config: CinnaConfig, workspace_root: Path) -> str:
 - {read}
 - Write `component.json` first, then the endpoints. Keep endpoints fast: read prepared data (a schedule or `refresh.command` writes it to `app-data/dashboards/<name>/`), never call slow external systems on every refresh.
 - Node endpoints are plain JavaScript: `node_modules/` is neither synced nor present in the environment.
-- `requires_credentials` lists names of credentials linked to this agent (`cinna agent show {config.agent_name}`); a name nothing resolves to blocks the tile with "needs credentials".
-- Check in the environment, never locally: `cinna dashboards check {config.agent_name} <name> --run` (exit 1 on any error), then `cinna dashboards run {config.agent_name} <name> [--param k=v]` shows exactly what a tile receives.
+- `requires_credentials` lists names of credentials linked to this agent (`cinna agent show {shlex.quote(config.agent_name)}`); a name nothing resolves to blocks the tile with "needs credentials".
+- Check in the environment, never locally: `cinna dashboards check {shlex.quote(config.agent_name)} <name> --run` (exit 1 on any error), then `cinna dashboards run {shlex.quote(config.agent_name)} <name> [--param k=v]` shows exactly what a tile receives.
 - To offer a component, {ref} The owner's chat turns that line into a card with Preview and Add to dashboard. (If `BUILDING_AGENT.md` says to name a component in plain words instead, it was written from an environment that predates references in the building prompt — the line above is still right.)
-- Place a tile only when the user asks: `cinna dashboards add {config.agent_name} <name> --board <dashboard>`.
+- Place a tile only when the user asks: `cinna dashboards add {shlex.quote(config.agent_name)} <name> --board <dashboard>`.
 - The tile tools (`dashboards_tiles`, `dashboards_update_tile`) exist only in a chat opened from a dashboard. Test them with `cinna chat --board <dashboard> --focus <tile> "<message>"`."""
 
 

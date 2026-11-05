@@ -3011,6 +3011,12 @@ def _print_components_summary(components, agent_ref: str) -> None:
         summary += f", {errors} with errors"
     if placed:
         summary += f", {placed} tile{'s' if placed != 1 else ''}"
+    if not components:
+        console.console.print(
+            "Dashboard components: [dim]none yet — build one in workspace/dashboards/<name>/ "
+            "(read the cinna-dashboards skill first)[/dim]"
+        )
+        return
     console.console.print(f"Dashboard components ({summary}):")
     for component in components:
         label = component.get("name")
@@ -3018,8 +3024,7 @@ def _print_components_summary(components, agent_ref: str) -> None:
             label = f"{component['skill']}/{label}"
         mark = " [red](errors)[/red]" if component.get("has_errors") else ""
         console.console.print(f"  - {_esc(label)}{mark}")
-    if components:
-        console.console.print(f"  [dim]cinna dashboards list {_esc(agent_ref)}[/dim]")
+    console.console.print(f"  [dim]cinna dashboards list {_esc(agent_ref)}[/dim]")
 
 
 # ── Prompts as files (pull / diff / push) ───────────────────────────────────

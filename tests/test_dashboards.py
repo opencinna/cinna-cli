@@ -359,6 +359,22 @@ def test_run_gives_up_on_a_stopped_environment_after_the_timeout(runner, core):
     assert final(result.output)["code"] == "env_unavailable"
 
 
+@pytest.mark.parametrize(
+    "args, route",
+    [
+        (["list", "crm-agent"], ("GET", f"agents/{AGENT}/dashboards/")),
+        (["show", "crm-agent", "deals"], ("GET", f"agents/{AGENT}/dashboards/deals")),
+        (["check", "crm-agent", "deals"], ("GET", f"agents/{AGENT}/dashboards/deals")),
+    ],
+)
+def test_reads_honour_timeout_while_the_environment_wakes(runner, core, args, route):
+    core.routes[route] = refusal(503, "env_unavailable", "The environment is stopped.")
+    result = runner.invoke(cli, ["dashboards", *args, "--timeout", "0", "--json", "--no-flush"])
+    assert result.exit_code == 12, result.output
+    assert final(result.output)["code"] == "env_unavailable"
+    assert len(core.calls_to(*route)) == 1
+
+
 def test_ref_prints_only_the_line_and_checks_it(runner, core):
     result = runner.invoke(cli, ["dashboards", "ref", "crm-agent", "deals", "--skill", "crm"])
     assert result.exit_code == 0, result.output
@@ -496,6 +512,13 @@ def test_desktop_dashboards_are_read_only(runner, core):
     result = runner.invoke(cli, ["dashboards", "tile", "call", DESKTOP_BOARD, "deals", "rows", "--json"])
     assert final(result.output)["code"] == "desktop_dashboard"
     assert not core.calls_to("POST", f"dashboards/{DESKTOP_BOARD}/blocks/{BLOCK}/component/call")
+    # add onto a desktop dashboard: refused, and the message doesn't speak of an existing tile.
+    core.routes[("GET", f"agents/{AGENT}/dashboards/deals")] = (200, component())
+    result = runner.invoke(cli, ["dashboards", "add", "crm-agent", "deals", "--board", DESKTOP_BOARD, "--json", "--no-flush"])
+    line = final(result.output)
+    assert line["code"] == "desktop_dashboard"
+    assert "This tile" not in line["detail"]
+    assert not core.calls_to("POST", f"dashboards/{DESKTOP_BOARD}/blocks")
 
 
 @pytest.mark.parametrize(
@@ -656,7 +679,17 @@ def test_claude_md_without_bundle_id_or_account(tmp_path):
 
     config.agent_name = "Deal desk agent"
     regenerate_claude_md(config, tmp_path)
-    assert "`cinna dashboards ref 'Deal desk agent' <name>`" in (tmp_path / "CLAUDE.md").read_text()
+    text = (tmp_path / "CLAUDE.md").read_text()
+    assert "`cinna dashboards ref 'Deal desk agent' <name>`" in text
+    # Every command line in the section quotes the name, not just ref.
+    for line in (
+        "cinna agent show 'Deal desk agent'",
+        "cinna dashboards check 'Deal desk agent' <name> --run",
+        "cinna dashboards run 'Deal desk agent' <name>",
+        "cinna dashboards add 'Deal desk agent' <name>",
+    ):
+        assert line in text, line
+    assert "dashboards check Deal desk agent" not in text
 
 
 def _agent_folder(tmp_path: Path, spec: dict, extra_files: dict | None = None) -> tuple[Path, list[str]]:
@@ -719,3 +752,17 @@ def test_chat_board_refuses_to_resume_a_session_of_another_dashboard(runner, cor
     assert result.exit_code == 1
     assert "is not the dashboard chat of 'Sales'" in result.output
     assert not core.calls_to("POST", "sessions/sess-9/messages/stream")
+
+
+def test_agent_show_components_summary(capsys):
+    from cinna.account import _print_components_summary
+
+    _print_components_summary([], "crm-agent")
+    out = capsys.readouterr().out
+    assert "Dashboard components: none yet" in out
+    assert "(0)" not in out
+
+    _print_components_summary([{"name": "deals", "has_errors": True, "placements": [{}]}], "crm-agent")
+    out = capsys.readouterr().out
+    assert "Dashboard components (1, 1 with errors, 1 tile):" in out
+    assert "cinna dashboards list crm-agent" in out

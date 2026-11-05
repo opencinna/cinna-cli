@@ -441,7 +441,7 @@ def _unique(matches: list[dict], ref: str, what: str, label) -> dict | None:
 
 
 def resolve_board(session: _Session, ref: str) -> dict:
-    """A dashboard by id, unique 8-char id prefix, or exact name (web dashboards).
+    """A dashboard by id, unique id prefix (4+ chars), or exact name (web dashboards).
 
     A full id that is not among the web dashboards is fetched directly, so a
     desktop backing dashboard can be read by id (writes refuse it later).
@@ -484,8 +484,8 @@ def refuse_desktop_board(board: dict) -> None:
         raise CinnaExit(
             EXIT_ERROR,
             "desktop_dashboard",
-            "This tile belongs to a Cinna Desktop dashboard; change it in Cinna Desktop "
-            "(the desktop owns that dashboard's layout).",
+            "That is a Cinna Desktop dashboard: the CLI reads its tiles but adds, runs and "
+            "changes them only in Cinna Desktop (the desktop owns that dashboard's layout).",
         )
 
 
@@ -854,7 +854,8 @@ def dashboards():
 @dashboards.command("list")
 @click.argument("agent_ref", metavar="AGENT")
 @_NO_FLUSH
-def list_cmd(agent_ref, no_flush):
+@_TIMEOUT
+def list_cmd(agent_ref, no_flush, timeout):
     """The agent's components: findings, where each is placed, and its reference."""
     from rich.table import Table
 
@@ -863,7 +864,7 @@ def list_cmd(agent_ref, no_flush):
         flush_local_changes(session.account_root, agent, not no_flush)
         with _refusals(session, agent_ref):
             with console.spinner("Reading components…"):
-                result = call_waking(session.client.list_agent_components, agent["id"], fresh=True)
+                result = call_waking(session.client.list_agent_components, agent["id"], fresh=True, timeout=timeout)
             bundle_id = session.bundle_id(agent)
     components = [_with_reference(c, bundle_id) for c in result.get("components") or [] if isinstance(c, dict)]
     if console.json_mode:
@@ -909,13 +910,16 @@ def list_cmd(agent_ref, no_flush):
 @click.argument("name")
 @_SKILL
 @_NO_FLUSH
-def show(agent_ref, name, skill, no_flush):
+@_TIMEOUT
+def show(agent_ref, name, skill, no_flush, timeout):
     """One component: what its component.json says, its findings and placements."""
     with _session() as session:
         agent = session.agent(agent_ref)
         flush_local_changes(session.account_root, agent, not no_flush)
         with _refusals(session, agent_ref):
-            component = call_waking(session.client.get_agent_component, agent["id"], name, skill, fresh=True)
+            component = call_waking(
+                session.client.get_agent_component, agent["id"], name, skill, fresh=True, timeout=timeout
+            )
             bundle_id = session.bundle_id(agent)
     component = _with_reference(component, bundle_id)
     if console.json_mode:
@@ -977,7 +981,7 @@ def show(agent_ref, name, skill, no_flush):
     "checker's --run, through cinna exec) and check the result's shape.",
 )
 @_NO_FLUSH
-@click.option("--timeout", type=int, default=300, show_default=True, help="Seconds per --run check.")
+@click.option("--timeout", type=int, default=300, show_default=True, help="Seconds to keep retrying while the environment wakes, and per --run check.")
 def check(agent_ref, name, skill, run_it, no_flush, timeout):
     """Check components the way the owner's card will: exit 1 on any error.
 
@@ -990,9 +994,13 @@ def check(agent_ref, name, skill, run_it, no_flush, timeout):
         flush_local_changes(session.account_root, agent, not no_flush)
         with _refusals(session, agent_ref):
             if name:
-                components = [call_waking(session.client.get_agent_component, agent["id"], name, skill, fresh=True)]
+                components = [
+                    call_waking(
+                        session.client.get_agent_component, agent["id"], name, skill, fresh=True, timeout=timeout
+                    )
+                ]
             else:
-                listing = call_waking(session.client.list_agent_components, agent["id"], fresh=True)
+                listing = call_waking(session.client.list_agent_components, agent["id"], fresh=True, timeout=timeout)
                 components = [c for c in listing.get("components") or [] if isinstance(c, dict)]
         child = None
         if run_it:

@@ -2,7 +2,8 @@
 
 ## Preconditions
 
-- A live cinna-core at C2 or later (`ef3dbc89`+) with the frontend reachable
+- A live cinna-core at C2 or later (`ef3dbc89`+, plus `c32f211b` for
+  `GET dashboards/capabilities` and `7de29ca7` for `fresh=true`) with the frontend reachable
   for dashboard links.
 - An account workspace with a valid token (`cinna account status`; renew with
   `cinna login` in the account root).
@@ -54,7 +55,8 @@ says otherwise; that is scenario 2's point.)
   `cinna://component/bundle:<bundle_id>/deals` on its own line. The JSON
   reference is identical.
 - **Watch for:** the component missing straight after it was written (the
-  flush didn't run, or core served its 10 s cache); the reference wrapped or
+  flush didn't run, or core ignored `fresh=true` and served its 10 s
+  cache — core `7de29ca7`+ honours it); the reference wrapped or
   carrying markup.
 
 ### 2. Check finds a broken component, then passes
@@ -132,7 +134,7 @@ says otherwise; that is scenario 2's point.)
 ### 8. Rate limit surfaces retry time
 - **Steps:**
   ```bash
-  for i in $(seq 1 31); do cinna dashboards run crm-agent deals --no-flush --json | tail -1 | jq -r '.result // .code'; done
+  for i in $(seq 1 31); do cinna dashboards run crm-agent deals --no-flush --json | tail -1 | jq -r '.code // .result'; done
   ```
 - **Expected:** 30 `ok`, then `rate_limited` with "Core allows 30 runs a minute
   per tile or preview; try again in Ns". Core's Preview dialog in the web UI

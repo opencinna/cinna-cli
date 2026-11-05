@@ -574,14 +574,14 @@ The printed page link is a valid `link` artifact for `cinna delegation report --
 
 ### `cinna dashboards list | show | check | run | ref | boards | board create | add | tiles | tile …`
 
-Build, check, run and place an agent's **dashboard components**: folders in the agent's `dashboards/<name>/` (`component.json` plus endpoint scripts or a page) that the owner keeps as live tiles on a dashboard. Run from the account workspace. `AGENT` is a name, slug, id, or `.` for the agent workspace you are in. Every verb first checks the server's dashboards capability. Verbs that read the agent's cloud copy push your pending local edits first (`--no-flush` skips that).
+Build, check, run and place an agent's **dashboard components**: folders in the agent's `dashboards/<name>/` (`component.json` plus endpoint scripts or a page) that the owner keeps as live tiles on a dashboard. Run from the account workspace. `AGENT` is a name, slug, id, or `.` for the agent workspace you are in. Every verb first checks the server's dashboards capability. While an environment wakes, verbs retry for `--timeout` seconds (default 120). Verbs that read the agent's cloud copy push your pending local edits first (`--no-flush` skips that).
 
-- `list AGENT` · `show AGENT NAME [--skill S]`: the components as the environment sees them (checker findings, where each is placed, including "Cinna Desktop") and the **reference** line `cinna://component/bundle:<bundle_id>/<name>` that offers one.
+- `list AGENT` · `show AGENT NAME [--skill S]` (`--skill` names a component a skill ships, on every verb that takes `NAME`): the components as the environment sees them (checker findings, where each is placed, including "Cinna Desktop") and the **reference** line `cinna://component/bundle:<bundle_id>/<name>` that offers one.
 - `check AGENT [NAME] [--run]`: the owner's card checks; `--run` also runs each source in the environment through `cinna exec` (never locally). Exits 1 on any error.
-- `run AGENT NAME [--endpoint E] [--param k=v]… [--params @file.json]`: run it exactly as a tile would. `--json` prints the raw value.
+- `run AGENT NAME [--endpoint E] [--param k=v]… [--params @file.json]`: run it exactly as a tile would. `--json` prints `{result, value, params_resolved, notice, fetched_at}`, where `value` is exactly what a tile receives.
 - `ref AGENT NAME [--check]`: print only the reference line; `--check` asks core whether it resolves.
-- `boards` · `board create NAME` · `add AGENT NAME --board B [--new-board] [--size s|m|l|wide|tall] [--param k=v] [--max-age 15m] [--every 5m|manual]`: the owner's web dashboards; place a tile (refused for a component with errors or a full dashboard).
-- `tiles BOARD` · `tile data|refresh|params|call|edit|remove BOARD TILE …`: read and drive tiles. `tile params --set/--clear/--reset` sends the whole set. Tiles on Cinna Desktop's dashboards are read-only here.
+- `boards` · `board create NAME` · `add AGENT NAME --board B [--new-board] [--size s|m|l|wide|tall] [--param k=v] [--title T] [--max-age 15m] [--every 5m|manual] [--after-turn]`: the owner's web dashboards; place a tile (refused for a component with errors or a full dashboard).
+- `tiles BOARD` · `tile data|refresh|params|call|edit|remove BOARD TILE …`: read and drive tiles. `tile params --set/--clear/--reset` sends the whole set; `tile edit` changes title (`''` resets it), size and refresh overrides. Tiles on Cinna Desktop's dashboards are read-only here.
 - `cinna chat --agent AGENT --board B [--focus TILE] [--context @file.json] [--new-chat] "…"`: talk in the agent's dashboard chat, where it has its tile tools.
 
 ```bash
