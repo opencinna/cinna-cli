@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -246,13 +247,13 @@ def _dashboards_section(config: CinnaConfig, workspace_root: Path) -> str:
         ref = (
             f"print its reference on a line of its own, never in backticks or a code block: "
             f"{prefix}<name> (a skill's component: {prefix}<skill>/<name>). "
-            f"`cinna dashboards ref {config.agent_name} <name> --check` prints the exact line and "
+            f"`cinna dashboards ref {shlex.quote(config.agent_name)} <name> --check` prints the exact line and "
             "confirms it resolves."
         )
     else:
         ref = (
             "print its reference on a line of its own, never in backticks or a code block — "
-            f"copy it from `cinna dashboards ref {config.agent_name} <name>` (run from the account "
+            f"copy it from `cinna dashboards ref {shlex.quote(config.agent_name)} <name>` (run from the account "
             "workspace)."
         )
     return f"""A **dashboard component** is a live view the owner keeps on a dashboard: a folder `dashboards/<name>/` with a `component.json`, small endpoint scripts and, for an `html` view, a page. The owner places it as a **tile** on their web dashboards or in Cinna Desktop, and it refreshes itself when shown. A component is not the webapp (the agent's own app, shareable) and not an artifact (a frozen copy for people).

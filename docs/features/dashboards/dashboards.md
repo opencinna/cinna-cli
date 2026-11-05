@@ -133,7 +133,7 @@ cinna-core**. The CLI is a remote control for both and runs nothing locally.
   holds the block limit.
 - **Desktop dashboards are read-only here.** Tiles on an `origin: desktop`
   dashboard can be listed and read (`tiles`, `tile data`), but `tile refresh`,
-  `params`, `edit` and `remove`, and `add`, refuse with code
+  `call`, `params`, `edit` and `remove`, and `add`, refuse with code
   `desktop_dashboard`. `boards` and name lookup see web dashboards only; a
   desktop dashboard is reachable by its full id. Placements on one show as
   "Cinna Desktop".

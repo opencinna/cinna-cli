@@ -1473,7 +1473,7 @@ def tile_call(board_ref, tile_ref, endpoint, params, timeout):
     """Run one of the tile's endpoints with its stored params overlaid (never cached)."""
     values = parse_params(params)
     with _session() as session:
-        board, block = _tile(session, board_ref, tile_ref, write=False)
+        board, block = _tile(session, board_ref, tile_ref, write=True)
         with _refusals(session, session.agent_name(block.get("agent_id"))):
             with console.spinner(f"Calling {escape(endpoint)}…"):
                 result = call_waking(

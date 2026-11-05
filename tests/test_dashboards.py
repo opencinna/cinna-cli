@@ -492,6 +492,10 @@ def test_desktop_dashboards_are_read_only(runner, core):
     result = runner.invoke(cli, ["dashboards", "tile", "params", DESKTOP_BOARD, "deals", "--set", "stage=won", "--json"])
     assert final(result.output)["code"] == "desktop_dashboard"
     assert not core.calls_to("PUT", f"dashboards/{DESKTOP_BOARD}/blocks/{BLOCK}/component/params")
+    # call runs an endpoint in the env (may wake it, spends the tile's run budget): a write too.
+    result = runner.invoke(cli, ["dashboards", "tile", "call", DESKTOP_BOARD, "deals", "rows", "--json"])
+    assert final(result.output)["code"] == "desktop_dashboard"
+    assert not core.calls_to("POST", f"dashboards/{DESKTOP_BOARD}/blocks/{BLOCK}/component/call")
 
 
 @pytest.mark.parametrize(
@@ -649,6 +653,10 @@ def test_claude_md_without_bundle_id_or_account(tmp_path):
     text = (tmp_path / "CLAUDE.md").read_text()
     assert "cinna dashboards ref crm-agent <name>" in text
     assert "this standalone workspace has no copy" in text
+
+    config.agent_name = "Deal desk agent"
+    regenerate_claude_md(config, tmp_path)
+    assert "`cinna dashboards ref 'Deal desk agent' <name>`" in (tmp_path / "CLAUDE.md").read_text()
 
 
 def _agent_folder(tmp_path: Path, spec: dict, extra_files: dict | None = None) -> tuple[Path, list[str]]:

@@ -27,7 +27,7 @@ cat > dashboards/deals/component.json <<'EOF'
 EOF
 cat > dashboards/deals/api/rows.py <<'EOF'
 import json, sys
-p = json.loads(sys.stdin.read() or "{}").get("params", {})
+p = json.loads(sys.stdin.read() or "{}")  # stdin is the params object itself
 rows = [{"id": "d1", "name": "Acme", "stage": "won", "amount": 1200},
         {"id": "d2", "name": "Globex", "stage": "open", "amount": 800}]
 if p.get("stage") == "won":
