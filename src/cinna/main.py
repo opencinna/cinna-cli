@@ -588,10 +588,11 @@ def improve():
 
     A user chatting with one of your agents can hand you a frozen snapshot of
     that session — the transcript plus the runtime context that produced it —
-    from the session menu or with ``/session-improve``. These verbs are the
-    receiving half of that loop: list what came in, read it, download the
-    archive for a local coding agent, and close the request with a note the
-    requester sees.
+    from the session menu or with ``/session-improve``. A caller of one of your
+    agents' REST APIs can file a capability request for something the API
+    lacks (kind ``api``). These verbs are the receiving half of that loop: list
+    what came in, read it, download the archive for a local coding agent, and
+    close the request with a note the requester sees.
 
     Run from an account workspace: the listing spans every agent you own.
     The shipped playbook is ``context/guides/handling-improvement-requests.md``.
@@ -610,27 +611,40 @@ def improve():
     default=None,
     help="Filter to one agent (name, slug, or id).",
 )
+@click.option(
+    "--kind",
+    default=None,
+    help="Filter by kind: session (a shared conversation) or api (a capability "
+    "request from a caller of your agent's REST API).",
+)
 @click.option("--limit", default=50, show_default=True, help="Max requests to list.")
 @click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
-def improve_list(status: str | None, agent_ref: str | None, limit: int, as_json: bool):
+def improve_list(
+    status: str | None, agent_ref: str | None, kind: str | None, limit: int, as_json: bool
+):
     """List improvement requests across the agents you own.
 
     Unhandled first, then newest. Start here:
 
     \b
       cinna improve list --status new
+      cinna improve list --kind api
     """
     from cinna.improve import run_improve_list
 
-    run_improve_list(status=status, agent_ref=agent_ref, limit=limit, as_json=as_json)
+    run_improve_list(
+        status=status, agent_ref=agent_ref, limit=limit, as_json=as_json, kind=kind
+    )
 
 
 @improve.command(name="show")
 @click.argument("request_ref")
 @click.option("--json", "as_json", is_flag=True, help="Print the raw JSON detail.")
 def improve_show(request_ref: str, as_json: bool):
-    """Show one request in full, including the runtime context block.
+    """Show one request in full.
 
+    A session request prints the report and the frozen runtime context; an API
+    capability request prints the need, the proposed endpoint and the examples.
     REQUEST_REF is the short id from ``cinna improve list`` or a full id.
     """
     from cinna.improve import run_improve_show
@@ -647,11 +661,12 @@ def improve_show(request_ref: str, as_json: bool):
     help="Directory to extract into (default: improvements/<short-id>/).",
 )
 def improve_download(request_ref: str, out_dir: str | None):
-    """Download and extract the session archive for REQUEST_REF.
+    """Download and extract the archive for REQUEST_REF.
 
-    Writes README.md, metadata.json, context.json and session/ (transcript in
-    Markdown + JSON). Read README.md first — it states what the archive does
-    *not* contain.
+    A session request writes README.md, metadata.json, context.json and
+    session/ (transcript in Markdown + JSON); an API capability request writes
+    README.md, request.md, metadata.json and context.json. Read README.md first
+    — it states what the archive does *not* contain.
     """
     from cinna.improve import run_improve_download
 

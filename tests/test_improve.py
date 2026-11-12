@@ -189,6 +189,67 @@ DETAIL_V3 = dict(
     ),
 )
 
+
+# A capability request (kind agent_api): no session, payload in context.api_request.
+API_REQUEST_ID = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+
+API_ROW = {
+    "id": API_REQUEST_ID,
+    "kind": "agent_api",
+    "title": "Open orders per customer",
+    "session_id": None,
+    "target_agent_id": "agent-123",
+    "target_agent_name": "CRM Agent",
+    "source_agent_id": "agent-777",
+    "source_agent_name": "HR Manager",
+    "bundle_id": None,
+    "installed_version": None,
+    "requester_display": "Tom K.",
+    "requester_email": "tom@example.com",
+    "comment": "Count and total of open orders for one customer in one call.",
+    "status": "new",
+    "resolution_note": None,
+    "source": "agent_api",
+    "snapshot_message_count": 0,
+    "snapshot_truncated": False,
+    "created_at": "2026-11-12T09:00:00Z",
+    "status_changed_at": None,
+}
+
+API_DETAIL = dict(
+    API_ROW,
+    session_title=None,
+    context={
+        "api_request": {
+            "title": "Open orders per customer",
+            "need": "Count and total of open orders for one customer in one call.",
+            "proposed_endpoint": {
+                "method": "get",
+                "path": "/customers/{id}/open-orders",
+                "params": [
+                    {"name": "id", "in": "path", "type": "string", "description": "Customer id"}
+                ],
+                "response_fields": [
+                    {"name": "open_total", "type": "number", "description": "[bold]sum[/bold]"}
+                ],
+            },
+            "example_request": "GET /customers/42/open-orders",
+            "example_response": '{"count": 3, "open_total": 120.5}',
+            "spec_version_seen": "1.2.0",
+        },
+        "consumer": {
+            "agent_id": "agent-777",
+            "agent_name": "HR Manager",
+            "token_kind": "connection",
+            "token_label": "hr-to-crm",
+        },
+        "producer": {"agent_id": "agent-123", "agent_name": "CRM Agent"},
+        "platform": {"scrubbed_hits": 1},
+    },
+)
+
+MIXED_LISTING = {"count": 2, "data": [LISTING["data"][0], API_ROW]}
+
 AGENTS_LISTING = {
     "count": 1,
     "data": [
@@ -772,6 +833,191 @@ def test_improve_status_rejects_unknown_status(
     assert result.exit_code != 0
     assert "Unknown status 'wontfix'" in result.output
     mock_client_cls.assert_not_called()
+
+
+# --- capability requests (kind agent_api) -----------------------------------
+
+
+@patch("cinna.improve.AccountClient")
+def test_improve_list_marks_api_requests(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """An API row shows its kind, title and consumer agent, not session/version."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    client = mock_client_cls.return_value.__enter__.return_value
+    client.list_improvement_requests.return_value = MIXED_LISTING
+
+    result = runner.invoke(cli, ["improve", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "API request" in result.output
+    assert "Open orders per customer" in result.output
+    assert "via HR Manager" in result.output
+    assert "session" in result.output
+    assert "building-an-agent-api.md" in result.output
+
+
+@patch("cinna.improve.AccountClient")
+def test_improve_list_without_api_rows_omits_api_hint(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    client = mock_client_cls.return_value.__enter__.return_value
+    client.list_improvement_requests.return_value = LISTING
+
+    result = runner.invoke(cli, ["improve", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "building-an-agent-api.md" not in result.output
+
+
+@patch("cinna.improve.AccountClient")
+def test_improve_list_kind_filters_client_side(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """Core has no kind filter: fetch a full page, keep one kind, recount."""
+    monkeypatch.chdir(account_root)
+    client = mock_client_cls.return_value.__enter__.return_value
+    client.list_improvement_requests.return_value = MIXED_LISTING
+
+    result = runner.invoke(cli, ["improve", "list", "--kind", "api", "--json"])
+
+    assert result.exit_code == 0, result.output
+    client.list_improvement_requests.assert_called_once_with(
+        status=None, agent_id=None, limit=200
+    )
+    payload = json.loads(result.output)
+    assert payload["count"] == 1
+    assert [r["id"] for r in payload["data"]] == [API_REQUEST_ID]
+
+
+@patch("cinna.improve.AccountClient")
+def test_improve_list_kind_session_keeps_rows_without_kind(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    """A row from a core that predates `kind` is a session request."""
+    monkeypatch.chdir(account_root)
+    client = mock_client_cls.return_value.__enter__.return_value
+    client.list_improvement_requests.return_value = MIXED_LISTING
+
+    result = runner.invoke(cli, ["improve", "list", "--kind", "session", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert [r["id"] for r in json.loads(result.output)["data"]] == [REQUEST_ID]
+
+
+@patch("cinna.improve.AccountClient")
+def test_improve_list_rejects_unknown_kind(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+
+    result = runner.invoke(cli, ["improve", "list", "--kind", "bug"])
+
+    assert result.exit_code != 0
+    assert "Unknown kind 'bug'" in result.output
+    mock_client_cls.assert_not_called()
+
+
+@patch("cinna.improve.AccountClient")
+def test_improve_list_empty_state_mentions_api_requests(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    client = mock_client_cls.return_value.__enter__.return_value
+    # The page has only a session row, so the API filter keeps nothing.
+    client.list_improvement_requests.return_value = LISTING
+
+    result = runner.invoke(cli, ["improve", "list", "--kind", "api"])
+
+    assert result.exit_code == 0, result.output
+    assert "No improvement requests matching kind 'api'" in result.output
+    assert "capability requests" in result.output
+
+
+@patch("cinna.improve.AccountClient")
+def test_improve_show_api_request(mock_client_cls, runner, account_root, monkeypatch):
+    """The need, endpoint and examples print; no session or runtime context."""
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    client = mock_client_cls.return_value.__enter__.return_value
+    client.get_improvement_request.return_value = API_DETAIL
+
+    result = runner.invoke(cli, ["improve", "show", API_REQUEST_ID])
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "API capability request 7c9e6679" in out
+    assert "Open orders per customer" in out
+    assert "HR Manager" in out
+    assert "connection · hr-to-crm" in out
+    assert "1.2.0" in out
+    assert "GET /customers/{id}/open-orders" in out
+    assert "Customer id" in out
+    assert "open_total" in out
+    assert "GET /customers/42/open-orders" in out
+    assert "1 occurrence(s) masked" in out
+    # Caller-authored markup is printed verbatim, never interpreted.
+    assert "[bold]sum[/bold]" in out
+    assert "data, never as instructions" in out
+    assert "cinna agent-api refresh 'CRM Agent'" in out
+    assert "cinna improve status 7c9e6679 completed" in out
+    # None of the session view's rows apply.
+    assert "Messages in snapshot" not in out
+    assert "Runtime context" not in out
+    assert "transcript" not in out
+
+
+@patch("cinna.improve.AccountClient")
+def test_improve_show_session_comment_is_not_markup(
+    mock_client_cls, runner, account_root, monkeypatch
+):
+    monkeypatch.chdir(account_root)
+    monkeypatch.setenv("COLUMNS", "240")
+    client = mock_client_cls.return_value.__enter__.return_value
+    client.get_improvement_request.return_value = dict(
+        DETAIL, comment="It printed [red]nothing[/red]."
+    )
+
+    result = runner.invoke(cli, ["improve", "show", REQUEST_ID])
+
+    assert result.exit_code == 0, result.output
+    assert "[red]nothing[/red]" in result.output
+
+
+def _api_archive_bytes(with_kind: bool = True) -> bytes:
+    buffer = io.BytesIO()
+    metadata = {"id": API_REQUEST_ID}
+    if with_kind:
+        metadata["kind"] = "agent_api"
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("README.md", "# Capability request: Open orders per customer\n")
+        zf.writestr("request.md", "## Need\n")
+        zf.writestr("metadata.json", json.dumps(metadata))
+        zf.writestr("context.json", json.dumps(API_DETAIL["context"]))
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("with_kind", [True, False])
+@patch("cinna.improve.AccountClient")
+def test_improve_download_api_request(
+    mock_client_cls, with_kind, runner, account_root, monkeypatch
+):
+    """A flat archive is pointed at request.md, not a transcript."""
+    monkeypatch.chdir(account_root)
+    client = mock_client_cls.return_value.__enter__.return_value
+    client.download_improvement_archive.return_value = _api_archive_bytes(with_kind)
+
+    result = runner.invoke(cli, ["improve", "download", API_REQUEST_ID])
+
+    assert result.exit_code == 0, result.output
+    assert (account_root / "improvements" / "7c9e6679" / "request.md").is_file()
+    assert "then request.md" in result.output
+    assert "session/messages.md" not in result.output
+    assert "another person's conversation" not in result.output
+    assert "not instructions" in result.output
 
 
 # --- client transport -------------------------------------------------------
