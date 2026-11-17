@@ -2912,6 +2912,7 @@ def run_agent_show(
             info = client.inspect_agent(agent["id"])
             linked = None if prompts_only else _fetch_linked_credentials(client, agent["id"])
             components = None if prompts_only else _fetch_components_summary(client, agent["id"])
+            connections = None if prompts_only else _fetch_api_connections(client, agent["id"])
 
     show_full = full or not _stdout_is_tty()
 
@@ -2950,6 +2951,8 @@ def run_agent_show(
     for cred in creds:
         console.console.print(f"  - {_credential_summary(cred)}")
 
+    _print_api_connections_summary(connections, agent_ref)
+
     status = info.get("agent_api_status")
     if status:
         console.console.print()
@@ -2957,6 +2960,43 @@ def run_agent_show(
         _print_agent_api_status(status)
 
     _print_components_summary(components, agent_ref)
+
+
+def _fetch_api_connections(client: "AccountClient", agent_id: str) -> list[dict] | None:
+    """The agent's agent API connections for `agent show`; ``None`` when
+    unreadable (logged, never a failed show)."""
+    try:
+        payload = client.list_agent_api_connections(agent_id)
+    except (PlatformError, CinnaExit, httpx.TransportError) as exc:
+        logger.info("agent API connections unavailable for %s: %s", agent_id, exc)
+        return None
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+
+
+def _print_api_connections_summary(rows: list[dict] | None, agent_ref: str) -> None:
+    """One line per connection to another agent's REST API; nothing when none."""
+    if not rows:
+        return
+    console.console.print()
+    console.console.print(f"Agent API connections ({len(rows)}):")
+    for r in rows:
+        parts = [
+            f"{_esc(r.get('name') or '?')} → "
+            f"{_esc(r.get('producer_agent_name') or r.get('producer_agent_id') or '?')}",
+            f"lookup: {_esc(r.get('sdk_lookup') or '?')}",
+            _key_status_cell(r.get("key_status")),
+        ]
+        if not r.get("usable"):
+            parts.append(f"[red]not usable: {_esc(r.get('unavailable_reason') or '?')}[/red]")
+        if r.get("is_shared"):
+            parts.append(f"[dim]shared by {_esc(r.get('owner_email') or '?')}[/dim]")
+        console.console.print("  - " + "  ".join(parts))
+    ref = f'"{agent_ref}"' if " " in agent_ref else agent_ref
+    console.console.print(
+        f"  [dim]URLs, scopes, spec and capability requests: cinna agent-api "
+        f"connections {_esc(ref)}[/dim]"
+    )
 
 
 def _fetch_components_summary(client: "AccountClient", agent_id: str):
@@ -4165,21 +4205,26 @@ def _credential_summary(cred: dict) -> str:
     key_status = cred.get("agent_api_key_status")
     if key_status and key_status != "active":
         parts.append(_key_status_cell(key_status))
+    if cred.get("is_shared"):
+        parts.append(f"[dim]shared by {_esc(cred.get('owner_email') or '?')}[/dim]")
     if cred.get("id"):
         parts.append(f"[dim]{_esc(cred['id'])}[/dim]")
     return "  ".join(parts)
 
 
 # Set on a linked credential whose slot could not be confirmed: the agent's
-# listing reported none, and the account listing (the one that carries it) has
-# no row for this id — a credential shared by someone else, or an unreadable
-# listing. "No slot" would be a claim; this is the absence of one.
+# listing reported none, and the account listing (the one that carries it,
+# owned and shared rows alike) has no row for this id — the listing was
+# unreadable, or the credential is neither yours nor shared with you any more.
+# "No slot" would be a claim; this is the absence of one.
 _SLOT_UNVERIFIED = "_slot_unverified"
 _ACCOUNT_AUTHORITATIVE_FIELDS = (
     "service_uri",
     "is_placeholder",
     "status",
     "agent_api_key_status",
+    "is_shared",
+    "owner_email",
 )
 
 
@@ -4190,9 +4235,10 @@ def _fetch_linked_credentials(client: "AccountClient", agent_id: str) -> list[di
     returns ``service_uri: null`` even for a credential that has a slot — seen
     live, the same credential id read ``some-token.com`` in the account
     listing and ``null`` here, which made a filled slot look ``not_linked``.
-    So the slot, placeholder flag and status are taken from the account
-    listing by id, and a linked credential absent from it keeps an unverified
-    slot rather than an empty one.
+    So the slot, placeholder flag, status and ownership are taken from the
+    account listing by id — it holds the caller's own credentials and those
+    shared with them — and a linked credential absent from it keeps an
+    unverified slot rather than an empty one.
 
     Best-effort by design: every caller has something useful to print without
     it, and a refusal here must not turn a read command into a failure.
@@ -4207,17 +4253,20 @@ def _fetch_linked_credentials(client: "AccountClient", agent_id: str) -> list[di
         return None
     linked = [dict(c) for c in data if isinstance(c, dict)]
 
-    owned: dict[str, dict] = {}
+    visible: dict[str, dict] = {}
     try:
         account = client.list_credentials()
         rows = account.get("data") if isinstance(account, dict) else None
         if isinstance(rows, list):
-            owned = {str(r["id"]): r for r in rows if isinstance(r, dict) and r.get("id")}
+            for r in rows:
+                if isinstance(r, dict) and r.get("id"):
+                    # Owned rows come first; one row per credential anyway.
+                    visible.setdefault(str(r["id"]), r)
     except (PlatformError, httpx.TransportError) as exc:
         logger.warning("account credentials listing unavailable: %s", exc)
 
     for cred in linked:
-        row = owned.get(str(cred.get("id")))
+        row = visible.get(str(cred.get("id")))
         if row is not None:
             for field in _ACCOUNT_AUTHORITATIVE_FIELDS:
                 if field in row:
@@ -4227,14 +4276,51 @@ def _fetch_linked_credentials(client: "AccountClient", agent_id: str) -> list[di
     return linked
 
 
-def run_credentials_list(workspace: str | None, as_json: bool = False) -> None:
-    """List the account's credentials (metadata only) — `... credentials list`."""
+def _credential_via_cell(cred: dict) -> str:
+    """How a shared credential reaches the caller: direct, an install, or groups."""
+    parts: list[str] = []
+    source = cred.get("share_source")
+    if source == "direct":
+        parts.append("direct")
+    elif source:
+        parts.append(_esc(str(source).replace("_", " ")))
+    for group in cred.get("via_groups") or []:
+        if isinstance(group, dict):
+            parts.append(f"group {_esc(group.get('name') or group.get('id') or '?')}")
+    return ", ".join(parts) or "[dim]—[/dim]"
+
+
+def _credential_list_status_cell(cred: dict) -> str:
+    if cred.get("agent_api_key_status"):
+        # An issued API key: its key status is the fact, not "complete".
+        cell = _key_status_cell(cred.get("agent_api_key_status"))
+    else:
+        cell = _credential_status_cell(cred.get("status"))
+    if cred.get("is_placeholder"):
+        cell += " [dim]placeholder[/dim]"
+    return cell
+
+
+def run_credentials_list(
+    workspace: str | None,
+    as_json: bool = False,
+    only: str | None = None,
+) -> None:
+    """List the account's credentials (metadata only) — `... credentials list`.
+
+    Two sections: the caller's own credentials, and those shared with them
+    (directly, through a group, or by an install) — owner, how it reaches
+    them, access level. ``only`` = ``"owned"`` / ``"shared"`` filters
+    client-side; ``--json`` passes the server's rows through untouched (only
+    filtered, with ``count`` matching).
+    """
     from rich.table import Table
 
     account_root = find_account_root()
     account_cfg = load_account_config(account_root)
 
     # --workspace default → filter the Default (NULL) workspace; an id → that one.
+    # The workspace filter applies to owned rows; shared rows always come back.
     ws_filter: str | None = None
     if workspace is not None:
         ws_filter = "" if workspace.strip().lower() in _CLEAR_WORKSPACE_REFS else workspace
@@ -4243,47 +4329,86 @@ def run_credentials_list(workspace: str | None, as_json: bool = False) -> None:
         with AccountClient(account_cfg) as client:
             listing = client.list_credentials(user_workspace_id=ws_filter)
 
+    items = [c for c in listing.get("data") or [] if isinstance(c, dict)]
+    owned = [c for c in items if not c.get("is_shared")]
+    shared = [c for c in items if c.get("is_shared")]
+    if only == "owned":
+        shared = []
+    elif only == "shared":
+        owned = []
+
     if as_json:
+        if only:
+            listing = {**listing, "data": owned + shared, "count": len(owned) + len(shared)}
         click.echo(json.dumps(listing, indent=2, default=str))
         return
 
-    items = listing.get("data", [])
-    if not items:
-        console.status("No credentials on this account.")
+    if not owned and not shared:
+        if only == "shared":
+            console.status("Nothing is shared with you.")
+        elif only == "owned":
+            console.status("You own no credentials on this account.")
+        else:
+            console.status("No credentials on this account.")
         return
 
-    table = Table(
-        title=f"Credentials ({listing.get('count', len(items))})",
-        title_style="bold",
-    )
-    table.add_column("Name")
-    table.add_column("Type", style="dim")
-    table.add_column("Slot", overflow="fold")
-    table.add_column("Status")
-    table.add_column("ID", style="dim", overflow="fold", no_wrap=True)
+    if owned:
+        table = Table(title=f"Your credentials ({len(owned)})", title_style="bold")
+        table.add_column("Name")
+        table.add_column("Type", style="dim")
+        table.add_column("Slot", overflow="fold")
+        table.add_column("Status")
+        table.add_column("ID", style="dim", overflow="fold", no_wrap=True)
+        for c in owned:
+            table.add_row(
+                _esc(c.get("name", "?")),
+                _esc(c.get("type", "?")),
+                _credential_slot_cell(c),
+                _credential_list_status_cell(c),
+                c.get("id", "?"),
+            )
+        console.console.print(table)
+    elif only != "owned":
+        where = " in that workspace" if workspace is not None else ""
+        console.console.print(f"[dim]You own no credentials{where}.[/dim]")
 
-    for c in items:
-        if c.get("agent_api_key_status"):
-            # An issued API key: its key status is the fact, not "complete".
-            status_cell = _key_status_cell(c.get("agent_api_key_status"))
-        else:
-            status_cell = _credential_status_cell(c.get("status"))
-        if c.get("is_placeholder"):
-            status_cell += " [dim]placeholder[/dim]"
-        table.add_row(
-            _esc(c.get("name", "?")),
-            _esc(c.get("type", "?")),
-            _credential_slot_cell(c),
-            status_cell,
-            c.get("id", "?"),
+    if shared:
+        if owned:
+            console.console.print()
+        table = Table(title=f"Shared with you ({len(shared)})", title_style="bold")
+        table.add_column("Name")
+        table.add_column("Type", style="dim")
+        table.add_column("Slot", overflow="fold")
+        table.add_column("Status")
+        table.add_column("Owner", overflow="fold")
+        table.add_column("Via", overflow="fold")
+        table.add_column("Access")
+        table.add_column("ID", style="dim", overflow="fold", no_wrap=True)
+        for c in shared:
+            table.add_row(
+                _esc(c.get("name", "?")),
+                _esc(c.get("type", "?")),
+                _credential_slot_cell(c),
+                _credential_list_status_cell(c),
+                _esc(c.get("owner_email") or "?"),
+                _credential_via_cell(c),
+                _esc(c.get("access_level") or "—"),
+                c.get("id", "?"),
+            )
+        console.console.print(table)
+
+    if owned:
+        console.console.print(
+            "[dim]Slot = the credential's service URI, which a skill's `credentials:` "
+            "block names. Set it: cinna account credentials update <id> "
+            "--service-uri <slot>[/dim]"
         )
-
-    console.console.print(table)
-    console.console.print(
-        "[dim]Slot = the credential's service URI, which a skill's `credentials:` "
-        "block names. Set it: cinna account credentials update <id> "
-        "--service-uri <slot>[/dim]"
-    )
+    if shared:
+        console.console.print(
+            "[dim]Shared credentials belong to their owner: attach one to your agent "
+            "with cinna account credentials share-with-agent <id> --agent <agent>; "
+            "only the owner can rename, re-slot or delete it.[/dim]"
+        )
 
 
 def run_credentials_types() -> None:
@@ -4864,8 +4989,8 @@ def _print_credential_readiness(
         console.console.print()
         console.console.print(
             "[dim]? A slot could not be confirmed: the agent's linked credentials "
-            "were unreadable, or one of them is shared by someone else and its slot "
-            "is not visible to this account.[/dim]"
+            "or the account's credential listing were unreadable, or a linked "
+            "credential is no longer yours nor shared with you.[/dim]"
         )
 
 

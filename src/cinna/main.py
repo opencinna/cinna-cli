@@ -460,19 +460,37 @@ def account_credentials():
 @click.option(
     "--workspace",
     default=None,
-    help="Filter by workspace id ('default' = the Default/unassigned workspace).",
+    help="Filter your own credentials by workspace id ('default' = the Default/"
+    "unassigned workspace). Credentials shared with you are always listed.",
 )
-@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing.")
-def account_credentials_list(workspace: str | None, as_json: bool):
-    """List your credentials: name, type, slot, setup status, id (metadata only).
+@click.option("--owned", "only_owned", is_flag=True, help="Only your own credentials.")
+@click.option("--shared", "only_shared", is_flag=True, help="Only credentials shared with you.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON listing (rows untouched).")
+def account_credentials_list(
+    workspace: str | None, only_owned: bool, only_shared: bool, as_json: bool
+):
+    """List your credentials and those shared with you (metadata only).
+
+    Two sections. "Your credentials": name, type, slot, setup status, id.
+    "Shared with you": the same plus Owner (the owner's email), Via (direct,
+    a group, or an install) and Access (the share's level). A shared row is
+    the owner's: attach it to your agent with ``share-with-agent``; ``update``
+    and ``delete`` refuse it (``not_owner``). In ``--json`` every row carries
+    ``is_shared`` (use it for ownership; ``category`` is the web tab),
+    ``owner_email``, ``access_level``, ``share_source``, ``via_groups`` and
+    ``allow_bundle_reuse_effective``.
 
     The SLOT column is the credential's service URI — the id a skill's
     ``credentials:`` block names and a script looks the credential up by.
     Set it with ``cinna account credentials update <id> --service-uri <slot>``.
     """
+    if only_owned and only_shared:
+        raise click.UsageError("--owned and --shared exclude each other; pass neither for both.")
+    _access_json_mode(as_json)
     from cinna.account import run_credentials_list
 
-    run_credentials_list(workspace, as_json=as_json)
+    only = "owned" if only_owned else "shared" if only_shared else None
+    run_credentials_list(workspace, as_json=as_json, only=only)
 
 
 @account_credentials.command(name="types")
@@ -1753,6 +1771,143 @@ def agent_api_access_scopes(
     run_agent_api_access_scopes(
         producer_ref, to, set_scopes=set_scopes, clear=clear, as_json=as_json
     )
+
+
+# ─── agent-api consumer side: connections + capability requests ───────────
+
+
+class _DefaultListGroup(click.Group):
+    """A group whose bare form runs ``list``: ``connections <agent>`` is
+    ``connections list <agent>``; ``connections spec …`` is the subcommand."""
+
+    def parse_args(self, ctx, args):
+        if args and args[0] not in self.commands and args[0] not in ("--help", "-h"):
+            args = ["list", *args]
+        return super().parse_args(ctx, args)
+
+
+@agent_api.group(name="connections", cls=_DefaultListGroup)
+def agent_api_connections():
+    """An agent's connections to other agents' REST APIs (consumer side).
+
+    \b
+      cinna agent-api connections <agent> [--json]
+      cinna agent-api connections spec <agent> <connection> [-o FILE]
+
+    One row per agent_api credential linked to the agent, yours or shared
+    with you by its owner: producer, status, scopes, SDK lookup (what a script
+    passes to credentials.agent_api_session(...)), and the base / spec /
+    improvement-requests URLs the agent's ENVIRONMENT calls (environment
+    origin; the CLI never calls them). Never a token. <connection> is the
+    credential id, its slot, or its exact name.
+    """
+
+
+@agent_api_connections.command(name="list")
+@click.argument("agent_ref", metavar="AGENT")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw listing (no token is ever in it).")
+def agent_api_connections_list(agent_ref: str, as_json: bool):
+    """List AGENT's agent API connections (also: `connections AGENT`)."""
+    _access_json_mode(as_json)
+    from cinna.agent_api_connections import run_connections_list
+
+    run_connections_list(agent_ref, as_json=as_json)
+
+
+@agent_api_connections.command(name="spec")
+@click.argument("agent_ref", metavar="AGENT")
+@click.argument("connection_ref", metavar="CONNECTION")
+@click.option("-o", "--output", default=None, metavar="FILE", help="Write the spec to FILE instead of stdout.")
+@click.option("--json", "as_json", is_flag=True, help="Refusals as a JSON line with core's code (the spec itself is always JSON).")
+def agent_api_connections_spec(agent_ref: str, connection_ref: str, output: str | None, as_json: bool):
+    """The producer's OpenAPI spec as AGENT sees it through CONNECTION.
+
+    The same document the agent's environment reads from spec_url. May wake
+    the producer's environment; env_unavailable means try again shortly.
+    """
+    _access_json_mode(as_json)
+    from cinna.agent_api_connections import run_connection_spec
+
+    run_connection_spec(agent_ref, connection_ref, output)
+
+
+@agent_api.group(name="request")
+def agent_api_request():
+    """Capability requests: ask a producer for something its API lacks.
+
+    Filed through one of the consumer agent's connections; core files it with
+    that connection on the server (no key leaves the platform), attributed to
+    you and the consumer agent. The producer's owner sees it in
+    `cinna improve list --kind api`. Show the user the draft and file only
+    after they confirm.
+    """
+
+
+@agent_api_request.command(name="file")
+@click.argument("agent_ref", metavar="AGENT")
+@click.argument("connection_ref", metavar="CONNECTION")
+@click.option("--title", default=None, help="One line: what you need.")
+@click.option("--need", default=None, help="Why: what the consumer is trying to do and what is missing.")
+@click.option("--proposed-endpoint-json", default=None, metavar="FILE|-", help="JSON {method, path, params[{name,in,type,description}], response_fields[{name,type,description}]}.")
+@click.option("--example-request", default=None, help="Example request (a string).")
+@click.option("--example-response", default=None, help="Example response (a string).")
+@click.option("--spec-version", default=None, help="The spec's info.version you read (spec_version_seen).")
+@click.option("--body-json", default=None, metavar="FILE|-", help="The whole request body as JSON instead of the flags above.")
+@click.option("--json", "as_json", is_flag=True, help="Print the created request as JSON.")
+def agent_api_request_file(
+    agent_ref: str,
+    connection_ref: str,
+    title: str | None,
+    need: str | None,
+    proposed_endpoint_json: str | None,
+    example_request: str | None,
+    example_response: str | None,
+    spec_version: str | None,
+    body_json: str | None,
+    as_json: bool,
+):
+    """File a capability request with CONNECTION's producer, on behalf of AGENT.
+
+    Unknown body keys are refused (invalid_capability_request): the error
+    lists what was wrong and the expected fields. too_large and rate_limited
+    (with retry_after_s) come from the platform.
+
+    \b
+    Examples:
+      cinna agent-api request file crm-agent btc-rate-api \\
+        --title "Historical rate by date" \\
+        --need "Monthly report needs the EUR rate on a past date" --spec-version 1.0.0
+      cinna agent-api request file crm-agent btc-rate-api --body-json draft.json
+    """
+    _access_json_mode(as_json)
+    from cinna.agent_api_connections import build_request_body, run_request_file
+
+    body = build_request_body(
+        title=title,
+        need=need,
+        proposed_endpoint_json=proposed_endpoint_json,
+        example_request=example_request,
+        example_response=example_response,
+        spec_version=spec_version,
+        body_json=body_json,
+    )
+    run_request_file(agent_ref, connection_ref, body, as_json=as_json)
+
+
+@agent_api_request.command(name="list")
+@click.argument("agent_ref", metavar="AGENT")
+@click.argument("connection_ref", metavar="CONNECTION")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw listing.")
+def agent_api_request_list(agent_ref: str, connection_ref: str, as_json: bool):
+    """Your capability requests on CONNECTION's producer, newest first (≤ 50).
+
+    Status and the owner's resolution note; a completed one means the API
+    changed, so re-read the spec.
+    """
+    _access_json_mode(as_json)
+    from cinna.agent_api_connections import run_request_list
+
+    run_request_list(agent_ref, connection_ref, as_json=as_json)
 
 
 # ─── team library ──────────────────────────────────────────────────────────

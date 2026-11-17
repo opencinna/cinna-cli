@@ -1180,19 +1180,25 @@ def _sync_credentials(
 
     ``agent_api`` specs are never drafted: an empty ``agent_api`` credential has
     no key behind it and can never be used (the platform refuses the draft).
-    One that already exists under the same name (a key issued earlier) is
-    attached like any other; otherwise the importer prints the command that
-    provides a real key.
+    One that already exists — under the same name, or else an ``agent_api``
+    credential carrying the spec's slot — is attached like any other, owned or
+    shared with the caller (an agent API connection its owner shared counts);
+    otherwise the importer prints the command that provides a real key.
+
+    The account listing holds owned rows first, then shared ones; an owned
+    credential wins over a shared one of the same name or slot.
     """
     if not specs:
         return []
 
-    existing = {
-        c.get("name"): c
-        for c in client.list_credentials(user_workspace_id=user_workspace_id).get(
-            "data", []
-        )
-    }
+    existing: dict[str, dict] = {}
+    api_by_slot: dict[str, dict] = {}
+    for c in client.list_credentials(user_workspace_id=user_workspace_id).get("data", []):
+        if not isinstance(c, dict):
+            continue
+        existing.setdefault(c.get("name"), c)
+        if c.get("type") == "agent_api" and c.get("service_uri"):
+            api_by_slot.setdefault(c["service_uri"], c)
     consumer = normalize_agent_dir_name(agent_name) or agent_name
 
     setup_urls: list[tuple[str, str]] = []
@@ -1200,11 +1206,16 @@ def _sync_credentials(
         cred_name = spec["name"]
         found = existing.get(cred_name)
         is_api = spec.get("type") == "agent_api"
+        if is_api and (not found or found.get("type") != "agent_api"):
+            found = api_by_slot.get(spec.get("service_uri") or "")
         if found and (not is_api or found.get("type") == "agent_api"):
             client.share_credential_with_agent(found["id"], agent_id)
-            _line(
-                f"  '{cred_name}' already exists — attached to {agent_name}."
-            )
+            how = "already exists"
+            if found.get("name") != cred_name:
+                how = f"carried by '{found.get('name')}' (slot {spec.get('service_uri')})"
+            if found.get("is_shared"):
+                how += f", shared by {found.get('owner_email') or 'its owner'}"
+            _line(f"  '{cred_name}' {how} — attached to {agent_name}.")
             continue
         if is_api:
             _line(

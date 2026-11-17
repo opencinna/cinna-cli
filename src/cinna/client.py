@@ -55,6 +55,49 @@ def _coded_refusal(response: httpx.Response) -> CodedRefusal | None:
     )
 
 
+def _capability_refusal(response: httpx.Response) -> CodedRefusal | None:
+    """A coded 422 / 429 from the capability-request route, with its extras.
+
+    422: core's ``errors`` (``[{type, loc, msg}]``) and ``expected`` (field →
+    shape string) are appended to the sentence and kept on ``extra``. 429: the
+    ``Retry-After`` seconds ride as ``retry_after_s``.
+    """
+    refusal = _coded_refusal(response)
+    if refusal is None:
+        return None
+    try:
+        detail = response.json().get("detail")
+    except Exception:
+        detail = None
+    detail = detail if isinstance(detail, dict) else {}
+    lines = [refusal.detail]
+    errors = [e for e in detail.get("errors") or [] if isinstance(e, dict)]
+    expected = detail.get("expected") if isinstance(detail.get("expected"), dict) else None
+    if errors:
+        refusal.extra["errors"] = errors
+        lines.append("Errors:")
+        for err in errors:
+            loc = ".".join(str(p) for p in err.get("loc") or [] if p != "body") or "body"
+            lines.append(f"  {loc}: {err.get('msg') or err.get('type') or '?'}")
+    if expected:
+        refusal.extra["expected"] = expected
+        lines.append("Expected fields:")
+        for key, shape in expected.items():
+            lines.append(f"  {key}: {shape}")
+    if response.status_code == 429:
+        raw = response.headers.get("Retry-After")
+        try:
+            seconds = int(float(raw)) if raw is not None else None
+        except ValueError:
+            seconds = None
+        if seconds is not None:
+            refusal.extra["retry_after_s"] = seconds
+            lines.append(f"Retry after {seconds}s.")
+    refusal.detail = "\n".join(lines)
+    refusal.message = refusal.detail
+    return refusal
+
+
 def _body_detail(response: httpx.Response) -> str:
     """The ``detail`` of an error body, else its text."""
     try:
@@ -462,7 +505,8 @@ class AccountClient:
         response = self._client.put(
             f"/api/v1/cli/account/credentials/{credential_id}", json=fields
         )
-        return self._handle_response(response).json()
+        # coded: a shared row answers 403 {"detail": {"code": "not_owner", …}}.
+        return self._handle_response(response, coded=True).json()
 
     def delete_credential(self, credential_id: str, force: bool = False) -> dict:
         """DELETE /api/v1/cli/account/credentials/{id} — tier-gated delete."""
@@ -470,7 +514,7 @@ class AccountClient:
         response = self._client.delete(
             f"/api/v1/cli/account/credentials/{credential_id}", params=params
         )
-        return self._handle_response(response).json()
+        return self._handle_response(response, coded=True).json()
 
     def share_credential_with_agent(self, credential_id: str, agent_id: str) -> dict:
         """POST /api/v1/cli/account/credentials/{id}/share-with-agent — attach."""
@@ -690,6 +734,65 @@ class AccountClient:
             "/api/v1/cli/account/agent-api/access/scopes", json=body
         )
         return self._access_response(response)
+
+    # --- Agent API connections (consumer side: per agent, metadata only) ---
+    #
+    # The connections an agent holds to other agents' REST APIs. Core answers
+    # with metadata and the URLs the agent's *environment* calls; it never sends
+    # a token, and the client drops a stray one regardless. Capability requests
+    # are filed by core with the linked connection, so no key leaves the server.
+
+    def _connections_path(self, agent_id: str, credential_id: str | None = None) -> str:
+        path = f"/api/v1/cli/account/agents/{agent_id}/agent-api-connections"
+        if credential_id is not None:
+            path += f"/{credential_id}"
+        return path
+
+    def list_agent_api_connections(self, agent_id: str) -> dict:
+        """GET agents/{id}/agent-api-connections — ``{data, count}``.
+
+        One row per ``agent_api`` credential linked to the agent (owned or
+        shared): producer, env-origin URLs, key status, scopes, ``usable``,
+        ``unavailable_reason`` and ``sdk_lookup``.
+        """
+        response = self._client.get(self._connections_path(agent_id))
+        return drop_token(self._handle_response(response, coded=True).json())
+
+    def get_agent_api_connection_spec(self, agent_id: str, credential_id: str) -> dict:
+        """GET …/agent-api-connections/{cred}/spec — the producer's spec as seen
+        through this connection. Can wake the producer's environment, so the
+        read timeout is long."""
+        response = self._client.get(
+            self._connections_path(agent_id, credential_id) + "/spec",
+            timeout=httpx.Timeout(180.0, connect=10.0),
+        )
+        return self._handle_response(response, coded=True).json()
+
+    def list_capability_requests(self, agent_id: str, credential_id: str) -> dict:
+        """GET …/{cred}/capability-requests — the caller's own requests on that
+        producer, newest first: ``{data, count}``."""
+        response = self._client.get(
+            self._connections_path(agent_id, credential_id) + "/capability-requests"
+        )
+        return self._handle_response(response, coded=True).json()
+
+    def file_capability_request(self, agent_id: str, credential_id: str, body: dict) -> dict:
+        """POST …/{cred}/capability-requests — file one; 201 → the public request.
+
+        A 422 ``invalid_capability_request`` keeps core's ``errors`` and
+        ``expected`` on the refusal (``extra``) and in its sentence, so a caller
+        sees what was wrong and the shape to send. A 429 carries
+        ``retry_after_s`` from ``Retry-After``.
+        """
+        response = self._client.post(
+            self._connections_path(agent_id, credential_id) + "/capability-requests",
+            json=body,
+        )
+        if response.status_code in (422, 429):
+            refusal = _capability_refusal(response)
+            if refusal is not None:
+                raise refusal
+        return self._handle_response(response, coded=True).json()
 
     # --- Team library (/api/v1/library; git itself goes to /git/<repo_id>.git) ---
 
