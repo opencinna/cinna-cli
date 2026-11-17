@@ -97,7 +97,8 @@ to test a producer endpoint — use `cinna agent-api call`.
 ### Wire a consumer to it
 - `cinna connect agent-api --producer <A> --consumer <B>` mints A's producer
   token and attaches it to B as a credential. `--label` names the credential;
-  `--read-only` restricts the consumer to read-only API access.
+  `--read-only` restricts the consumer to read-only API access; `--scopes a,b`
+  sets the scopes the connection carries (see "Connection scopes").
 - The output reports the credential id, token prefix, and base/spec URLs, and
   reminds you the credential rides B's normal credential sync into its env (it
   appears read-only under `workspace/credentials/` in a synced workspace) —
@@ -130,6 +131,24 @@ to test a producer endpoint — use `cinna agent-api call`.
    a `completed` one means the API changed — re-read the spec.
 - `<connection>` is the credential id (or a unique prefix of at least 6
   characters), its slot, or its exact name among the consumer's connections.
+
+### Connection scopes
+- A connection carries scopes its producer's owner chose. A call through it
+  gets the caller's own grant **plus** the connection's scopes — never fewer
+  than the grant alone, and a connection without scopes behaves as before.
+  This is what lets a recipient of a shared connection call scoped endpoints.
+- `cinna agent-api connections <consumer>` shows that effective set and marks
+  the scopes the connection contributes as `(connection)`; an unusable
+  connection has no effective scopes but still names what it carries.
+- The producer's owner sets them at creation (`connect agent-api --scopes`)
+  or later: `cinna agent-api connections scopes <producer> <connection-id>
+  --set a,b` / `--clear`. Values must be scopes the producer's policy declares
+  (`unknown_scope` lists them); a change applies from the next call, with no
+  new key, to everyone using the connection (own agents, direct and group
+  recipients, installers). Anyone else is refused (`not_owner` / not found).
+- A call answered 403 "This endpoint requires the '<scope>' scope" lacks that
+  scope: the producer's owner adds it to the connection or grants it to the
+  caller. The templates tell the building agent exactly that.
 
 ### Give API access (a person, or a local agent)
 - `cinna agent-api access list <producer>` shows who has access: one row per

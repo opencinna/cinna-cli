@@ -477,7 +477,7 @@ cinna agent-api access revoke orders-agent a1b2c3d4
 
 ### `cinna connect agent-api --producer <agent> --consumer <agent> [--label TEXT] [--read-only]`
 
-Wire one agent to another's REST API from the account workspace. Resolves both agents (name, slug, or ID), mints a producer API token, and attaches it to the consumer as a credential — which rides the consumer's normal credential sync into its remote environment, so no key ever touches your machine. Prints the credential ID, token prefix, base URL, and spec URL. `--read-only` restricts the consumer to read-only access; `--label` names the credential. Backend errors surface verbatim: 400 if the producer's REST API is disabled, 403/404 for ownership violations.
+Wire one agent to another's REST API from the account workspace. Resolves both agents (name, slug, or ID), mints a producer API token, and attaches it to the consumer as a credential — which rides the consumer's normal credential sync into its remote environment, so no key ever touches your machine. Prints the credential ID, token prefix, base URL, and spec URL. `--read-only` restricts the consumer to read-only access; `--label` names the credential; `--scopes a,b` sets the scopes the connection carries (an unknown one is refused with the producer's declared list). Backend errors surface verbatim: 400 if the producer's REST API is disabled, 403/404 for ownership violations.
 
 ```bash
 cinna connect agent-api --producer crm-agent --consumer hr-manager-agent --read-only
@@ -495,9 +495,11 @@ cinna agent-api request file crm-agent btc-rate --title "Historical rate by date
     --need "The monthly report needs the rate on a past date" --spec-version 1.2.0
 cinna agent-api request file crm-agent btc-rate --body-json draft.json      # or the whole body as JSON (- = stdin)
 cinna agent-api request list crm-agent btc-rate  # your requests on that producer: status and the owner's note
+cinna agent-api connections scopes btc-rate-api <connection-id> --set btc.read   # producer owner: scopes the connection carries (--clear)
 ```
 
 - `<connection>` is the credential id (or a unique prefix), its slot, or its exact name; several connections with one name refuse with `ambiguous_connection`.
+- **Scopes** are what calls through the connection get: your own grant plus the scopes the connection carries (marked `(connection)`; `connection_scopes` in `--json`). Only the producer's owner sets a connection's scopes (`connections scopes`, or `cinna connect agent-api … --scopes a,b` at creation); values must be scopes the producer declares (`unknown_scope` lists them), and they apply from the next call to everyone using the connection. A call answered 403 "This endpoint requires the '<scope>' scope" lacks it: ask the producer's owner to add it to the connection or grant it to you.
 - **SDK lookup** is what a script passes to `credentials.agent_api_session(...)`: the slot when only one connection carries it, else the credential id. `request list` also works on a connection that is not usable (e.g. a revoked key), so earlier requests stay readable.
 - The URLs are what the agent's **environment** calls (locally `http://backend:8000/…`): the CLI never calls them. No token is ever printed, in tables or `--json`.
 - `request file` sends the strict body core expects (`title`, `need`, optional `proposed_endpoint` from `--proposed-endpoint-json FILE|-`, `example_request`, `example_response`, `spec_version_seen`). Core files it with the connection on the server, attributed to you and the consumer agent; the producer's owner sees it in `cinna improve list --kind api`. A bad body exits 1 with each error and the expected shape of every field (`--json`: `code: invalid_capability_request`, `errors`, `expected`); `rate_limited` carries `retry_after_s`. Filing needs the `agent-developer` role. Show the user the draft before filing.

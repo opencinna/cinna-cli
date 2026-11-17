@@ -402,6 +402,30 @@ account needs an AI credential (`cinna agent create` refuses without one).
   `cinna agent-api request file "<Agent>"`.
 - **Expected:** all present; the per-agent file embeds no connection URL.
 
+### 27. A connection carries scopes (needs core f3d33e13)
+- **Goal:** a recipient of a shared connection can call scoped endpoints once
+  the owner puts the scope on the connection.
+- **Steps:**
+  ```bash
+  # recipient
+  cinna agent-api connections "Repro Consumer"            # Scopes: btc.read (connection)
+  cinna agent-api connections "Repro Consumer" --json | grep -A2 connection_scopes
+  # owner
+  cinna agent-api connections scopes "BTC Rate API" <connection-id> --set nope; echo "exit=$?"
+  cinna agent-api connections scopes "BTC Rate API" <connection-id> --set btc.read
+  cinna connect agent-api --producer "BTC Rate API" --consumer "Hello Testing Agent" --scopes nope; echo "exit=$?"
+  ```
+- **Expected:** the recipient's Scopes cell reads `btc.read (connection)` and
+  `--json` has `connection_scopes: ["btc.read"]`; `--set nope` and `connect
+  --scopes nope` exit 1 with `Unknown scope(s) for BTC Rate API: nope.
+  Declared: btc.read` and create or change nothing (compare `cinna account
+  credentials list --json` counts); `--set btc.read` prints the connection's
+  scopes. With `--clear`, a recipient call to a scoped endpoint answers 403
+  "This endpoint requires the 'btc.read' scope" again. Set it back with `--set btc.read` afterwards.
+- **Watch for:** a connection created despite `unknown_scope`; the recipient
+  able to change the scopes; the `(connection)` mark on a scope that comes
+  only from the caller's own grant.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **Resolve-before-mutate.** A bad agent ref fails before any enable / refresh /

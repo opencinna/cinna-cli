@@ -219,6 +219,13 @@ contract but has no exit-2 case (it returns the buffered
   goes through `src/cinna/client.py:_capability_refusal()`, which keeps core's
   `errors` / `expected` (422) and `Retry-After` as `retry_after_s` (429) on
   the `CodedRefusal`'s `extra` and in its sentence.
+- `connect_agent_api(…, scopes)` sends `scopes` only when given and reads
+  coded refusals (`unknown_scope`, `not_a_connection`, `not_owner`,
+  `not_found`, `producer_removed`).
+- `set_connection_scopes(producer_agent_id, credential_id, scopes)` → `PUT
+  agents/{producer}/agent-api/connections/{cred}/scopes` through
+  `_proxy_json(coded=True)` (the account api-proxy; the route is not under
+  `/cli/account`); `[]` clears.
 - `update_credential` / `delete_credential` use `coded=True`, so a shared
   row's 403 `not_owner` surfaces as core's sentence with its code.
 
@@ -235,6 +242,12 @@ contract but has no exit-2 case (it returns the buffered
   three env-origin URLs and, when `usable` is false, the remedy for its
   `unavailable_reason` (`_UNAVAILABLE_REMEDIES`); ends with the spec / request
   commands spelled for the first row.
+- `src/cinna/agent_api_connections.py:_scopes_cell()` — effective `scopes`,
+  each one also in `connection_scopes` marked `(connection)`; an unusable row
+  with no effective scopes prints what the connection carries.
+- `src/cinna/agent_api_connections.py:run_connection_scopes()` — `cinna
+  agent-api connections scopes` (`src/cinna/main.py:agent_api_connections_scopes()`
+  enforces exactly one of `--set` / `--clear` and a non-empty `--set`).
 - `src/cinna/agent_api_connections.py:build_request_body()` — flags → the
   strict body (`title`, `need`, `proposed_endpoint` from a JSON file or stdin,
   `example_request`, `example_response`, `spec_version_seen`), or `--body-json`
@@ -295,8 +308,12 @@ All under `/api/v1/cli/account/*`, account-token auth:
 - `GET  …/agents/{agent}/agent-api-connections` — `{data, count}`, rows
   `{credential_id, name, slot, is_shared, owner_email, producer_agent_id,
   producer_agent_name, base_url, spec_url, improvement_requests_url,
-  key_status, scopes, usable, unavailable_reason, sdk_lookup}`; URLs are
-  env-origin.
+  key_status, scopes, connection_scopes, usable, unavailable_reason,
+  sdk_lookup}`; URLs are env-origin. `scopes` is the effective set (grant
+  first, then connection scopes, deduped; `[]` when unusable); core f3d33e13.
+- `POST …/connect/agent-api` body `scopes` (≤ 100); `PUT
+  /api/v1/agents/{producer}/agent-api/connections/{cred}/scopes` `{scopes}` →
+  `{credential_id, producer_agent_id, token_id, scopes}`, producer owner only.
 - `GET  …/agent-api-connections/{cred}/spec` — raw spec JSON.
 - `POST …/agent-api-connections/{cred}/capability-requests` (201,
   developer-only) / `GET` (`{data, count}`, ≤ 50, the caller's own) — public

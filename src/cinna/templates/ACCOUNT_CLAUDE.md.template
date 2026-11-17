@@ -136,10 +136,13 @@ Refresh after platform updates with `cinna account refresh-context`.
 
 | Command | What it does |
 |---------|--------------|
-| `cinna agent-api connections <agent> [--json]` | Every `agent_api` credential linked to the agent (yours or shared with you): name, producer, key status (`usable` / `unavailable_reason`), scopes, **SDK lookup** (`sdk_lookup` — what a script passes to `credentials.agent_api_session(...)`: the slot when only one connection carries it, else the credential id), who it is from, and the `base_url` / `spec_url` / `improvement_requests_url` the agent's **environment** calls (environment origin — the CLI never calls them, and locally they may not resolve from this machine). Never a token |
+| `cinna agent-api connections <agent> [--json]` | Every `agent_api` credential linked to the agent (yours or shared with you): name, producer, key status (`usable` / `unavailable_reason`), scopes, **SDK lookup** (`sdk_lookup` — what a script passes to `credentials.agent_api_session(...)`: the slot when only one connection carries it, else the credential id), who it is from, and the `base_url` / `spec_url` / `improvement_requests_url` the agent's **environment** calls. **Scopes** are the effective set — the user's own grant plus the connection's (`connection_scopes`, marked `(connection)`) (environment origin — the CLI never calls them, and locally they may not resolve from this machine). Never a token |
+| `cinna agent-api connections scopes <producer> <connection-id> (--set a,b \| --clear)` | **Producer owner only.** Set the scopes a connection carries (values from the producer's policy; `unknown_scope` lists the declared ones). Everyone calling through it — your agents, people and agents it is shared with — gets them on top of their own grant, from the next call; no new key |
 | `cinna agent-api connections spec <agent> <connection> [-o file]` | The producer's OpenAPI spec as this agent sees it through that connection (may wake the producer; `env_unavailable` = retry shortly). `<connection>` = credential id, slot or exact name |
 | `cinna agent-api request file <agent> <connection> --title T --need N [--proposed-endpoint-json F\|-] [--example-request S] [--example-response S] [--spec-version V]` (or `--body-json F\|-`) | File a **capability request** with the producer: core files it with the connection on the server, attributed to the user and this consumer agent; the producer's owner sees it in `cinna improve list --kind api`. **Show the user the draft and file only after they confirm.** A bad body (`invalid_capability_request`) prints what was wrong and the expected fields; `rate_limited` carries `retry_after_s` |
 | `cinna agent-api request list <agent> <connection> [--json]` | The user's own requests on that producer, newest first (works on an unusable connection too): status and the owner's resolution note (a `completed` one means the API changed — re-read the spec) |
+
+> **A 403 "This endpoint requires the '<scope>' scope" through a connection** means neither the caller's grant nor the connection carries that scope. Do not work around it. If the user owns the producer: `cinna agent-api connections scopes <producer> <connection-id> --set <existing>,<scope>` (check the current ones with `cinna agent-api connections <consumer>`), or grant a person with `cinna agent-api access scopes`. Otherwise (e.g. a shared connection): tell the user to ask the producer's owner to add the scope to the connection, or grant it to them.
 
 > **API access is a key issued to a person; its value never appears in the CLI — do not ask the user to paste it.** Platform agent ⇒ `cinna connect agent-api`. Person or outside tool ⇒ `cinna agent-api access issue <producer> --to <email>`. Local agent ⇒ `cinna agent-api access issue <producer> --to me --service-uri <slot matching its manifest>`, attached in Cinna Desktop, called with `cinna_credentials.agent_api_session("<slot>")`. `key_revoked` / `key_expired` are terminal (issue a new key), `key_paused` recovers by itself. Rotate and reveal live on the web credential page.
 
@@ -233,7 +236,7 @@ Refresh after platform updates with `cinna account refresh-context`.
 
 | Command | What it does |
 |---------|--------------|
-| `cinna connect agent-api --producer P --consumer C` | Wire C to P's REST API (credential auto-attached to C) |
+| `cinna connect agent-api --producer P --consumer C [--scopes a,b]` | Wire C to P's REST API (credential auto-attached to C); `--scopes` = scopes the connection carries |
 | `cinna connect mcp --producer P --consumer C` | Wire C to P's agent2agent MCP connector |
 | `cinna api <METHOD> <path>` | Generic platform-API escape hatch (see `context/api_reference/`) |
 
