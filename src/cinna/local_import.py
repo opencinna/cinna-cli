@@ -1180,7 +1180,10 @@ def _sync_credentials(
 
     ``agent_api`` specs are never drafted: an empty ``agent_api`` credential has
     no key behind it and can never be used (the platform refuses the draft).
-    One that already exists — under the same name, or else an ``agent_api``
+    A same-name credential is attached only when its type matches the spec's
+    (when the spec names one); otherwise the spec is drafted as if none
+    existed. An ``agent_api`` one that already exists — under the same name,
+    or else an ``agent_api``
     credential carrying the spec's slot — is attached like any other, owned or
     shared with the caller (an agent API connection its owner shared counts);
     otherwise the importer prints the command that provides a real key.
@@ -1191,12 +1194,12 @@ def _sync_credentials(
     if not specs:
         return []
 
-    existing: dict[str, dict] = {}
+    existing: dict[str, list[dict]] = {}
     api_by_slot: dict[str, dict] = {}
     for c in client.list_credentials(user_workspace_id=user_workspace_id).get("data", []):
         if not isinstance(c, dict):
             continue
-        existing.setdefault(c.get("name"), c)
+        existing.setdefault(c.get("name"), []).append(c)
         if c.get("type") == "agent_api" and c.get("service_uri"):
             api_by_slot.setdefault(c["service_uri"], c)
     consumer = normalize_agent_dir_name(agent_name) or agent_name
@@ -1204,11 +1207,20 @@ def _sync_credentials(
     setup_urls: list[tuple[str, str]] = []
     for spec in specs:
         cred_name = spec["name"]
-        found = existing.get(cred_name)
-        is_api = spec.get("type") == "agent_api"
-        if is_api and (not found or found.get("type") != "agent_api"):
+        spec_type = spec.get("type")
+        # Same name and, when the spec names a type, the same type; owned first.
+        found = next(
+            (
+                c
+                for c in existing.get(cred_name, [])
+                if not spec_type or c.get("type") == spec_type
+            ),
+            None,
+        )
+        is_api = spec_type == "agent_api"
+        if is_api and not found:
             found = api_by_slot.get(spec.get("service_uri") or "")
-        if found and (not is_api or found.get("type") == "agent_api"):
+        if found:
             client.share_credential_with_agent(found["id"], agent_id)
             how = "already exists"
             if found.get("name") != cred_name:

@@ -498,7 +498,7 @@ cinna agent-api request list crm-agent btc-rate  # your requests on that produce
 ```
 
 - `<connection>` is the credential id (or a unique prefix), its slot, or its exact name; several connections with one name refuse with `ambiguous_connection`.
-- **SDK lookup** is what a script passes to `credentials.agent_api_session(...)`: the slot, else the credential id.
+- **SDK lookup** is what a script passes to `credentials.agent_api_session(...)`: the slot when only one connection carries it, else the credential id. `request list` also works on a connection that is not usable (e.g. a revoked key), so earlier requests stay readable.
 - The URLs are what the agent's **environment** calls (locally `http://backend:8000/…`): the CLI never calls them. No token is ever printed, in tables or `--json`.
 - `request file` sends the strict body core expects (`title`, `need`, optional `proposed_endpoint` from `--proposed-endpoint-json FILE|-`, `example_request`, `example_response`, `spec_version_seen`). Core files it with the connection on the server, attributed to you and the consumer agent; the producer's owner sees it in `cinna improve list --kind api`. A bad body exits 1 with each error and the expected shape of every field (`--json`: `code: invalid_capability_request`, `errors`, `expected`); `rate_limited` carries `retry_after_s`. Filing needs the `agent-developer` role. Show the user the draft before filing.
 - `agent show <agent>` prints a one-line-per-connection summary.

@@ -581,3 +581,81 @@ def test_request_file_422_prints_expected_in_human_mode(runner, conn_client):
     assert result.exit_code == 1
     assert "Expected fields:" in out(result)
     assert "title: string" in out(result)
+
+
+# --- follow-up: duplicated slots, typed import match, share-with-agent line, table ---
+
+
+def test_resolve_a_slot_two_connections_carry_is_ambiguous():
+    from cinna.agent_api_connections import resolve_connection
+    from cinna.errors import CinnaExit
+
+    rows = [
+        connection(credential_id="id-a", slot="btc-rate", sdk_lookup="id-a"),
+        connection(credential_id="id-b", slot="btc-rate", sdk_lookup="id-b", name="Other"),
+    ]
+    with pytest.raises(CinnaExit) as exc:
+        resolve_connection(rows, "btc-rate", "Consumer")
+    assert exc.value.code == "ambiguous_connection"
+    assert "id-a" in exc.value.detail and "id-b" in exc.value.detail
+    # The id (the duplicated slot's sdk_lookup) still resolves.
+    assert resolve_connection(rows, "id-b", "Consumer")["name"] == "Other"
+
+
+def test_import_does_not_attach_a_same_name_credential_of_another_type():
+    from cinna.local_import import _sync_credentials
+
+    client = _import_client([{**OWNED_ROW, "name": "billing"}])  # api_token
+    client.create_credential.return_value = {"credential": {"id": "new"}, "setup_url": None}
+    spec = {"name": "billing", "type": "email_imap"}
+    _sync_credentials(client, AGENT_ID, "Consumer", [spec], None)
+    client.create_credential.assert_called_once()
+    client.share_credential_with_agent.assert_called_once_with("new", AGENT_ID)
+
+
+def test_import_skips_a_wrong_typed_owned_row_for_a_matching_shared_one():
+    from cinna.local_import import _sync_credentials
+
+    mine = {**OWNED_ROW, "id": "mine", "name": "BTC Rate API API"}  # api_token
+    client = _import_client([mine, {**SHARED_ROW, "service_uri": None}])
+    spec = {"name": "BTC Rate API API", "type": "agent_api"}
+    _sync_credentials(client, AGENT_ID, "Consumer", [spec], None)
+    client.share_credential_with_agent.assert_called_once_with(SHARED_ID, AGENT_ID)
+
+
+@pytest.mark.parametrize(
+    "row, expect, absent",
+    [
+        ({**OWNED_ROW, "status": "incomplete"}, "Once the user fills", "owner"),
+        (OWNED_ROW, None, "Once the user fills"),
+        (SHARED_ROW, "admin@example.com's credential", "Once the user fills"),
+    ],
+)
+def test_share_with_agent_closing_line_follows_the_credential(runner, acct_client, row, expect, absent):
+    acct_client.list_credentials.return_value = {"data": [row]}
+    result = runner.invoke(
+        cli, ["account", "credentials", "share-with-agent", row["id"], "--agent", "Hello Testing Agent"]
+    )
+    assert result.exit_code == 0, out(result)
+    if expect:
+        assert expect in out(result)
+    assert absent not in out(result)
+
+
+def test_connections_table_never_wraps_the_sdk_lookup(runner, conn_client, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "100")
+    result = runner.invoke(cli, ["agent-api", "connections", "Hello Testing Agent"])
+    assert result.exit_code == 0, out(result)
+    table_rows = [line for line in out(result).splitlines() if "BTC Rate" in line and "│" in line]
+    assert any(CRED_ID in line for line in table_rows)
+    assert "Credential ID" not in out(result)  # lookup == id: one column
+
+
+def test_connections_table_shows_the_id_when_a_lookup_is_a_slot(runner, conn_client):
+    conn_client.list_agent_api_connections.return_value = {
+        "data": [connection(slot="btc-rate", sdk_lookup="btc-rate")], "count": 1,
+    }
+    result = runner.invoke(cli, ["agent-api", "connections", "Hello Testing Agent"])
+    assert result.exit_code == 0, out(result)
+    assert "Credential ID" in out(result)
+    assert CRED_ID in out(result)

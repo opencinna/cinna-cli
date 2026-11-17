@@ -108,7 +108,7 @@ to test a producer endpoint — use `cinna agent-api call`.
    linked to the consumer: name, producer, key status (and, when the
    environment would get no working key, `not usable: <reason>` with the fix),
    scopes, **SDK lookup** — what a script passes to
-   `credentials.agent_api_session(...)`: the slot, else the credential id — and
+   `credentials.agent_api_session(...)`: the slot when only one connection carries it, else the credential id — and
    who it is from (yours, or shared by its owner's email). Below the table,
    each connection's `base_url`, `spec_url` and `improvement_requests_url`,
    labelled as what the agent's **environment** calls. `--json` is core's
@@ -125,7 +125,8 @@ to test a producer endpoint — use `cinna agent-api call`.
    the producer's owner sees it in `cinna improve list --kind api` with the
    consumer as "via".
 4. `cinna agent-api request list <consumer> <connection>` shows the user's own
-   requests on that producer, newest first, with status and the owner's note;
+   requests on that producer, newest first, with status and the owner's note
+   (it works on an unusable connection too);
    a `completed` one means the API changed — re-read the spec.
 - `<connection>` is the credential id (or a unique prefix of at least 6
   characters), its slot, or its exact name among the consumer's connections.

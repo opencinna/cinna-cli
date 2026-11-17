@@ -302,7 +302,7 @@ All under `/api/v1/cli/account/*`, account-token auth:
   developer-only) / `GET` (`{data, count}`, ≤ 50, the caller's own) — public
   request `{id, title, status, resolution_note, created_at,
   status_changed_at, spec_version_seen}`.
-- Codes on these routes: `not_found` (404), `connection_unusable` (409);
+- Codes on these routes: `not_found` (404, the message names the missing part), `connection_unusable` (409, spec and file only — `request list` works on an unusable connection);
   spec: `spec_not_exposed` (403), `api_disabled` (400), `producer_error` (502),
   `env_unavailable` (503); file: `too_large` (413), `invalid_request` (400),
   `invalid_capability_request` (422, with `errors` and `expected`),

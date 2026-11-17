@@ -4578,12 +4578,32 @@ def run_credentials_share(credential_id: str, agent_ref: str) -> None:
         agent = _resolve_account_agent(listing.get("data", []), agent_ref)
         with console.spinner(f"Attaching credential to {agent['name']}..."):
             client.share_credential_with_agent(credential_id, agent["id"])
+        # Best effort: the closing line depends on the credential's state.
+        row: dict | None = None
+        try:
+            listing = client.list_credentials()
+            rows = listing.get("data") if isinstance(listing, dict) else None
+            for r in rows if isinstance(rows, list) else []:
+                if isinstance(r, dict) and str(r.get("id")) == str(credential_id):
+                    row = r
+                    break
+        except (PlatformError, CinnaExit, httpx.TransportError) as exc:
+            logger.info("credential listing unavailable after attach: %s", exc)
 
     console.status(f"Credential attached to '{agent['name']}'.")
-    console.console.print(
-        "[dim]Once the user fills the credential's secret in the UI, it syncs "
-        "into the agent's environment automatically.[/dim]"
-    )
+    if row is None:
+        return
+    if row.get("is_shared"):
+        console.console.print(
+            f"[dim]It is {_esc(row.get('owner_email') or 'its owner')}'s credential: it "
+            "syncs into the agent's environment as is, and only the owner can change "
+            "it.[/dim]"
+        )
+    elif row.get("status") != "complete":
+        console.console.print(
+            "[dim]Once the user fills the credential's secret in the UI, it syncs "
+            "into the agent's environment automatically.[/dim]"
+        )
 
 
 # ── Agent addons: skills + plugins (`cinna skills`) ─────────────────────────

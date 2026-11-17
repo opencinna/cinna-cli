@@ -68,32 +68,32 @@ def _connections(client: AccountClient, agent_id: str) -> list[dict]:
 def resolve_connection(rows: list[dict], ref: str, agent_name: str) -> dict:
     """``ref`` = credential id (or a unique prefix of one), slot, or exact name.
 
-    Id first, then slot / ``sdk_lookup``, then exact name. Several connections
-    sharing a name refuse with ``ambiguous_connection`` naming their ids.
+    Id first, then slot, ``sdk_lookup``, exact name. A slot or name several
+    connections share refuses with ``ambiguous_connection`` naming their ids.
     """
     ref = (ref or "").strip()
     by_id = [r for r in rows if str(r.get("credential_id")) == ref]
     if by_id:
         return by_id[0]
-    for field in ("slot", "sdk_lookup"):
-        hits = [r for r in rows if r.get(field) and str(r.get(field)) == ref]
+    for hits in (
+        [r for r in rows if r.get("slot") and str(r.get("slot")) == ref],
+        [r for r in rows if r.get("sdk_lookup") and str(r.get("sdk_lookup")) == ref],
+        [r for r in rows if r.get("name") == ref],
+    ):
         if len(hits) == 1:
             return hits[0]
-    by_name = [r for r in rows if r.get("name") == ref]
-    if len(by_name) == 1:
-        return by_name[0]
+        if len(hits) > 1:
+            ids = ", ".join(str(r.get("credential_id")) for r in hits)
+            raise CinnaExit(
+                EXIT_ERROR,
+                "ambiguous_connection",
+                f"'{ref}' matches {len(hits)} connections of {agent_name}: {ids}. "
+                "Pass the credential id instead.",
+            )
     if len(ref) >= 6:
         by_prefix = [r for r in rows if str(r.get("credential_id", "")).startswith(ref)]
         if len(by_prefix) == 1:
             return by_prefix[0]
-    if len(by_name) > 1:
-        ids = ", ".join(str(r.get("credential_id")) for r in by_name)
-        raise CinnaExit(
-            EXIT_ERROR,
-            "ambiguous_connection",
-            f"'{ref}' names {len(by_name)} connections of {agent_name}: {ids}. "
-            "Pass the credential id instead.",
-        )
     known = ", ".join(
         f"{r.get('name')} ({r.get('credential_id')})" for r in rows
     ) or "none"
@@ -151,23 +151,28 @@ def run_connections_list(agent_ref: str, as_json: bool = False) -> None:
     table.add_column("Name", overflow="fold")
     table.add_column("Producer", overflow="fold")
     table.add_column("Status")
-    table.add_column("SDK lookup", overflow="fold")
+    # The SDK lookup is copied into code: it never wraps or folds. The id
+    # column appears only when some lookup is not the id (a slot).
+    show_id = any(str(r.get("sdk_lookup")) != str(r.get("credential_id")) for r in rows)
+    lookup_width = max(len(str(r.get("sdk_lookup") or "?")) for r in rows)
+    table.add_column("SDK lookup", no_wrap=True, overflow="ignore", min_width=lookup_width)
     table.add_column("Scopes", overflow="fold")
     table.add_column("From", overflow="fold")
-    table.add_column("Credential ID", style="dim", overflow="fold", no_wrap=True)
+    if show_id:
+        id_width = max(len(str(r.get("credential_id") or "?")) for r in rows)
+        table.add_column("Credential ID", style="dim", no_wrap=True, min_width=id_width)
     for r in rows:
-        lookup = _esc(r.get("sdk_lookup") or "?")
-        if r.get("slot"):
-            lookup += " [dim](slot)[/dim]"
-        table.add_row(
+        cells = [
             _esc(r.get("name") or "?"),
             _esc(r.get("producer_agent_name") or r.get("producer_agent_id") or "?"),
             _status_cell(r),
-            lookup,
+            _esc(r.get("sdk_lookup") or "?"),
             _esc(", ".join(str(s) for s in r.get("scopes") or []) or "—"),
             _from_cell(r),
-            _esc(r.get("credential_id") or "?"),
-        )
+        ]
+        if show_id:
+            cells.append(_esc(r.get("credential_id") or "?"))
+        table.add_row(*cells)
     console.console.print(table)
 
     console.console.print(
