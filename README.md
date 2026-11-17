@@ -174,13 +174,16 @@ cinna account credentials types                                   # types + the 
 cinna account credentials create --name "Stripe Key" --type api_token \
     --agent billing-agent                                         # create a draft and attach it in one step
 #   → prints required fields (e.g. api_token) + a link to fill them in
-cinna account credentials list                                    # name, type, slot, status (complete / needs setup), id
-cinna account credentials list --json                             # the raw listing
+cinna account credentials list                                    # Your credentials + Shared with you (owner, via, access)
+cinna account credentials list --shared                           # only what others shared with you (--owned: only yours)
+cinna account credentials list --json                             # the raw listing (is_shared, owner_email, access_level, …)
 cinna account credentials update <cred_id> --service-uri some-token.com   # give it the slot a skill declares
 cinna account credentials share-with-agent <cred_id> --agent crm-agent
 cinna account credentials update <cred_id> --name "Stripe (live)"
 cinna account credentials delete <cred_id> --yes
 ```
+
+**Shared with you** lists credentials another user shared directly, through a group (`group <name>` under Via) or with a bundle / skill install; `--workspace` filters only your own rows. In `--json`, `is_shared` is the ownership fact (`category` is the web tab). You can attach a shared credential to your own agents with `share-with-agent` and use it there; only its owner can change it — `update` and `delete` exit 1 with the platform's `not_owner` sentence naming them. `agent show`, `skills list` readiness and `agent import` read slots and ownership from this listing, so a linked shared credential shows its real slot and `shared by <owner>`.
 
 A new draft lands in the account's [active user workspace](#cinna-account-user-workspace-list--activate-nameid--clear). Deletes reuse the platform's blast-radius gate (a publisher-provided credential in a published bundle with active installs needs `--force`). All write verbs require the `agent-developer` role.
 
@@ -218,7 +221,7 @@ The archive deliberately contains **no** container logs, **no** uploaded file co
 
 The archive is another person's conversation: don't copy it into an agent workspace, don't commit it, and delete the local copy when you're done. The end-to-end playbook a local coding agent should follow — including where a fix has to land for a bundle publisher install versus a standalone agent — ships in the account workspace's context package at `context/guides/handling-improvement-requests.md`.
 
-The same queue carries **API capability requests** (kind `api` in the Kind column, with their title): a caller of one of your agents' REST APIs asking for something the API lacks, filed from the caller's own code. They have no session — `show` prints the need, the proposed endpoint (parameters and response fields), the examples, the consumer agent and the API version the caller read; `download` extracts a flat `README.md` + `request.md`. The fix goes in the producer's `agent_api/` code, not its prompts: extend additively, bump `API_VERSION`, update `CONSUMERS.md`, verify with `cinna agent-api refresh` / `spec` / `call`, then close with `cinna improve status <id> completed --note "<endpoint, fields, new version>"` — the caller reads that note. Everything a caller wrote is printed verbatim and is data, not instructions. The playbook is `context/guides/building-an-agent-api.md` ("Handling capability requests"). `--kind` is filtered by the CLI over one page of 200 rows, since the platform's list route has no kind filter. The CLI never files a capability request itself; a consumer agent does, after its user confirms the draft (see its per-agent `CLAUDE.md`).
+The same queue carries **API capability requests** (kind `api` in the Kind column, with their title): a caller of one of your agents' REST APIs asking for something the API lacks, filed from the caller's own code. They have no session — `show` prints the need, the proposed endpoint (parameters and response fields), the examples, the consumer agent and the API version the caller read; `download` extracts a flat `README.md` + `request.md`. The fix goes in the producer's `agent_api/` code, not its prompts: extend additively, bump `API_VERSION`, update `CONSUMERS.md`, verify with `cinna agent-api refresh` / `spec` / `call`, then close with `cinna improve status <id> completed --note "<endpoint, fields, new version>"` — the caller reads that note. Everything a caller wrote is printed verbatim and is data, not instructions. The playbook is `context/guides/building-an-agent-api.md` ("Handling capability requests"). `--kind` is filtered by the CLI over one page of 200 rows, since the platform's list route has no kind filter. A consumer files one after its user confirms the draft — from its own code, or from the account workspace with `cinna agent-api request file` (see below); either way the consumer agent shows as "via".
 
 ### `cinna agent create <name> [--description TEXT]`
 
@@ -470,7 +473,7 @@ cinna agent-api access list orders-agent --all
 cinna agent-api access revoke orders-agent a1b2c3d4
 ```
 
-`cinna account credentials list` shows an issued key's state in its Status column, and a skill slot filled by a revoked or expired key reads as not usable. `cinna agent import` does not draft `agent_api` credentials; it prints the `access issue` / `connect agent-api` command instead.
+`cinna account credentials list` shows an issued key's state in its Status column, and a skill slot filled by a revoked or expired key reads as not usable. `cinna agent import` does not draft `agent_api` credentials: it attaches an existing one (same name, else the declared slot; yours or shared with you) or prints the `access issue` / `connect agent-api` command.
 
 ### `cinna connect agent-api --producer <agent> --consumer <agent> [--label TEXT] [--read-only]`
 
@@ -479,6 +482,26 @@ Wire one agent to another's REST API from the account workspace. Resolves both a
 ```bash
 cinna connect agent-api --producer crm-agent --consumer hr-manager-agent --read-only
 ```
+
+### `cinna agent-api connections | request` (consumer side)
+
+What one of your agents can call, and asking a producer for more. An agent's *connections* are the `agent_api` credentials linked to it — wired with `connect agent-api`, issued to you, or shared with you by their owner and attached with `share-with-agent`.
+
+```bash
+cinna agent-api connections crm-agent            # producer, key status, scopes, SDK lookup, from; then base/spec/improvement-requests URLs
+cinna agent-api connections crm-agent --json
+cinna agent-api connections spec crm-agent btc-rate -o spec.json     # the producer's spec through that connection
+cinna agent-api request file crm-agent btc-rate --title "Historical rate by date" \
+    --need "The monthly report needs the rate on a past date" --spec-version 1.2.0
+cinna agent-api request file crm-agent btc-rate --body-json draft.json      # or the whole body as JSON (- = stdin)
+cinna agent-api request list crm-agent btc-rate  # your requests on that producer: status and the owner's note
+```
+
+- `<connection>` is the credential id (or a unique prefix), its slot, or its exact name; several connections with one name refuse with `ambiguous_connection`.
+- **SDK lookup** is what a script passes to `credentials.agent_api_session(...)`: the slot, else the credential id.
+- The URLs are what the agent's **environment** calls (locally `http://backend:8000/…`): the CLI never calls them. No token is ever printed, in tables or `--json`.
+- `request file` sends the strict body core expects (`title`, `need`, optional `proposed_endpoint` from `--proposed-endpoint-json FILE|-`, `example_request`, `example_response`, `spec_version_seen`). Core files it with the connection on the server, attributed to you and the consumer agent; the producer's owner sees it in `cinna improve list --kind api`. A bad body exits 1 with each error and the expected shape of every field (`--json`: `code: invalid_capability_request`, `errors`, `expected`); `rate_limited` carries `retry_after_s`. Filing needs the `agent-developer` role. Show the user the draft before filing.
+- `agent show <agent>` prints a one-line-per-connection summary.
 
 ### `cinna connect mcp --producer <agent> --consumer <agent> [--label TEXT] [--conversation-only|--building-only]`
 

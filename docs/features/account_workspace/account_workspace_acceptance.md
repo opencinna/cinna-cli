@@ -414,3 +414,24 @@ the silent-secret and scope-drift bugs live.
 - Verify `~/.cinna/agents.json` has no leftover entries for the test children —
   especially if any helper ran **outside** pytest's global-state isolation (it
   would write the real registry).
+
+### 19. Credentials shared with you (needs core 512aa258)
+
+- **Goal:** a credential another user shared shows up, is attachable, and is
+  read-only.
+- **Setup:** user A shares a credential with user B (web: credential → Share).
+  Run as B.
+- **Steps:**
+  ```
+  cinna account credentials list
+  cinna account credentials list --shared --json
+  cinna account credentials update <shared-id> --service-uri x; echo "exit=$?"
+  ```
+- **Expected:** a *Shared with you* section with Owner = A's email, Via
+  (`direct` / `group <name>`), Access; `--json` rows `is_shared: true`;
+  `update` exits 1 with `This credential is shared with you by <A>; only the
+  owner can change it.` Full consumer-side scenarios (attach, connections,
+  capability requests): `docs/features/agent_api/agent_api_acceptance.md`
+  scenarios 18–26.
+- **Watch for:** "No credentials on this account." for B; a shared row in
+  `--owned`.

@@ -301,6 +301,107 @@ for** failure modes.
   applies to any method on `agents/*/agent-api/keys…`, `environments/*/workspace/download` and `view-file`, `dashboards/*/blocks/*/env-file`, and POST on token-minting routes (A2A access-tokens, MCP/ACP connector tokens, webhook create/regenerate-token), including percent-encoded spellings.
 - **Watch for:** exit 1 instead of 2; a key created by the call.
 
+### Consumer side: shared connections and capability requests (needs core 512aa258)
+
+Two accounts: the **owner** (owns a producer, e.g. "BTC Rate API", and has made
+one of its `agent_api` connections shareable and shared it with the
+recipient), and the **recipient** (agent-developer role, its own account
+workspace). The recipient needs an agent of its own for 21 and 24, so its
+account needs an AI credential (`cinna agent create` refuses without one).
+
+### 18. The recipient sees the shared connection
+- **Goal:** "what was shared with me" works from the CLI.
+- **Steps (recipient):**
+  ```bash
+  cinna account credentials list
+  cinna account credentials list --shared --json | grep -E '"is_shared"|"owner_email"|"access_level"'
+  ```
+- **Expected:** a *Shared with you* table with the connection, Owner = the
+  owner's email, Via `direct` (or `group <name>`), Access `read`; `--json` rows
+  carry `is_shared: true` and the owner's email. With no own credentials the
+  first section is a dim "You own no credentials."
+- **Watch for:** "No credentials on this account." (the pre-512aa258 bug).
+
+### 19. Owned rows are unchanged
+- **Steps (owner):** `cinna account credentials list --json | grep -c '"is_shared": false'`
+  and `cinna account credentials list --shared`.
+- **Expected:** every own row has `is_shared: false`, `owner_email: null`;
+  "Nothing is shared with you." when nothing is.
+
+### 20. A shared row is read-only
+- **Steps (recipient):**
+  ```bash
+  cinna account credentials update <shared-id> --service-uri x; echo "exit=$?"
+  cinna account credentials delete <shared-id> --yes; echo "exit=$?"
+  ```
+- **Expected:** both print `Error: This credential is shared with you by
+  <owner>; only the owner can change it.` and exit 1; nothing changed.
+
+### 21. Attach the shared connection to the recipient's agent
+- **Steps (recipient):**
+  ```bash
+  cinna agent create "Rate Consumer"
+  cinna account credentials share-with-agent <shared-id> --agent "Rate Consumer"
+  cinna agent show "Rate Consumer"
+  ```
+- **Expected:** *Connected credentials* lists it with its slot (or `no
+  slot`), never `slot: unknown`, and `shared by <owner>`; *Agent API
+  connections (1)* names the producer, the SDK lookup and the key status.
+
+### 22. List an agent's connections, no token anywhere
+- **Steps:**
+  ```bash
+  cinna agent-api connections "Hello Testing Agent" > /tmp/conn.txt
+  cinna agent-api connections "Hello Testing Agent" --json >> /tmp/conn.txt
+  grep -ciE 'cak_|bearer|"token"' /tmp/conn.txt
+  ```
+- **Expected:** producer, status, scopes, SDK lookup, From (`yours` /
+  `shared by …`), then `base_url`, `spec_url`, `improvement_requests_url`
+  labelled as environment URLs (locally `http://backend:8000/…`); the grep
+  prints `0`.
+- **Watch for:** a URL the CLI tried to call; a token prefix in `--json`.
+
+### 23. Read the producer's spec through a connection
+- **Steps:** `cinna agent-api connections spec "Hello Testing Agent" <id-prefix|slot|name> -o /tmp/spec.json`
+- **Expected:** `Spec written`, plus the API version to pass as
+  `--spec-version`; the file is the producer's OpenAPI document. A name shared
+  by several connections refuses with `ambiguous_connection` and the ids;
+  `env_unavailable` (exit 12) means the producer is waking — retry.
+
+### 24. File and list a capability request; the owner sees it
+- **Steps (consumer side; recipient on its own agent, or the owner on its own):**
+  ```bash
+  cinna agent-api request file "<Consumer>" <connection> \
+    --title "[test] Historical BTC rate by date" \
+    --need "A report needs the BTC rate on a past date." --spec-version 1.2.0
+  cinna agent-api request list "<Consumer>" <connection>
+  ```
+  then, as the producer's owner: `cinna improve list --kind api`.
+- **Expected:** `Capability request filed with <producer>`, status `new`;
+  the list shows it with the title verbatim (brackets included); the owner's
+  list has an *API request* row with the title and `via <Consumer>`.
+- **Watch for:** the title losing `[test]` (read as markup); a request
+  attributed to the wrong agent.
+
+### 25. A bad body explains the expected shape
+- **Steps:**
+  ```bash
+  echo '{"title":"x","need":"y","colour":"red"}' | cinna agent-api request file "<Consumer>" <connection> --body-json -
+  echo '{"title":"x"}' | cinna agent-api request file "<Consumer>" <connection> --body-json - --json
+  ```
+- **Expected:** exit 1; `Errors:` (`title: String should have at least 3
+  characters`, `colour: Extra inputs are not permitted`) and `Expected
+  fields:` (title, need, proposed_endpoint, example_request,
+  example_response, spec_version_seen). The `--json` line has
+  `code: invalid_capability_request`, `errors` and `expected`.
+
+### 26. The building agent is told about all of it
+- **Steps:** `cinna account refresh-context`, then grep the account
+  `CLAUDE.md` for `Shared with you` and `agent-api connections <agent>`, and an
+  agent workspace's `CLAUDE.md` for `cinna agent-api connections "<Agent>"` and
+  `cinna agent-api request file "<Agent>"`.
+- **Expected:** all present; the per-agent file embeds no connection URL.
+
 ## Cross-cutting invariants (must hold across all scenarios)
 
 - **Resolve-before-mutate.** A bad agent ref fails before any enable / refresh /
@@ -316,8 +417,10 @@ for** failure modes.
   marker header — never conflated with an inner 4xx.
 - **No key value in any access output.** Not in the table, not in `--json`,
   not on self-issue; reveal and rotate are web-only.
-- **Spec is pipeable.** `cinna agent-api spec` emits plain JSON to stdout (or the
-  `-o` file), never Rich-decorated.
+- **Spec is pipeable.** `cinna agent-api spec` and `connections spec` emit
+  plain JSON to stdout (or the `-o` file), never Rich-decorated.
+- **Shared means usable, never changeable.** A recipient attaches, lists and
+  files through a shared connection; `update` / `delete` refuse `not_owner`.
 
 ## Cleanup
 
@@ -333,3 +436,5 @@ for** failure modes.
   --clear`), delete the revoked credentials in the web, and set external access
   back to its prior state.
 - Delete scratch files written by `cinna agent-api spec -o spec.json`.
+- Close test capability requests as the producer's owner:
+  `cinna improve status <id> declined --note "test"`.

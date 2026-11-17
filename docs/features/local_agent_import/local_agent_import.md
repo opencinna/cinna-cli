@@ -133,7 +133,9 @@ Each prints as `[n/9]`:
 7. **Credentials** — one empty draft per spec, attached to the agent; an
    existing credential of the same name is attached rather than recreated.
    An `agent_api` spec is never drafted (an empty one has no key and is never
-   usable): an existing same-name `agent_api` credential is attached, otherwise
+   usable): an existing `agent_api` credential is attached — same name, else
+   one carrying the spec's slot; yours or shared with you, yours first —
+   otherwise
    the import prints `cinna agent-api access issue …` (local) and `cinna connect
    agent-api …` (cloud) commands.
    A spec's `service_uri` is set on a new draft; an existing credential keeps

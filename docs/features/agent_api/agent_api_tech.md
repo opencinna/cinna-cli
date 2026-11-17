@@ -16,7 +16,12 @@ talks to the platform through `AccountClient` with the account token.
   `call_agent_api`, `connect_agent_api`, `connect_mcp`, `api_proxy`, and the
   four access methods `list_agent_api_access`, `issue_agent_api_key`,
   `revoke_agent_api_key`, `set_agent_api_scopes`) plus the `drop_token()` helper.
-- Tests: `tests/test_account.py` (enable/refresh/spec/call, connect agent-api,
+- `src/cinna/agent_api_connections.py` — the consumer side: `cinna agent-api
+  connections` / `connections spec` / `request file|list` runners, connection
+  resolution and request-body assembly.
+- Tests: `tests/test_agent_api_connections.py` (consumer verbs, shared
+  credentials in `credentials list` / `agent show` / import, the coded 422 and
+  429 refusals, no token in any output), `tests/test_account.py` (enable/refresh/spec/call, connect agent-api,
   `cinna api` exit-code matrix, `api_proxy` client behavior),
   `tests/test_client.py` (`AccountClient` route shapes, the access methods,
   coded refusals, `drop_token`), `tests/test_agent_api_access.py` (the four
@@ -47,6 +52,18 @@ Each verb → its handler in `src/cinna/main.py` → the `run_*` in
 - `cinna agent-api access scopes` → `src/cinna/main.py:agent_api_access_scopes()` →
   `src/cinna/account.py:run_agent_api_access_scopes()` (exactly one of `--set` /
   `--clear`, checked in the Click handler)
+- `cinna agent-api connections [list] <agent>` →
+  `src/cinna/main.py:agent_api_connections_list()` (the group class
+  `src/cinna/main.py:_DefaultListGroup` turns the bare form into `list`) →
+  `src/cinna/agent_api_connections.py:run_connections_list()`
+- `cinna agent-api connections spec` →
+  `src/cinna/main.py:agent_api_connections_spec()` →
+  `src/cinna/agent_api_connections.py:run_connection_spec()`
+- `cinna agent-api request file` → `src/cinna/main.py:agent_api_request_file()`
+  → `src/cinna/agent_api_connections.py:build_request_body()` then
+  `src/cinna/agent_api_connections.py:run_request_file()`
+- `cinna agent-api request list` → `src/cinna/main.py:agent_api_request_list()`
+  → `src/cinna/agent_api_connections.py:run_request_list()`
 - `cinna connect agent-api` → `src/cinna/main.py:connect_agent_api()` →
   `src/cinna/account.py:run_connect_agent_api()`
 - `cinna connect mcp` → `src/cinna/main.py:connect_mcp()` →
@@ -191,6 +208,54 @@ contract but has no exit-2 case (it returns the buffered
   backend mirrors the inner status/body 1:1, so non-2xx is normal output here),
   raising only on a 401 (invalid account token).
 
+- `list_agent_api_connections(agent_id)` → `GET
+  …/agents/{agent_id}/agent-api-connections`; coded refusals; `drop_token()`.
+- `get_agent_api_connection_spec(agent_id, credential_id)` → `GET
+  …/agent-api-connections/{credential_id}/spec` with a 180 s read timeout (it
+  can wake the producer's environment).
+- `list_capability_requests(agent_id, credential_id)` / 
+  `file_capability_request(agent_id, credential_id, body)` → `GET` / `POST
+  …/agent-api-connections/{credential_id}/capability-requests`. A 422 or 429
+  goes through `src/cinna/client.py:_capability_refusal()`, which keeps core's
+  `errors` / `expected` (422) and `Retry-After` as `retry_after_s` (429) on
+  the `CodedRefusal`'s `extra` and in its sentence.
+- `update_credential` / `delete_credential` use `coded=True`, so a shared
+  row's 403 `not_owner` surfaces as core's sentence with its code.
+
+## Consumer side: key functions
+
+- `src/cinna/agent_api_connections.py:resolve_connection()` — `<connection>` →
+  one row of the agent's listing: exact credential id, then slot /
+  `sdk_lookup`, then exact name, then a unique id prefix (≥ 6 chars). Several
+  rows of one name raise `ambiguous_connection` with their ids; no match raises
+  `connection_not_found` listing the agent's connections. Resolution happens
+  before the spec / request call, so a bad ref sends nothing.
+- `src/cinna/agent_api_connections.py:run_connections_list()` — table (name,
+  producer, status, SDK lookup, scopes, from, id), then per connection the
+  three env-origin URLs and, when `usable` is false, the remedy for its
+  `unavailable_reason` (`_UNAVAILABLE_REMEDIES`); ends with the spec / request
+  commands spelled for the first row.
+- `src/cinna/agent_api_connections.py:build_request_body()` — flags → the
+  strict body (`title`, `need`, `proposed_endpoint` from a JSON file or stdin,
+  `example_request`, `example_response`, `spec_version_seen`), or `--body-json`
+  alone (combining it with a field flag is a usage error). No local field
+  validation: core's 422 is the authority.
+- `src/cinna/agent_api_connections.py:run_request_list()` — titles, statuses,
+  versions and owners' notes go into `rich.text.Text` cells, never markup.
+- `src/cinna/account.py:_fetch_api_connections()` /
+  `src/cinna/account.py:_print_api_connections_summary()` — `agent show`'s
+  section; any refusal logs and prints nothing.
+- `src/cinna/account.py:_fetch_linked_credentials()` — merges slot, status,
+  key status, `is_shared` and `owner_email` from the account listing (owned and
+  shared rows) by id; only a row absent from it keeps `_SLOT_UNVERIFIED`.
+- `src/cinna/account.py:run_credentials_list()` — splits on `is_shared` into
+  *Your credentials* and *Shared with you* (`_credential_via_cell()` renders
+  `share_source` + `via_groups`); `--owned` / `--shared` filter client-side and
+  `--json` keeps rows untouched with `count` recomputed when filtered.
+- `src/cinna/local_import.py:_sync_credentials()` — for an `agent_api` spec,
+  same name first, else an `agent_api` row carrying the spec's slot; the
+  listing's owned-first order plus `setdefault` makes an owned credential win.
+
 ## External contracts (platform routes consumed)
 
 All under `/api/v1/cli/account/*`, account-token auth:
@@ -221,6 +286,27 @@ All under `/api/v1/cli/account/*`, account-token auth:
   access-tokens, MCP/ACP connector tokens and agent / task-trigger webhook
   create/regenerate-token; paths are matched percent-decoded. The CLI needs no
   code for this: the hatch's own refusal already exits 2.
+- `GET  …/credentials` (changed in core 512aa258) — owned rows then rows
+  shared with the caller (direct, group, install); every row carries
+  `is_shared`, `owner_email`, `access_level`, `share_source`, `via_groups`
+  (`[{id, name}]`), `allow_bundle_reuse_effective`. `user_workspace_id`
+  filters owned rows only. `PUT` / `DELETE …/credentials/{id}` on a shared row:
+  403 `not_owner`.
+- `GET  …/agents/{agent}/agent-api-connections` — `{data, count}`, rows
+  `{credential_id, name, slot, is_shared, owner_email, producer_agent_id,
+  producer_agent_name, base_url, spec_url, improvement_requests_url,
+  key_status, scopes, usable, unavailable_reason, sdk_lookup}`; URLs are
+  env-origin.
+- `GET  …/agent-api-connections/{cred}/spec` — raw spec JSON.
+- `POST …/agent-api-connections/{cred}/capability-requests` (201,
+  developer-only) / `GET` (`{data, count}`, ≤ 50, the caller's own) — public
+  request `{id, title, status, resolution_note, created_at,
+  status_changed_at, spec_version_seen}`.
+- Codes on these routes: `not_found` (404), `connection_unusable` (409);
+  spec: `spec_not_exposed` (403), `api_disabled` (400), `producer_error` (502),
+  `env_unavailable` (503); file: `too_large` (413), `invalid_request` (400),
+  `invalid_capability_request` (422, with `errors` and `expected`),
+  `rate_limited` (429, `Retry-After`). A non-developer filing gets a plain 403.
 - `POST …/connect/agent-api` — mint the producer token + attach to the consumer
   as a credential.
 - `POST …/connect/mcp` — the agent2agent MCP wiring (sibling).
@@ -277,3 +363,13 @@ synced workspace, harvested by the platform): `workspace/agent_api/*.py`
   is a usage error. (`tests/test_agent_api_access.py`)
 - **`--json` / `--data` mutual exclusion** in `run_api`; `--data @file` strips a
   leading `@`. (`src/cinna/account.py:run_api()`)
+- **Consumer verbs never print a token.** `list_agent_api_connections` drops
+  `token` and the runner drops it again before `--json`
+  (`tests/test_agent_api_connections.py:test_connections_list_json_has_no_token`).
+- **A name shared by several connections is refused, not guessed**
+  (`tests/test_agent_api_connections.py:test_spec_ambiguous_name_refuses_with_ids`).
+- **The 422 explains itself.** Human output lists each error and every
+  expected field; `--json` carries `errors` and `expected`
+  (`tests/test_agent_api_connections.py:test_client_422_keeps_errors_and_expected`).
+- **Caller and owner text is never markup**
+  (`tests/test_agent_api_connections.py:test_request_list_prints_owner_notes_verbatim`).

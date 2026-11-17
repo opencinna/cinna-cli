@@ -10,6 +10,11 @@ loop to build, verify, and wire those connections from the account workspace:
 **one-click wiring** of a consumer to it; and `cinna api` is a separate
 **escape hatch** for calling the platform's *own* control-plane API directly.
 
+On the **consumer** side, `cinna agent-api connections` shows what one agent
+can call (its linked connections, yours or shared with you by their owner) and
+reads a producer's spec through one, and `cinna agent-api request` files and
+reads **capability requests** — "this API lacks what I need" — through it.
+
 These three command surfaces live in the same area but solve different
 problems — keep them apart in your head (see "Three things named 'api'" below).
 
@@ -97,6 +102,33 @@ to test a producer endpoint — use `cinna agent-api call`.
   reminds you the credential rides B's normal credential sync into its env (it
   appears read-only under `workspace/credentials/` in a synced workspace) —
   no manual key handling.
+
+### Use a connection from the consumer side
+1. `cinna agent-api connections <consumer>` lists every `agent_api` credential
+   linked to the consumer: name, producer, key status (and, when the
+   environment would get no working key, `not usable: <reason>` with the fix),
+   scopes, **SDK lookup** — what a script passes to
+   `credentials.agent_api_session(...)`: the slot, else the credential id — and
+   who it is from (yours, or shared by its owner's email). Below the table,
+   each connection's `base_url`, `spec_url` and `improvement_requests_url`,
+   labelled as what the agent's **environment** calls. `--json` is core's
+   listing.
+2. `cinna agent-api connections spec <consumer> <connection>` prints the
+   producer's OpenAPI spec as this consumer sees it (the document the
+   environment gets from `spec_url`); `-o FILE` saves it and names the API
+   version to quote.
+3. The consumer needs something the API lacks: draft a capability request
+   (title, need, optionally a proposed endpoint and example request/response,
+   the spec version read), **show the user, file only after they confirm**:
+   `cinna agent-api request file <consumer> <connection> --title … --need …`
+   (or `--body-json FILE|-`). Core files it with the connection on the server;
+   the producer's owner sees it in `cinna improve list --kind api` with the
+   consumer as "via".
+4. `cinna agent-api request list <consumer> <connection>` shows the user's own
+   requests on that producer, newest first, with status and the owner's note;
+   a `completed` one means the API changed — re-read the spec.
+- `<connection>` is the credential id (or a unique prefix of at least 6
+  characters), its slot, or its exact name among the consumer's connections.
 
 ### Give API access (a person, or a local agent)
 - `cinna agent-api access list <producer>` shows who has access: one row per
@@ -216,6 +248,33 @@ to test a producer endpoint — use `cinna agent-api call`.
   connection is created; it scopes the *consumer's* access, not the producer's
   surface.
 
+- **Shared connections are usable, not changeable.** An `agent_api` credential
+  its owner shared (directly, by group, or with an install) appears in the
+  recipient's `cinna account credentials list` under *Shared with you*; once
+  attached to one of their agents with `share-with-agent` it is a connection
+  like any other — listed, its spec readable, requests filed through it — but
+  only the owner can rename, re-slot or delete it (`not_owner`).
+- **No key ever crosses the consumer verbs.** Core sends metadata only and
+  files a capability request with the linked connection server-side; the
+  client drops a stray `token` field anyway. The listed URLs are the
+  environment's (locally `http://backend:8000/…`, not reachable from the
+  host): the CLI never calls them and the per-agent `CLAUDE.md` never embeds
+  them (they go stale) — it tells the building agent to run the listing.
+- **Filing is a person-confirmed action.** The CLI files what it is given;
+  the instructions (account and per-agent `CLAUDE.md`, the command's help) say
+  to show the user the draft first. A capability request is attributed exactly
+  as one filed from the environment: caller = the user, consumer = the agent,
+  same validation, size and rate limits.
+- **A bad body is explained, not just refused.** Core rejects unknown keys
+  (`invalid_capability_request`); the CLI prints each error and the expected
+  shape of every field, and keeps both (`errors`, `expected`) in `--json`.
+  `rate_limited` carries `retry_after_s`; `too_large`, `connection_unusable`,
+  `spec_not_exposed`, `api_disabled`, `producer_error`, `env_unavailable` and
+  `not_found` pass through with core's code and sentence. Filing needs the
+  developer role.
+- **Caller-written text is data.** Titles, needs and the owner's notes print
+  verbatim (never read as Rich markup).
+
 ## Architecture overview
 
 ```
@@ -249,6 +308,16 @@ wiring (consumer):
         ▼
   rides B's credential sync ─► B's remote env ─► B calls A over plain HTTP
 
+consumer side (one agent's connections):
+  cinna agent-api connections <agent> [spec <connection>]
+  cinna agent-api request file|list <agent> <connection>
+        │  account token
+        ▼
+  /api/v1/cli/account/agents/{agent}/agent-api-connections[/{cred}/spec|/capability-requests]
+        │ core resolves the linked connection; files with it server-side
+        ▼
+  producer's spec / capability request ─► owner's `cinna improve list --kind api`
+
 platform escape hatch (unrelated target):
   cinna api <METHOD> <path> ─► /api/v1/cli/account/api-proxy ─► platform API
 ```
@@ -271,11 +340,17 @@ platform escape hatch (unrelated target):
   treats a revoked, expired or paused key as not usable. See
   [account_workspace](../account_workspace/account_workspace.md).
 - **Local agent import** — `cinna agent import` never drafts an `agent_api`
-  credential (it could never be used); it attaches an existing same-name one or
-  prints the `access issue` / `connect agent-api` command. See
+  credential (it could never be used); it attaches an existing one — same name,
+  else one carrying the declared slot, owned before shared — or prints the
+  `access issue` / `connect agent-api` command. See
   [local_agent_import](../local_agent_import/local_agent_import.md).
 - **`cinna agent show`** — surfaces a producer's live `agent_api_status`
-  alongside its prompts and credentials, reusing the same status renderer.
+  alongside its prompts and credentials, reusing the same status renderer, and
+  a short *Agent API connections* section (one line per connection: producer,
+  SDK lookup, key status, owner when shared).
+- **Improvement requests** — a capability request filed here is what the
+  producer's owner works in `cinna improve` (kind `api`). See
+  [improvement_requests](../improvement_requests/improvement_requests.md).
 
 Implementation: see [agent_api_tech.md](agent_api_tech.md). Real-usage e2e test
 scenarios: see [agent_api_acceptance.md](agent_api_acceptance.md).

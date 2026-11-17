@@ -166,10 +166,25 @@ each with its own token, registry entry, and Mutagen session.
   it is the column that answers "which credential fills this skill's slot". The
   hint under the table names `cinna account credentials update <id> --service-uri
   <slot>`. `--json` prints the raw listing.
+- The listing has two sections: **Your credentials**, and **Shared with you** —
+  credentials another user shared directly, through a group, or with a bundle /
+  skill install — with Owner (their email), Via (`direct`, the install kind,
+  `group <name>`) and Access (the share's level). `--owned` / `--shared` show one
+  section; `--workspace` filters only your own rows (a shared one belongs to no
+  workspace of yours). In `--json` every row carries `is_shared` — the ownership
+  fact; `category` is the web tab — plus `owner_email`, `access_level`,
+  `share_source`, `via_groups` and `allow_bundle_reuse_effective`.
 - `cinna account credentials update <id>` edits metadata (name/notes/service-uri/
   sharing), never a secret. `cinna account credentials share-with-agent <id>
-  --agent <ref>` attaches an existing credential. `cinna account credentials
-  delete <id>` removes it (and unlinks it from agents).
+  --agent <ref>` attaches an existing credential — yours or one shared with you.
+  `cinna account credentials delete <id>` removes it (and unlinks it from
+  agents). A shared credential is the owner's: `update` and `delete` refuse it
+  with the platform's `not_owner` sentence naming the owner.
+- `agent show`, `skills list` readiness and `agent import` read slots, status
+  and ownership from this same listing, so a shared credential linked to an
+  agent shows its real slot and `shared by <owner>` instead of an unknown slot.
+  An `agent_api` credential linked to an agent is an *agent API connection*:
+  see the consumer side in [agent_api](../agent_api/agent_api.md).
 
 ### Keep context fresh
 - `cinna account status` shows the account root, platform/frontend URLs, machine

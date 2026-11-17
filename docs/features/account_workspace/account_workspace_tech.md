@@ -73,9 +73,13 @@ Each verb → its handler in `src/cinna/main.py` → the body in
 - `cinna account user-workspace clear` →
   `src/cinna/main.py:account_user_workspace_clear()` →
   `src/cinna/account.py:run_user_workspace_clear()`
-- `cinna account credentials list` →
+- `cinna account credentials list [--owned|--shared]` →
   `src/cinna/main.py:account_credentials_list()` →
-  `src/cinna/account.py:run_credentials_list()`
+  `src/cinna/account.py:run_credentials_list()` (sections split on
+  `is_shared`; `src/cinna/account.py:_credential_via_cell()` renders Via;
+  update/delete refusals on shared rows arrive as `CodedRefusal` `not_owner`
+  because `update_credential` / `delete_credential` read coded bodies; tests
+  in `tests/test_agent_api_connections.py`)
 - `cinna account credentials types` →
   `src/cinna/main.py:account_credentials_types()` →
   `src/cinna/account.py:run_credentials_types()`
