@@ -1483,18 +1483,28 @@ def connect():
 @click.option(
     "--read-only", is_flag=True, help="Restrict the consumer to read-only API access"
 )
+@click.option(
+    "--scopes",
+    default=None,
+    metavar="A,B",
+    help="Scopes the connection carries (from the producer's policy); anyone "
+    "calling through it gets them on top of their own grant.",
+)
 def connect_agent_api(
-    producer_ref: str, consumer_ref: str, label: str | None, read_only: bool
+    producer_ref: str, consumer_ref: str, label: str | None, read_only: bool, scopes: str | None
 ):
     """Connect CONSUMER to PRODUCER's REST API.
 
     Mints a producer API token and attaches it to the consumer as a
     credential. The credential rides the consumer's normal credential sync
-    into its remote environment — no manual key handling.
+    into its remote environment — no manual key handling. Change the
+    connection's scopes later with `cinna agent-api connections scopes`.
     """
-    from cinna.account import run_connect_agent_api
+    from cinna.account import _parse_scope_list, run_connect_agent_api
 
-    run_connect_agent_api(producer_ref, consumer_ref, label, read_only)
+    run_connect_agent_api(
+        producer_ref, consumer_ref, label, read_only, scopes=_parse_scope_list(scopes)
+    )
 
 
 @connect.command(name="mcp")
@@ -1829,6 +1839,39 @@ def agent_api_connections_spec(agent_ref: str, connection_ref: str, output: str 
     from cinna.agent_api_connections import run_connection_spec
 
     run_connection_spec(agent_ref, connection_ref, output)
+
+
+@agent_api_connections.command(name="scopes")
+@click.argument("producer_ref", metavar="PRODUCER")
+@click.argument("credential_id", metavar="CONNECTION_ID")
+@click.option("--set", "set_scopes", default=None, metavar="A,B", help="Set the connection's scopes to exactly this list.")
+@click.option("--clear", is_flag=True, help="Remove every connection scope.")
+@click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
+def agent_api_connections_scopes(
+    producer_ref: str, credential_id: str, set_scopes: str | None, clear: bool, as_json: bool
+):
+    """Set (or --clear) the scopes a connection to PRODUCER carries.
+
+    Producer owner only. Everyone calling through the connection (your own
+    agents, people and agents it is shared with) gets these scopes on top of
+    their own grant, from the next call on. Values must be scopes PRODUCER's
+    policy declares (unknown_scope lists them). CONNECTION_ID is the
+    connection's credential id.
+
+    \b
+      cinna agent-api connections scopes btc-rate-api <cred-id> --set btc.read
+      cinna agent-api connections scopes btc-rate-api <cred-id> --clear
+    """
+    if (set_scopes is None) == (not clear):
+        raise click.UsageError("Pass exactly one of --set a,b or --clear.")
+    _access_json_mode(as_json)
+    from cinna.account import _parse_scope_list
+    from cinna.agent_api_connections import run_connection_scopes
+
+    scopes = [] if clear else _parse_scope_list(set_scopes) or []
+    if not clear and not scopes:
+        raise click.UsageError("--set needs at least one scope (use --clear to remove them).")
+    run_connection_scopes(producer_ref, credential_id, scopes, as_json=as_json)
 
 
 @agent_api.group(name="request")

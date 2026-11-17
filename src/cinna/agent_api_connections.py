@@ -113,6 +113,21 @@ def _status_cell(row: dict) -> str:
     return cell
 
 
+def _scopes_cell(row: dict) -> str:
+    """Effective scopes; the ones the connection carries are marked."""
+    from_conn = {str(s) for s in row.get("connection_scopes") or []}
+    parts = []
+    for scope in row.get("scopes") or []:
+        label = _esc(scope)
+        if str(scope) in from_conn:
+            label += " [dim](connection)[/dim]"
+        parts.append(label)
+    if not parts and from_conn and not row.get("usable"):
+        # Unusable: no effective scopes, but say what the connection carries.
+        return "[dim]— (connection: " + _esc(", ".join(sorted(from_conn))) + ")[/dim]"
+    return ", ".join(parts) or "—"
+
+
 def _from_cell(row: dict) -> str:
     if row.get("is_shared"):
         return f"shared by {_esc(row.get('owner_email') or '?')}"
@@ -167,7 +182,7 @@ def run_connections_list(agent_ref: str, as_json: bool = False) -> None:
             _esc(r.get("producer_agent_name") or r.get("producer_agent_id") or "?"),
             _status_cell(r),
             _esc(r.get("sdk_lookup") or "?"),
-            _esc(", ".join(str(s) for s in r.get("scopes") or []) or "—"),
+            _scopes_cell(r),
             _from_cell(r),
         ]
         if show_id:
@@ -202,6 +217,11 @@ def run_connections_list(agent_ref: str, as_json: bool = False) -> None:
         "Shared connections are the owner's: you can use them, not change them.[/dim]"
     )
     console.console.print(
+        "[dim]Scopes = your own grant plus the connection's (marked). A 403 \"requires "
+        "the '<scope>' scope\" means the producer's owner must add it to the "
+        "connection (cinna agent-api connections scopes) or grant it to you.[/dim]"
+    )
+    console.console.print(
         "[dim]Spec:     "
         + _esc(f"cinna agent-api connections spec {agent_q} {first.get('credential_id')}")
         + "[/dim]"
@@ -213,6 +233,36 @@ def run_connections_list(agent_ref: str, as_json: bool = False) -> None:
             "--title … --need …  (after the user confirms the draft)"
         )
         + "[/dim]"
+    )
+
+
+# ── connections scopes (producer owner) ─────────────────────────────────────
+
+
+def run_connection_scopes(
+    producer_ref: str, credential_id: str, scopes: list[str], as_json: bool = False
+) -> None:
+    """`cinna agent-api connections scopes <producer> <cred> --set … | --clear`."""
+    account_cfg = load_account_config(find_account_root())
+    with AccountClient(account_cfg) as client:
+        producer = _resolve_agent(client, producer_ref)
+        with console.spinner("Updating connection scopes..."):
+            result = drop_token(
+                client.set_connection_scopes(producer["id"], credential_id, scopes)
+            )
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+    now = result.get("scopes") or []
+    console.status(
+        f"Connection {_esc(result.get('credential_id') or credential_id)} to "
+        f"{_esc(producer.get('name'))}: "
+        + (f"scopes {_esc(', '.join(now))}" if now else "no connection scopes")
+    )
+    console.console.print(
+        "[dim]Applies to everyone calling through this connection from the next call, "
+        "on top of their own grant.[/dim]"
     )
 
 

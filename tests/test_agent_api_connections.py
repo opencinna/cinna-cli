@@ -659,3 +659,113 @@ def test_connections_table_shows_the_id_when_a_lookup_is_a_slot(runner, conn_cli
     assert result.exit_code == 0, out(result)
     assert "Credential ID" in out(result)
     assert CRED_ID in out(result)
+
+
+# --- phase 2: a connection carries scopes ---
+
+
+def test_connections_mark_scopes_from_the_connection(runner, conn_client):
+    conn_client.list_agent_api_connections.return_value = {
+        "data": [connection(scopes=["orders.read", "btc.read"], connection_scopes=["btc.read"])],
+        "count": 1,
+    }
+    result = runner.invoke(cli, ["agent-api", "connections", "Hello Testing Agent"])
+    assert result.exit_code == 0, out(result)
+    text = out(result)
+    assert "btc.read (connection)" in text
+    assert "orders.read (connection)" not in text
+    assert "requires the '<scope>' scope" in text
+
+
+def test_connections_unusable_row_still_names_connection_scopes(runner, conn_client):
+    conn_client.list_agent_api_connections.return_value = {
+        "data": [connection(scopes=[], connection_scopes=["btc.read"], usable=False,
+                            unavailable_reason="key_revoked")],
+        "count": 1,
+    }
+    result = runner.invoke(cli, ["agent-api", "connections", "Hello Testing Agent"])
+    assert result.exit_code == 0, out(result)
+    assert "connection: btc.read" in out(result)
+
+
+def test_connections_json_passes_connection_scopes_through(runner, conn_client):
+    row = connection(connection_scopes=["btc.read"])
+    conn_client.list_agent_api_connections.return_value = {"data": [row], "count": 1}
+    result = runner.invoke(cli, ["agent-api", "connections", "Hello Testing Agent", "--json"])
+    assert json.loads(result.output)["data"][0]["connection_scopes"] == ["btc.read"]
+
+
+def test_connect_agent_api_passes_scopes(runner, acct_client):
+    acct_client.list_account_agents.return_value = {"data": [
+        {"id": "p1", "name": "BTC Rate API"}, {"id": AGENT_ID, "name": "Hello Testing Agent"},
+    ]}
+    acct_client.connect_agent_api.return_value = {"credential_id": "c1", "scopes": ["btc.read"]}
+    result = runner.invoke(cli, [
+        "connect", "agent-api", "--producer", "BTC Rate API",
+        "--consumer", "Hello Testing Agent", "--scopes", "btc.read",
+    ])
+    assert result.exit_code == 0, out(result)
+    assert acct_client.connect_agent_api.call_args.kwargs["scopes"] == ["btc.read"]
+    assert "Connection scopes: btc.read" in out(result)
+
+
+def test_connect_agent_api_unknown_scope_prints_the_declared_list(runner, acct_client):
+    acct_client.list_account_agents.return_value = {"data": [
+        {"id": "p1", "name": "BTC Rate API"}, {"id": AGENT_ID, "name": "Hello Testing Agent"},
+    ]}
+    message = "Unknown scope(s) for BTC Rate API: nope. Declared: btc.read"
+    acct_client.connect_agent_api.side_effect = CodedRefusal(400, "unknown_scope", message)
+    result = runner.invoke(cli, [
+        "connect", "agent-api", "--producer", "BTC Rate API",
+        "--consumer", "Hello Testing Agent", "--scopes", "nope",
+    ])
+    assert result.exit_code == 1
+    assert message in out(result)
+
+
+@respx.mock
+def test_client_connect_agent_api_sends_scopes_and_reads_coded_refusals(account_cfg):
+    route = respx.post("https://platform.example.com/api/v1/cli/account/connect/agent-api").respond(
+        400, json={"detail": {"code": "unknown_scope", "message": "Unknown scope(s): x. Declared: a"}}
+    )
+    with AccountClient(account_cfg) as client:
+        with pytest.raises(CodedRefusal) as exc:
+            client.connect_agent_api("p1", "c1", scopes=["x"])
+    assert exc.value.code == "unknown_scope"
+    assert json.loads(route.calls.last.request.content)["scopes"] == ["x"]
+
+
+@respx.mock
+def test_client_set_connection_scopes_goes_through_the_proxy(account_cfg):
+    route = respx.post("https://platform.example.com/api/v1/cli/account/api-proxy").respond(
+        200, json={"credential_id": "c1", "scopes": []}, headers={"X-Cinna-Proxied": "1"},
+    )
+    with AccountClient(account_cfg) as client:
+        assert client.set_connection_scopes("p1", "c1", [])["scopes"] == []
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["method"] == "PUT"
+    assert sent["path"] == "agents/p1/agent-api/connections/c1/scopes"
+    assert sent["json_body"] == {"scopes": []}
+
+
+@pytest.mark.parametrize("args, sent", [(["--set", "btc.read,x"], ["btc.read", "x"]), (["--clear"], [])])
+def test_connections_scopes_verb(runner, conn_client, args, sent):
+    conn_client.set_connection_scopes.return_value = {"credential_id": CRED_ID, "scopes": sent}
+    result = runner.invoke(cli, ["agent-api", "connections", "scopes", "Hello Testing Agent", CRED_ID, *args])
+    assert result.exit_code == 0, out(result)
+    conn_client.set_connection_scopes.assert_called_once_with(AGENT_ID, CRED_ID, sent)
+    assert ("no connection scopes" in out(result)) == (sent == [])
+
+
+@pytest.mark.parametrize("args", [[], ["--set", "a", "--clear"], ["--set", ","]])
+def test_connections_scopes_needs_exactly_one_of_set_or_clear(runner, conn_client, args):
+    result = runner.invoke(cli, ["agent-api", "connections", "scopes", "Hello Testing Agent", CRED_ID, *args])
+    assert result.exit_code == 2
+    conn_client.set_connection_scopes.assert_not_called()
+
+
+def test_connections_scopes_not_owner_json(runner, conn_client):
+    conn_client.set_connection_scopes.side_effect = CodedRefusal(403, "not_owner", "Only the owner.")
+    result = runner.invoke(cli, ["agent-api", "connections", "scopes", "Hello Testing Agent", CRED_ID, "--clear", "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.output.strip().splitlines()[-1])["code"] == "not_owner"

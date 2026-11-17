@@ -1626,6 +1626,7 @@ def test_connect_agent_api_happy(mock_client_cls, runner, account_root, monkeypa
         "agent-789",
         credential_label="crm-link",
         read_only_override=True,
+        scopes=None,
     )
     assert "cred-1" in result.output
     assert "https://platform.example.com/api/agent-api/agent-123" in result.output

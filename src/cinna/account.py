@@ -1765,8 +1765,14 @@ def run_connect_agent_api(
     consumer_ref: str,
     label: str | None,
     read_only: bool,
+    scopes: list[str] | None = None,
 ) -> None:
-    """Wire consumer → producer REST API — `cinna connect agent-api`."""
+    """Wire consumer → producer REST API — `cinna connect agent-api`.
+
+    ``scopes`` become the connection's own scopes (``--scopes a,b``); an
+    unknown one is refused by core with ``unknown_scope`` naming the
+    producer's declared scopes.
+    """
     account_root = find_account_root()
     account_cfg = load_account_config(account_root)
 
@@ -1782,10 +1788,15 @@ def run_connect_agent_api(
                 consumer["id"],
                 credential_label=label,
                 read_only_override=read_only,
+                scopes=scopes or None,
             )
 
     console.status(
         f"Connected: {consumer['name']} → {producer['name']} (REST API)"
+    )
+    granted = result.get("scopes", scopes) if isinstance(result, dict) else scopes
+    console.console.print(
+        f"  Connection scopes: {_esc(', '.join(granted)) if granted else '[dim]none[/dim]'}"
     )
     console.console.print(f"  Credential:    {result.get('credential_id', '?')}")
     console.console.print(f"  Token prefix:  {result.get('token_prefix', '?')}")

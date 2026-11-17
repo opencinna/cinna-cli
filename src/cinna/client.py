@@ -530,8 +530,16 @@ class AccountClient:
         consumer_agent_id: str,
         credential_label: str | None = None,
         read_only_override: bool = False,
+        scopes: list[str] | None = None,
     ) -> dict:
-        """POST /api/v1/cli/account/connect/agent-api — one-click REST wire."""
+        """POST /api/v1/cli/account/connect/agent-api — one-click REST wire.
+
+        ``scopes`` are the connection's own scopes: anyone calling through it
+        gets them on top of their own grant. Refusals are coded
+        (``unknown_scope`` names the producer's declared scopes,
+        ``not_a_connection``, ``not_owner``, ``not_found``,
+        ``producer_removed``).
+        """
         body: dict = {
             "producer_agent_id": producer_agent_id,
             "consumer_agent_id": consumer_agent_id,
@@ -540,8 +548,26 @@ class AccountClient:
             body["credential_label"] = credential_label
         if read_only_override:
             body["read_only_override"] = True
+        if scopes:
+            body["scopes"] = list(scopes)
         response = self._client.post("/api/v1/cli/account/connect/agent-api", json=body)
-        return self._handle_response(response).json()
+        return drop_token(self._handle_response(response, coded=True).json())
+
+    def set_connection_scopes(
+        self, producer_agent_id: str, credential_id: str, scopes: list[str]
+    ) -> dict:
+        """PUT agents/{producer}/agent-api/connections/{cred}/scopes (via the
+        account api-proxy) — set a connection's scopes; ``[]`` clears them.
+
+        Producer owner only (``not_owner``); unknown values → ``unknown_scope``.
+        Answers ``{credential_id, producer_agent_id, token_id, scopes}``.
+        """
+        return self._proxy_json(
+            "PUT",
+            f"agents/{producer_agent_id}/agent-api/connections/{credential_id}/scopes",
+            json_body={"scopes": list(scopes)},
+            coded=True,
+        )
 
     def list_discoverable_mcp(self, consumer_agent_id: str | None = None) -> dict:
         """GET /api/v1/cli/account/connect/mcp/discoverable — a2a connector picker."""
